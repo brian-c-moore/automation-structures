@@ -21,7 +21,7 @@ name = "automation_structures"
 path = "src/lib.rs"
 
 [dependencies]
-vstd = "=0.0.0-2026-05-24-0157"
+vstd = "=0.0.0-2026-08-23-0033"
 
 [package.metadata.verus]
 verify = true
