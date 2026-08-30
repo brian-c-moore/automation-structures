@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, Rust ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            toolchain: 1.95.0
+          - os: ubuntu-latest
+            toolchain: stable
+          - os: windows-latest
+            toolchain: stable
+          - os: macos-latest
+            toolchain: stable
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
+      - name: Test all Cargo targets
+        run: cargo +${{ matrix.toolchain }} test --locked --all-targets --all-features
+      - name: Test documentation
+        run: cargo +${{ matrix.toolchain }} test --locked --doc --all-features
+      - name: Exercise the public catalog
+        run: cargo +${{ matrix.toolchain }} run --locked --example catalog
+
+  quality:
+    name: Formatting, Clippy, and documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
+      - name: Check formatting
+        run: cargo +1.95.0 fmt --all -- --check
+      - name: Run Clippy
+        run: cargo +1.95.0 clippy --locked --all-targets --all-features -- -D warnings
+      - name: Build strict documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +1.95.0 doc --locked --no-deps --all-features
+
+  package:
+    name: Verify crates.io package
+    needs: [quality, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Build and verify the publication archive
+        run: cargo +1.95.0 package --locked

@@ -1,0 +1,55 @@
+name: Formal verification
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "verification/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/formal-verification.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "verification/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/formal-verification.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verus:
+    name: Verify Rust contracts with Verus
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Download the pinned Verus release
+        shell: bash
+        run: |
+          curl --fail --location --proto '=https' --retry 3 --show-error \
+            --output "$RUNNER_TEMP/verus.zip" \
+            'https://github.com/verus-lang/verus/releases/download/release%2F0.2026.05.24.ecee80a/verus-0.2026.05.24.ecee80a-x86-linux.zip'
+          echo '323a44c0d787ce9a788665e1c6922360c44a72d1b9696359ec4f7bf5fbbc63e6  '"$RUNNER_TEMP/verus.zip" \
+            | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/verus.zip" -d "$RUNNER_TEMP/verus"
+          chmod 0555 \
+            "$RUNNER_TEMP/verus/verus-x86-linux/verus" \
+            "$RUNNER_TEMP/verus/verus-x86-linux/cargo-verus" \
+            "$RUNNER_TEMP/verus/verus-x86-linux/rust_verify" \
+            "$RUNNER_TEMP/verus/verus-x86-linux/z3" \
+            "$RUNNER_TEMP/verus/verus-x86-linux/verus-root"
+      - name: Verify the complete crate
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/verus/verus-x86-linux/verus" \
+            src/verification.rs \
+            --crate-type=lib \
+            --triggers-mode silent \
+            --multiple-errors 24
