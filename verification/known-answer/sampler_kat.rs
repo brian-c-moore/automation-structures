@@ -33,7 +33,7 @@ fn main() {
     );
     all_ok &= check(
         "selected weight remains framed",
-        singleton.distribution[0],
+        singleton.weight(0),
         5,
     );
 
@@ -53,14 +53,16 @@ fn main() {
         live.draw_weighted(0, 2),
         true,
     );
-    all_ok &= check("first exact selection", live.selected.clone(), vec![0]);
+    all_ok &= check("first exact selection", live.contains_exec(0), true);
+    all_ok &= check("first selection count", live.budget.allocated, 1);
     all_ok &= check("unselected support can be zeroed", live.zero(2), true);
     all_ok &= check(
         "zero commits exact distribution change",
-        live.distribution.clone(),
+        vec![live.weight(0), live.weight(1), live.weight(2)],
         vec![3, 0, 0],
     );
-    all_ok &= check("zero frames selected set", live.selected.clone(), vec![0]);
+    all_ok &= check("zero frames selected item", live.contains_exec(0), true);
+    all_ok &= check("zero frames selected count", live.budget.allocated, 1);
     all_ok &= check(
         "removed support cannot be drawn",
         live.draw_uniform(2),
@@ -69,7 +71,7 @@ fn main() {
     all_ok &= check("invalid zero index rejected", live.zero(3), false);
     all_ok &= check(
         "invalid zero frames distribution",
-        live.distribution.clone(),
+        vec![live.weight(0), live.weight(1), live.weight(2)],
         vec![3, 0, 0],
     );
 
@@ -86,7 +88,7 @@ fn main() {
     );
     all_ok &= check(
         "all-zero policy keeps selected empty",
-        all_zero.selected.len(),
+        all_zero.budget.allocated,
         0,
     );
 

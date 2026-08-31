@@ -1,0 +1,16 @@
+[package]
+name = "automation-structures-downstream-verus"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+automation-structures = { path = "../..", features = ["proof-api"] }
+vstd = "=0.0.0-2026-05-24-0157"
+
+[package.metadata.verus]
+verify = true

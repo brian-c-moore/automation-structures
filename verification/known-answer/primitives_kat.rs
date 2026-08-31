@@ -170,50 +170,49 @@ fn main() {
         15,
     );
 
-    // Reduction (machine): the TLA+ Reduction machine (Reducer) -- Partition +
-    // Aggregate maintained step by step by process() (TLA+ Process). Each step
-    // moves one value from remaining to processed and folds it into result.
+    // Reduction (machine): AuditSink's log is the exact consumed prefix;
+    // its last_hash carry is the additive result and its length is position.
     let mut red = Reducer::new(vec![10u64, 20, 30]);
-    all_ok &= check("Reduction Reducer new: result 0", red.result, 0);
+    all_ok &= check("Reduction Reducer new: result 0", red.result(), 0);
     all_ok &= check(
         "Reduction Reducer new: remaining len 3",
-        red.remaining.len(),
+        red.remaining_len(),
         3,
     );
     all_ok &= check(
         "Reduction Reducer new: processed empty",
-        red.processed.len(),
+        red.position(),
         0,
     );
     red.process(); // fold 10
-    all_ok &= check("Reduction Reducer step 1: result 10", red.result, 10);
+    all_ok &= check("Reduction Reducer step 1: result 10", red.result(), 10);
     all_ok &= check(
         "Reduction Reducer step 1: processed len 1",
-        red.processed.len(),
+        red.position(),
         1,
     );
     all_ok &= check(
         "Reduction Reducer step 1: remaining len 2 (partition: 1+2==3)",
-        red.remaining.len(),
+        red.remaining_len(),
         2,
     );
     red.process(); // fold 20
-    all_ok &= check("Reduction Reducer step 2: result 30", red.result, 30);
+    all_ok &= check("Reduction Reducer step 2: result 30", red.result(), 30);
     red.process(); // fold 30
     all_ok &= check(
         "Reduction Reducer drained: result 60 (aggregate == fold)",
-        red.result,
+        red.result(),
         60,
     );
     all_ok &= check("Reduction Reducer drained: done", red.done(), true);
     all_ok &= check(
         "Reduction Reducer drained: processed len 3 (partition: 3+0==3)",
-        red.processed.len(),
+        red.position(),
         3,
     );
 
     // ResourceRegistry ResourceRegistry: unique key->value mapping (TLA+ Register/Deregister).
-    let mut reg: ResourceRegistry = ResourceRegistry::new();
+    let mut reg: ResourceRegistry<u64, u64> = ResourceRegistry::new();
     all_ok &= check(
         "ResourceRegistry new registry: lookup(3) absent",
         reg.lookup(3),
@@ -260,28 +259,28 @@ fn main() {
     let mut te = TraversalEngine::new(4, 0, 6);
     all_ok &= check(
         "TraversalEngine TraversalEngine new: budget 6",
-        te.budget_remaining,
+        te.budget_remaining(),
         6,
     );
     all_ok &= check(
         "TraversalEngine TraversalEngine new: queue = {root}",
-        te.queue[0],
+        te.queue.values[0],
         0,
     );
     te.visit_node(0); // visit root: accept, spend NodeCost 2, enqueue {1,2,3}
     all_ok &= check(
         "TraversalEngine after visit root: budget 4",
-        te.budget_remaining,
+        te.budget_remaining(),
         4,
     );
     all_ok &= check(
         "TraversalEngine after visit root: root accepted",
-        te.accepted[0],
+        te.accepted.accumulated[0],
         0,
     );
     all_ok &= check(
         "TraversalEngine after visit root: visited len 1",
-        te.visited.len(),
+        te.visited_count(),
         1,
     );
     te.visit_node(1); // visit enqueued child: accept (cost 2 <= 4)
@@ -302,7 +301,7 @@ fn main() {
     te.visit_node(2); // visit enqueued child: accept (cost 2 <= 2), budget -> 0
     all_ok &= check(
         "TraversalEngine after visit node 2: budget 0",
-        te.budget_remaining,
+        te.budget_remaining(),
         0,
     );
     all_ok &= check(
@@ -313,7 +312,7 @@ fn main() {
     te.visit_node(3); // visit last enqueued child: budget exhausted (2 > 0) -- SKIP
     all_ok &= check(
         "TraversalEngine after visit node 3 (budget exhausted): visited len 4",
-        te.visited.len(),
+        te.visited_count(),
         4,
     );
     all_ok &= check(
@@ -365,8 +364,8 @@ fn main() {
     let mut bx = Bisection::new(0, 16, 5, 16, 4);
     all_ok &= check("Bisection Bisection new: lo 0", bx.lo, 0);
     all_ok &= check("Bisection Bisection new: hi 16", bx.hi, 16);
-    all_ok &= check("Bisection Bisection new: max probes 4", bx.max_probes, 4);
-    all_ok &= check("Bisection Bisection new: probes 0", bx.probes_taken, 0);
+    all_ok &= check("Bisection Bisection new: max probes 4", bx.budget.capacity, 4);
+    all_ok &= check("Bisection Bisection new: probes 0", bx.budget.allocated, 0);
     all_ok &= check(
         "Bisection Bisection new: threshold bracketed",
         bx.lo <= bx.threshold && bx.threshold <= bx.hi,
@@ -374,7 +373,7 @@ fn main() {
     );
     bx.probe(); // mid = 8 >= 5 -> hi' = 8 (width 16 halved to 8)
     all_ok &= check("Bisection Bisection probe 1: hi 8 (halved)", bx.hi, 8);
-    all_ok &= check("Bisection Bisection probe 1: probes 1", bx.probes_taken, 1);
+    all_ok &= check("Bisection Bisection probe 1: probes 1", bx.budget.allocated, 1);
     all_ok &= check(
         "Bisection Bisection probe 1: threshold still bracketed",
         bx.lo <= bx.threshold && bx.threshold <= bx.hi,
@@ -383,7 +382,7 @@ fn main() {
     bx.probe(); // mid = 4 < 5 -> lo' = 5 (interval 0..8 -> 5..8)
     all_ok &= check("Bisection Bisection probe 2: lo 5", bx.lo, 5);
     all_ok &= check("Bisection Bisection probe 2: hi 8 (width 3)", bx.hi, 8);
-    all_ok &= check("Bisection Bisection probe 2: probes 2", bx.probes_taken, 2);
+    all_ok &= check("Bisection Bisection probe 2: probes 2", bx.budget.allocated, 2);
     let mut by = Bisection::new(0, 16, 5, 16, 4);
     by.bisect(); // (0,16) -> (0,8) -> (5,8) -> (5,6): converged
     all_ok &= check(
@@ -398,7 +397,7 @@ fn main() {
     );
     all_ok &= check(
         "Bisection Bisection bisect: within MaxProbes",
-        by.probes_taken <= by.max_probes,
+        by.budget.allocated <= by.budget.capacity,
         true,
     );
     // Exact edge: threshold 1 over a 32-wide domain consumes all five allowed
@@ -412,29 +411,29 @@ fn main() {
     );
     all_ok &= check(
         "Bisection Bisection exact budget: probes == MaxProbes",
-        bz.probes_taken,
-        bz.max_probes,
+        bz.budget.allocated,
+        bz.budget.capacity,
     );
 
     // Sampler Sampler: bounded support-preserving selection (TLA+ BoundedSample +
     // SupportConsistency). distribution over 4 items (item 1 has zero
     // probability), sample_size 2.
     let mut smp = Sampler::new(vec![3u64, 0, 5, 2], 2);
-    all_ok &= check("Sampler Sampler new: num_items", smp.num_items, 4);
-    all_ok &= check("Sampler Sampler new: selected empty", smp.selected.len(), 0);
+    all_ok &= check("Sampler Sampler new: num_items", smp.actuation.num_seats, 4);
+    all_ok &= check("Sampler Sampler new: selected empty", smp.budget.allocated, 0);
     smp.sample(0); // distribution[0] = 3 > 0 (in support)
-    all_ok &= check("Sampler sample(0): selected len 1", smp.selected.len(), 1);
-    all_ok &= check("Sampler sample(0): selected[0] == 0", smp.selected[0], 0);
+    all_ok &= check("Sampler sample(0): selected len 1", smp.budget.allocated, 1);
+    all_ok &= check("Sampler sample(0): item 0 selected", smp.contains_exec(0), true);
     smp.sample(2); // distribution[2] = 5 > 0
     all_ok &= check(
         "Sampler sample(2): selected len 2 (BoundedSample == SampleSize)",
-        smp.selected.len(),
+        smp.budget.allocated,
         2,
     );
     all_ok &= check(
-        "Sampler sample(2): selected[1] == 2 (support > 0)",
-        smp.selected[1],
-        2,
+        "Sampler sample(2): item 2 selected (support > 0)",
+        smp.contains_exec(2),
+        true,
     );
     all_ok &= check(
         "Sampler Sampler: item 1 (zero prob) never selected",
@@ -502,20 +501,20 @@ fn main() {
     // costs=[3,4,5,1,2]): accept 0(3),1(4); skip 2 (cost 5 > rem 3); accept
     // 3(1),4(2) -> total=10, rem=0, |accepted|=4.
     let a1 = capture(10, 5, &[0u64, 1, 2, 3, 4], &[3u64, 4, 5, 1, 2]);
-    all_ok &= check("AllocSnap capture(10,..).total_cost", a1.total_cost, 10);
+    all_ok &= check("AllocSnap capture(10,..).total_cost", a1.budget.allocated, 10);
     all_ok &= check(
         "AllocSnap capture(10,..).budget_remaining",
-        a1.budget_remaining,
+        a1.budget.capacity - a1.budget.allocated,
         0,
     );
     all_ok &= check(
         "AllocSnap capture(10,..).accepted.len()",
-        a1.accepted.len(),
+        a1.registry.entries.len(),
         4,
     );
     all_ok &= check(
         "AllocSnap capture(10,..) BudgetConsistency",
-        a1.total_cost + a1.budget_remaining,
+        a1.budget.allocated + (a1.budget.capacity - a1.budget.allocated),
         10,
     );
 
@@ -524,15 +523,15 @@ fn main() {
     //   accept 0; skip 0 (dup); accept 1; skip 5 (>= num_nodes); accept 2
     //   -> total=15, rem=5, |accepted|=3.
     let a2 = capture(20, 3, &[0u64, 0, 1, 5, 2], &[5u64, 5, 5, 5, 5]);
-    all_ok &= check("AllocSnap capture(dup/oob).total_cost", a2.total_cost, 15);
+    all_ok &= check("AllocSnap capture(dup/oob).total_cost", a2.budget.allocated, 15);
     all_ok &= check(
         "AllocSnap capture(dup/oob).budget_remaining",
-        a2.budget_remaining,
+        a2.budget.capacity - a2.budget.allocated,
         5,
     );
     all_ok &= check(
         "AllocSnap capture(dup/oob).accepted.len()",
-        a2.accepted.len(),
+        a2.registry.entries.len(),
         3,
     );
 
@@ -540,42 +539,42 @@ fn main() {
     // nodes=[0,1,2], costs=[10,2,2]): skip 0 (10 > 5); accept 1(2),2(2)
     //   -> total=4, rem=1, |accepted|=2.
     let a3 = capture(5, 10, &[0u64, 1, 2], &[10u64, 2, 2]);
-    all_ok &= check("AllocSnap capture(exhaust).total_cost", a3.total_cost, 4);
+    all_ok &= check("AllocSnap capture(exhaust).total_cost", a3.budget.allocated, 4);
     all_ok &= check(
         "AllocSnap capture(exhaust).budget_remaining",
-        a3.budget_remaining,
+        a3.budget.capacity - a3.budget.allocated,
         1,
     );
     all_ok &= check(
         "AllocSnap capture(exhaust).accepted.len()",
-        a3.accepted.len(),
+        a3.registry.entries.len(),
         2,
     );
 
     // Init (new) then direct AcceptNode steps: new(100,3); accept 0(30), 2(50)
     //   -> total=80, rem=20, |accepted|=2.
     let mut a4 = AllocationSnapshot::new(100, 3);
-    all_ok &= check("AllocSnap new(100,3).total_cost", a4.total_cost, 0);
+    all_ok &= check("AllocSnap new(100,3).total_cost", a4.budget.allocated, 0);
     all_ok &= check(
         "AllocSnap new(100,3).budget_remaining",
-        a4.budget_remaining,
+        a4.budget.capacity - a4.budget.allocated,
         100,
     );
     a4.accept_node(0, 30);
     a4.accept_node(2, 50);
     all_ok &= check(
         "AllocSnap after accept 30,50: total_cost",
-        a4.total_cost,
+        a4.budget.allocated,
         80,
     );
     all_ok &= check(
         "AllocSnap after accept 30,50: budget_remaining",
-        a4.budget_remaining,
+        a4.budget.capacity - a4.budget.allocated,
         20,
     );
     all_ok &= check(
         "AllocSnap after accept 30,50: accepted.len()",
-        a4.accepted.len(),
+        a4.registry.entries.len(),
         2,
     );
 
@@ -760,28 +759,28 @@ fn main() {
     );
 
     // FederatedBudget: master pool (cap 6) federated into 2 sub-pools.
-    // CapacityConservation: master_allocated == sub_capacities[0] + sub_capacities[1].
+    // CapacityConservation: master allocation equals delegated sub-pool capacity.
     let mut fb = FederatedBudget::new(6, 2);
     all_ok &= check(
         "FedBudget new(6,2): master_allocated",
-        fb.master_allocated,
+        fb.master.allocated,
         0,
     );
     all_ok &= check(
         "FedBudget new(6,2): sub_capacities[0]",
-        fb.sub_capacities[0],
+        fb.sub_pools[0].allocated + fb.sub_pools[0].reserved,
         0,
     );
     let f1 = fb.allocate_sub_pool(0, 4); // master 0+4 <= 6
     all_ok &= check("FedBudget allocate_sub_pool(0,4) accepted", f1, true);
     all_ok &= check(
         "FedBudget after alloc(0,4): master_allocated",
-        fb.master_allocated,
+        fb.master.allocated,
         4,
     );
     all_ok &= check(
         "FedBudget after alloc(0,4): sub_capacities[0]",
-        fb.sub_capacities[0],
+        fb.sub_pools[0].allocated + fb.sub_pools[0].reserved,
         4,
     );
     let f2 = fb.allocate_sub_pool(1, 3); // master 4+3 = 7 > 6 -> reject
@@ -792,32 +791,36 @@ fn main() {
     );
     all_ok &= check(
         "FedBudget after reject: master_allocated unchanged",
-        fb.master_allocated,
+        fb.master.allocated,
         4,
     );
     let f3 = fb.allocate_sub_pool(1, 2); // master 4+2 = 6 <= 6
     all_ok &= check("FedBudget allocate_sub_pool(1,2) accepted", f3, true);
     all_ok &= check(
         "FedBudget after alloc(1,2): master_allocated",
-        fb.master_allocated,
+        fb.master.allocated,
         6,
     );
     all_ok &= check(
         "FedBudget after alloc(1,2): sub_capacities[1]",
-        fb.sub_capacities[1],
+        fb.sub_pools[1].allocated + fb.sub_pools[1].reserved,
         2,
     );
     // CapacityConservation spot-check.
     all_ok &= check(
         "FedBudget consistency master==sum(caps)",
-        fb.master_allocated == fb.sub_capacities[0] + fb.sub_capacities[1],
+        fb.master.allocated
+            == fb.sub_pools[0].allocated
+                + fb.sub_pools[0].reserved
+                + fb.sub_pools[1].allocated
+                + fb.sub_pools[1].reserved,
         true,
     );
     let g1 = fb.allocate_from_sub_pool(0, 3); // sub_alloc[0] 0+3 <= cap 4
     all_ok &= check("FedBudget allocate_from_sub_pool(0,3) accepted", g1, true);
     all_ok &= check(
         "FedBudget after from(0,3): sub_allocated[0]",
-        fb.sub_allocated[0],
+        fb.sub_pools[0].allocated,
         3,
     );
     let g2 = fb.allocate_from_sub_pool(0, 2); // 3+2 = 5 > cap 4 -> reject
@@ -828,59 +831,48 @@ fn main() {
     );
     all_ok &= check(
         "FedBudget after from reject: sub_allocated[0] unchanged",
-        fb.sub_allocated[0],
+        fb.sub_pools[0].allocated,
         3,
     );
     fb.release_from_sub_pool(0, 1); // sub_alloc[0] 3 -> 2
     all_ok &= check(
         "FedBudget after release(0,1): sub_allocated[0]",
-        fb.sub_allocated[0],
+        fb.sub_pools[0].allocated,
         2,
     );
 
-    // RelationshipGraph: weighted graph with a consistent adjacency view.
-    // Build edges 0->1(w2), 1->2(w1), 0->2(w0), then remove 0->1; both the edge
-    // list and the adjacency view must drop exactly the (0,1) pair.
+    // RelationshipGraph: weighted graph with adjacency projected from the
+    // ResourceRegistry owner. Remove 0->1 and retain the other pairs.
     let mut g = RelationshipGraph::new(3, 2);
-    all_ok &= check("RelGraph new(3,2): edges empty", g.edges.len(), 0);
-    all_ok &= check("RelGraph new(3,2): adjacency empty", g.adjacency.len(), 0);
+    all_ok &= check("RelGraph new(3,2): edges empty", g.registry.entries.len(), 0);
+    all_ok &= check("RelGraph new(3,2): pair 0->1 absent", g.contains_pair(0, 1), false);
     g.add_edge(0, 1, 2);
-    all_ok &= check("RelGraph after add(0,1,2): edges.len()", g.edges.len(), 1);
+    all_ok &= check("RelGraph after add(0,1,2): edges.len()", g.registry.entries.len(), 1);
     all_ok &= check(
-        "RelGraph after add(0,1,2): adjacency[0]",
-        g.adjacency[0],
-        (0, 1),
+        "RelGraph after add(0,1,2): pair present",
+        g.contains_pair(0, 1),
+        true,
     );
-    all_ok &= check("RelGraph after add(0,1,2): edges[0]", g.edges[0], (0, 1, 2));
+    all_ok &= check("RelGraph after add(0,1,2): exact edge present", g.contains_exact_edge(0, 1, 2), true);
     g.add_edge(1, 2, 1);
     g.add_edge(0, 2, 0);
-    all_ok &= check("RelGraph after 3 adds: edges.len()", g.edges.len(), 3);
+    all_ok &= check("RelGraph after 3 adds: edges.len()", g.registry.entries.len(), 3);
+    g.remove_edge(0, 1);
+    all_ok &= check("RelGraph after remove(0,1): edges.len()", g.registry.entries.len(), 2);
     all_ok &= check(
-        "RelGraph after 3 adds: adjacency.len()",
-        g.adjacency.len(),
-        3,
-    );
-    g.remove_edge(0, 1); // drops (0,1) from both lists
-    all_ok &= check("RelGraph after remove(0,1): edges.len()", g.edges.len(), 2);
-    all_ok &= check(
-        "RelGraph after remove(0,1): adjacency.len()",
-        g.adjacency.len(),
-        2,
+        "RelGraph after remove(0,1): removed pair absent",
+        g.contains_pair(0, 1),
+        false,
     );
     all_ok &= check(
-        "RelGraph after remove(0,1): adjacency[0] now (1,2)",
-        g.adjacency[0],
-        (1, 2),
+        "RelGraph after remove(0,1): pair 1->2 retained",
+        g.contains_pair(1, 2),
+        true,
     );
     all_ok &= check(
-        "RelGraph after remove(0,1): adjacency[1] now (0,2)",
-        g.adjacency[1],
-        (0, 2),
-    );
-    all_ok &= check(
-        "RelGraph after remove(0,1): edges[0] now (1,2,1)",
-        g.edges[0],
-        (1, 2, 1),
+        "RelGraph after remove(0,1): exact edge 0->2 retained",
+        g.contains_exact_edge(0, 2, 0),
+        true,
     );
 
     // PropagationPassGraph: one path-graph round with snapshot isolation.
@@ -1213,7 +1205,7 @@ fn main() {
         false,
     );
 
-    // BacktrackingTraversalUndo: paired do/undo over the canonical modulo-3
+    // BacktrackingTraversalUndo: paired do/undo over the modulo-3
     // mutation instance. Different deltas make aux independent of depth.
     let mut bt = BacktrackingTraversal::new(2, 3, 0);
     all_ok &= check("Backtrack new: aux == 0", bt.aux, 0);
@@ -1254,9 +1246,9 @@ fn main() {
     // guarded change epoch and atomic pending->notified move. Each vector rules
     // out a named wrong-but-plausible construction.
     // Values {0,1,2}, Listeners {l0,l1}.
-    let mut sig = Signal::new(0, 3, 2);
-    all_ok &= check("Signal new: current_value 0", sig.current_value, 0);
-    all_ok &= check("Signal new: no change observed", sig.change_observed, false);
+    let mut sig = Signal::new(0, 3, 2, 2);
+    all_ok &= check("Signal new: current_value 0", sig.current_value(), 0);
+    all_ok &= check("Signal new: no change observed", sig.has_changes(), false);
     all_ok &= check("Signal new: l0 not pending", sig.is_pending(0), false);
     all_ok &= check("Signal new: l1 not pending", sig.is_pending(1), false);
     all_ok &= check("Signal new: l0 not notified", sig.is_notified(0), false);
@@ -1266,19 +1258,16 @@ fn main() {
     // l1), notified' = {}. Checking BOTH listeners rules out a
     // partial-pending construction that skips listener 0 (index off-by-one
     // starting at 1) or stops one short of the last listener.
-    all_ok &= check(
-        "Signal set_value(1): fires (guard 1 /= 0)",
-        sig.set_value(1),
-        true,
-    );
+    all_ok &= check("Signal set_value(1): enabled (guard 1 /= 0)", sig.can_set_value(1), true);
+    sig.set_value(1);
     all_ok &= check(
         "Signal after set_value(1): current_value 1",
-        sig.current_value,
+        sig.current_value(),
         1,
     );
     all_ok &= check(
         "Signal after set_value(1): change observed",
-        sig.change_observed,
+        sig.has_changes(),
         true,
     );
     all_ok &= check(
@@ -1321,15 +1310,11 @@ fn main() {
     );
 
     // SetValue(1) again -- SAME value: the change-detection filter must
-    // reject (returns false) and the state must be UNCHANGED. Rules out the
+    // disable the action and the state must remain unchanged. Rules out the
     // filter-drop construction (the exact SignalFromAuditSink_NEG break: a
     // Signal that fires on a non-change) -- that construction would refill
     // pending (l0 back to pending) and reset notified (l0 dropped).
-    all_ok &= check(
-        "Signal set_value(1) same value: filter rejects",
-        sig.set_value(1),
-        false,
-    );
+    all_ok &= check("Signal set_value(1) same value: filter disables action", sig.can_set_value(1), false);
     all_ok &= check(
         "Signal after rejected set: l0 still not pending (unchanged)",
         sig.is_pending(0),
@@ -1347,7 +1332,7 @@ fn main() {
     );
     all_ok &= check(
         "Signal after rejected set: change provenance retained",
-        sig.change_observed,
+        sig.has_changes(),
         true,
     );
 
@@ -1369,11 +1354,8 @@ fn main() {
     // keeps notified) -- that construction would leave l0/l1 in notified
     // while pending refills: the pending ∩ notified /= {} state that
     // PendingNotifiedDisjointness forbids.
-    all_ok &= check(
-        "Signal set_value(2): fires (guard 2 /= 1)",
-        sig.set_value(2),
-        true,
-    );
+    all_ok &= check("Signal set_value(2): enabled (guard 2 /= 1)", sig.can_set_value(2), true);
+    sig.set_value(2);
     all_ok &= check(
         "Signal after set_value(2): l0 notified reset",
         sig.is_notified(0),
@@ -1399,7 +1381,7 @@ fn main() {
     // (MaxPerWindow=3, WindowDuration=5, MaxClock=12). Each vector rules out a
     // named wrong-but-plausible construction.
     let mut rl = RateLimit::new(3, 5, 12);
-    all_ok &= check("RateLimit new: count 0", rl.count, 0);
+    all_ok &= check("RateLimit new: count 0", rl.budget.allocated, 0);
     all_ok &= check("RateLimit new: window_start 0", rl.window_start, 0);
     all_ok &= check("RateLimit new: clock 0", rl.clock, 0);
 
@@ -1414,7 +1396,7 @@ fn main() {
         rl.try_acquire(),
         true,
     );
-    all_ok &= check("RateLimit after 3 acquires: count 3", rl.count, 3);
+    all_ok &= check("RateLimit after 3 acquires: count 3", rl.budget.allocated, 3);
     all_ok &= check(
         "RateLimit acquire 4: REJECTED at ceiling",
         rl.try_acquire(),
@@ -1422,7 +1404,7 @@ fn main() {
     );
     all_ok &= check(
         "RateLimit after rejected acquire: count still 3",
-        rl.count,
+        rl.budget.allocated,
         3,
     );
     all_ok &= check(
@@ -1451,7 +1433,7 @@ fn main() {
     );
     all_ok &= check(
         "RateLimit after rollover: count 1 (fresh window, not 4)",
-        rl.count,
+        rl.budget.allocated,
         1,
     );
     all_ok &= check(
@@ -1476,7 +1458,7 @@ fn main() {
         rl.try_acquire(),
         false,
     );
-    all_ok &= check("RateLimit fresh window at ceiling: count 3", rl.count, 3);
+    all_ok &= check("RateLimit fresh window at ceiling: count 3", rl.budget.allocated, 3);
 
     // Advance to clock 9: elapsed 9-5 = 4 < WindowDuration 5 -- the window is
     // NOT yet expired, so an acquire at the ceiling must still be rejected.
@@ -1492,7 +1474,7 @@ fn main() {
         rl.try_acquire(),
         false,
     );
-    all_ok &= check("RateLimit no early rollover: count still 3", rl.count, 3);
+    all_ok &= check("RateLimit no early rollover: count still 3", rl.budget.allocated, 3);
     all_ok &= check(
         "RateLimit no early rollover: window_start still 5",
         rl.window_start,
@@ -1506,7 +1488,7 @@ fn main() {
         rl.try_acquire(),
         true,
     );
-    all_ok &= check("RateLimit second rollover: count 1", rl.count, 1);
+    all_ok &= check("RateLimit second rollover: count 1", rl.budget.allocated, 1);
     all_ok &= check(
         "RateLimit second rollover: window_start 10",
         rl.window_start,
@@ -1514,11 +1496,9 @@ fn main() {
     );
 
     // ── SelectThenActuate composition-theorem witness:
-    // argmax selection (Evaluate) coupled with actuation (Actuate) over a
-    // shared allocation, plus the interaction step UpdateScore that nulls the
-    // allocation AND retracts actuated in ONE step. Each vector rules out a
-    // named wrong-but-plausible construction; the interaction-step vector covers
-    // the stale-winner race. Seats {s0,s1}, Candidates {c0,c1,c2}.
+    // argmax selection coupled with the ActuationPass allocation,
+    // effect, and closure lifecycle. UpdateScore may revise only an unapplied
+    // seat. Seats {s0,s1}, Candidates {c0,c1,c2}.
     let mut sta = SelectThenActuate::new(2, 3);
     all_ok &= check(
         "SelectThenActuate new: seat 0 allocation NULL",
@@ -1559,87 +1539,73 @@ fn main() {
     sta.evaluate(0);
     all_ok &= check(
         "SelectThenActuate evaluate(0): winner candidate 2 (argmax, not first/min)",
-        sta.allocation[0],
-        Some(2u64),
+        sta.allocation_at(0),
+        Some(2usize),
     );
     sta.evaluate(1);
     all_ok &= check(
         "SelectThenActuate evaluate(1): winner candidate 0 (argmax)",
-        sta.allocation[1],
-        Some(0u64),
+        sta.allocation_at(1),
+        Some(0usize),
     );
 
-    // Actuate both seats (allocation Some, not yet actuated -- both guards hold).
+    // Revise seat 0 before effect application. UpdateScore delegates the live
+    // winner invalidation to ActuationPass.Deallocate, while the selection
+    // owner changes its score and clears its winner.
+    all_ok &= check(
+        "SelectThenActuate pending seat accepts score revision",
+        sta.can_update_score(0, 1),
+        true,
+    );
+    sta.update_score(0, 1, 9);
+    all_ok &= check(
+        "SelectThenActuate score revision deallocates pending winner",
+        sta.is_allocated(0),
+        false,
+    );
+    all_ok &= check(
+        "SelectThenActuate score revision records the new score",
+        sta.score_at(0, 1),
+        9,
+    );
+    all_ok &= check(
+        "SelectThenActuate score revision frames seat 1 allocation",
+        sta.allocation_at(1),
+        Some(0usize),
+    );
+
+    // Re-evaluation reads the selection owner and allocates its new
+    // winner through ActuationPass.
+    sta.evaluate(0);
+    all_ok &= check(
+        "SelectThenActuate re-evaluate(0): new winner candidate 1 (score 9)",
+        sta.allocation_at(0),
+        Some(1usize),
+    );
+
+    // Applied effects remain owned by ActuationPass until closure. Score
+    // updates are disabled rather than pretending to retract an external effect.
     sta.actuate(0);
+    sta.actuate(1);
     all_ok &= check(
         "SelectThenActuate actuate(0): seat 0 actuated",
         sta.is_actuated(0),
         true,
     );
     all_ok &= check(
-        "SelectThenActuate actuate(0): ActuationScope -- seat 0 allocation still Some",
-        sta.is_allocated(0),
-        true,
-    );
-    sta.actuate(1);
-    all_ok &= check(
-        "SelectThenActuate actuate(1): seat 1 actuated",
-        sta.is_actuated(1),
-        true,
-    );
-
-    // Interaction step: update a score on the ALREADY-ACTUATED
-    // seat 0. One step must (a) retract seat 0 from actuated and (b) null its
-    // allocation. Rules out the stale-winner construction that updates scores
-    // and nulls the allocation but KEEPS actuated -- that construction would
-    // leave seat 0 with actuated == true while allocation == NULL, the exact
-    // ActuationScope violation.
-    sta.update_score(0, 1, 9);
-    all_ok &= check(
-        "SelectThenActuate interaction: seat 0 actuated RETRACTED (rules out keeps-actuated)",
-        sta.is_actuated(0),
+        "SelectThenActuate applied seat rejects score revision",
+        sta.can_update_score(0, 1),
         false,
     );
     all_ok &= check(
-        "SelectThenActuate interaction: seat 0 allocation NULL",
-        sta.allocation[0],
-        None,
-    );
-    all_ok &= check(
-        "SelectThenActuate interaction: seat 0 score updated to 9",
-        sta.score_at(0, 1),
-        9,
-    );
-    // FRAME: the seat-0 update must not disturb seat 1 (a wrong update that
-    // clobbers other seats would fail here).
-    all_ok &= check(
-        "SelectThenActuate frame: seat 1 still actuated",
-        sta.is_actuated(1),
+        "SelectThenActuate all allocated seats applied: finish enabled",
+        sta.can_finish(),
         true,
     );
+    sta.finish();
     all_ok &= check(
-        "SelectThenActuate frame: seat 1 allocation unchanged (candidate 0)",
-        sta.allocation[1],
-        Some(0u64),
-    );
-
-    // Re-evaluate seat 0 after the score change: scores[0] is now [5,9,8], so
-    // candidate 1 is the new argmax (9 > 8 > 5). Confirms the re-selection
-    // tracks the updated scores rather than a stale winner.
-    sta.evaluate(0);
-    all_ok &= check(
-        "SelectThenActuate re-evaluate(0): new winner candidate 1 (score 9)",
-        sta.allocation[0],
-        Some(1u64),
-    );
-    // Actuating the freshly re-evaluated seat 0 is legal again (allocation Some,
-    // not actuated after the retraction).
-    all_ok &= check(
-        "SelectThenActuate re-actuate(0): guards hold after re-evaluate",
-        {
-            sta.actuate(0);
-            sta.is_actuated(0)
-        },
+        "SelectThenActuate finish closes ActuationPass",
+        sta.is_complete(),
         true,
     );
 
@@ -1651,22 +1617,22 @@ fn main() {
     let mut tbc = TraversalBudgetComposition::new(3, 0, 3);
     all_ok &= check(
         "TraversalBudgetComposition new: total_cost 0",
-        tbc.total_cost,
+        tbc.total_cost(),
         0,
     );
     all_ok &= check(
         "TraversalBudgetComposition new: budget_remaining 3",
-        tbc.budget_remaining,
+        tbc.budget_remaining(),
         3,
     );
     all_ok &= check(
         "TraversalBudgetComposition new: accepted empty",
-        tbc.accepted.len(),
+        tbc.traversal.accepted.len(),
         0,
     );
     all_ok &= check(
         "TraversalBudgetComposition new: visited empty",
-        tbc.visited.len(),
+        tbc.traversal.visited_count(),
         0,
     );
     all_ok &= check(
@@ -1682,22 +1648,22 @@ fn main() {
     tbc.visit_and_accept(0);
     all_ok &= check(
         "TraversalBudgetComposition after visit root: total_cost 2",
-        tbc.total_cost,
+        tbc.total_cost(),
         2,
     );
     all_ok &= check(
         "TraversalBudgetComposition after visit root: budget_remaining 1 (2+1==MaxBudget 3)",
-        tbc.budget_remaining,
+        tbc.budget_remaining(),
         1,
     );
     all_ok &= check(
         "TraversalBudgetComposition after visit root: accepted len 1",
-        tbc.accepted.len(),
+        tbc.traversal.accepted.len(),
         1,
     );
     all_ok &= check(
         "TraversalBudgetComposition after visit root: visited len 1",
-        tbc.visited.len(),
+        tbc.traversal.visited_count(),
         1,
     );
     all_ok &= check(
@@ -1726,16 +1692,16 @@ fn main() {
     tbc.skip_unaffordable(1);
     all_ok &= check(
         "TraversalBudgetComposition after skip_unaffordable(1): visited len 2",
-        tbc.visited.len(),
+        tbc.traversal.visited_count(),
         2,
     );
-    all_ok &= check("TraversalBudgetComposition after skip_unaffordable(1): accepted len STILL 1 (accepted proper subset)", tbc.accepted.len(), 1);
+    all_ok &= check("TraversalBudgetComposition after skip_unaffordable(1): accepted len STILL 1 (accepted proper subset)", tbc.traversal.accepted.len(), 1);
     all_ok &= check(
         "TraversalBudgetComposition after skip_unaffordable(1): total_cost STILL 2 (no deduction)",
-        tbc.total_cost,
+        tbc.total_cost(),
         2,
     );
-    all_ok &= check("TraversalBudgetComposition after skip_unaffordable(1): budget_remaining STILL 1 (no deduction)", tbc.budget_remaining, 1);
+    all_ok &= check("TraversalBudgetComposition after skip_unaffordable(1): budget_remaining STILL 1 (no deduction)", tbc.budget_remaining(), 1);
     all_ok &= check(
         "TraversalBudgetComposition after skip_unaffordable(1): child 1 removed",
         tbc.queue_contains(1),
@@ -1747,22 +1713,22 @@ fn main() {
     tbc.skip(2);
     all_ok &= check(
         "TraversalBudgetComposition after skip(2): accepted len 1 (frame)",
-        tbc.accepted.len(),
+        tbc.traversal.accepted.len(),
         1,
     );
     all_ok &= check(
         "TraversalBudgetComposition after skip(2): visited len 2 (frame)",
-        tbc.visited.len(),
+        tbc.traversal.visited_count(),
         2,
     );
     all_ok &= check(
         "TraversalBudgetComposition after skip(2): total_cost 2 (frame)",
-        tbc.total_cost,
+        tbc.total_cost(),
         2,
     );
     all_ok &= check(
         "TraversalBudgetComposition after skip(2): budget_remaining 1 (frame)",
-        tbc.budget_remaining,
+        tbc.budget_remaining(),
         1,
     );
     all_ok &= check(
@@ -1772,7 +1738,7 @@ fn main() {
     );
     all_ok &= check(
         "TraversalBudgetComposition after skip(2): queue empty",
-        tbc.queue.len(),
+        tbc.traversal.queue.len(),
         0,
     );
 

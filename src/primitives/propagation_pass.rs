@@ -12,11 +12,15 @@ use vstd::prelude::*;
 verus! {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Lifecycle state of a propagation round.
 pub enum Round {
+    /// No round is active.
     Idle,
+    /// Nodes are committing updates from the retained snapshot.
     Running,
 }
 
+/// Whether node `n` has an incoming neighbor with a smaller snapshot value.
 pub open spec fn has_better_in_neighbor(
     edges: Seq<(usize, usize)>,
     snapshot: Seq<u64>,
@@ -27,6 +31,7 @@ pub open spec fn has_better_in_neighbor(
         && snapshot[edges[i].0 as int] < snapshot[n as int]
 }
 
+/// Compute node `n`'s next value from the retained round snapshot.
 pub open spec fn local_combine(
     edges: Seq<(usize, usize)>,
     snapshot: Seq<u64>,
@@ -39,22 +44,34 @@ pub open spec fn local_combine(
     }
 }
 
+/// Snapshot-local bounded propagation owner.
 pub struct PropagationPass {
+    /// Number of graph nodes.
     pub num_nodes: usize,
+    /// Maximum completed propagation rounds.
     pub max_iterations: u64,
+    /// Inclusive ceiling of node values.
     pub max_value: u64,
+    /// Directed propagation edges.
     pub edges: Vec<(usize, usize)>,
+    /// Current node values.
     pub values: Vec<u64>,
+    /// Immutable values captured at round start.
     pub snapshot: Vec<u64>,
+    /// Per-node update markers for the active or latest round.
     pub updated: Vec<bool>,
+    /// Number of completed rounds.
     pub iteration: u64,
+    /// Whether the latest completed round changed any value.
     pub changed: bool,
+    /// Current round lifecycle.
     pub round: Round,
 }
 
 impl PropagationPass {
     // -- Specifications --------------------------------------------------
 
+    /// Whether graph, value, snapshot, and marker storage have valid shape and bounds.
     pub open spec fn type_invariant(&self) -> bool {
         &&& self.values.len() == self.num_nodes
         &&& self.snapshot.len() == self.num_nodes
@@ -68,18 +85,22 @@ impl PropagationPass {
                     && self.edges@[i].1 < self.num_nodes)
     }
 
+    /// Whether the completed-round count remains within its configured ceiling.
     pub open spec fn iteration_bound(&self) -> bool {
         self.iteration <= self.max_iterations
     }
 
+    /// Whether an active round has remaining iteration capacity.
     pub open spec fn round_bound(&self) -> bool {
         self.round == Round::Running ==> self.iteration < self.max_iterations
     }
 
+    /// Whether the active-round state retains its provisional changed marker.
     pub open spec fn running_changed(&self) -> bool {
         self.round == Round::Running ==> self.changed
     }
 
+    /// Whether every graph node has committed its update for the round.
     pub open spec fn all_updated(&self) -> bool {
         forall|i: int| 0 <= i < self.updated.len() ==> #[trigger] self.updated@[i]
     }
@@ -91,10 +112,12 @@ impl PropagationPass {
             ==> self.values@[i] as int == local_combine(self.edges@, self.snapshot@, i as usize)
     }
 
+    /// Whether an unchanged completed round preserved the full snapshot.
     pub open spec fn settled_ok(&self) -> bool {
         !self.changed ==> self.values@ == self.snapshot@ && self.all_updated()
     }
 
+    /// Whether all propagation-pass obligations hold.
     pub open spec fn inv(&self) -> bool {
         &&& self.type_invariant()
         &&& self.iteration_bound()
@@ -104,12 +127,14 @@ impl PropagationPass {
         &&& self.snapshot_locality()
     }
 
+    /// Whether execution settled or exhausted its admitted round count.
     pub open spec fn settled_or_iteration_limit(&self) -> bool {
         !self.changed || self.iteration == self.max_iterations
     }
 
     // -- Init ------------------------------------------------------------
 
+    /// Construct an idle pass over a valid graph and value assignment.
     pub fn new(
         num_nodes: usize,
         max_iterations: u64,
@@ -153,6 +178,7 @@ impl PropagationPass {
 
     // -- Executable queries ---------------------------------------------
 
+    /// Whether every node committed its update in the current round.
     pub fn all_nodes_updated(&self) -> (b: bool)
         requires self.type_invariant(),
         ensures b == self.all_updated(),

@@ -2,10 +2,34 @@
 
 All notable changes to this crate are documented here.
 
-## 0.1.1 - Prepublication Release
-- Dependabot dependency updates 
+## 0.2.0 - 2026-08-31
 
-## 0.1.0 - Unreleased
+- Replaces the invariant-breaking root `Buffer`, `Counter`, and `Marker` proof carriers with
+  checked, encapsulated facades. Proof carriers remain available through `proof-api`.
+- Exposes the carrier and relation modules through the opt-in `proof-api` feature for
+  verified downstream crates.
+- Aligns the Cargo `vstd` dependency with the checksum-pinned Verus release used by formal CI.
+- Adds a packaged-artifact Cargo consumer gate and an external Verus consumer gate.
+- Reconciles named compositions with their declared parts and imports the retained
+  catalog relations required by verified consumers.
+- Preserves the published `Accumulator` API while moving its state and transitions into the
+  connective owner.
+- Adds complete read-only observations and iterators without exposing mutable invariant-bearing
+  state.
+- Implements standard `Debug`, `Display`, and `Error` contracts across the public API and compiles
+  an example for every checked public structure.
+- Documents the complete checked and proof APIs, composition model, ownership map, feature model,
+  compatibility policy, and formal boundary.
+- Dual-licenses the crate under MIT OR Apache-2.0.
+- Makes the publication archive contents explicit and adds the reusable crate-quality policy.
+- Adds automated public API compatibility, dependency policy, archive-consumer, and documentation
+  gates.
+
+## 0.1.1 - 2026-08-31
+
+- Publishes the initial crate and applies the first dependency-automation updates.
+
+## 0.1.0 - 2026-08-30
 
 - Introduces the initial Automation Structure primitives, connective roles, named compositions,
   and execution carriers.

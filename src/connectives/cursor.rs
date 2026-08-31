@@ -21,6 +21,7 @@ pub proof fn regression_rejected(position: nat, head: nat)
 
 /// A retained position with owner-supplied movement obligations.
 pub struct Cursor {
+    /// Retained monotone position.
     pub position: usize,
 }
 

@@ -19,6 +19,7 @@ use vstd::prelude::*;
 
 verus! {
 
+/// Allocation-to-effect lifecycle owner.
 pub struct ActuationPass {
     /// |Seats|: the seat universe is the index range `0..num_seats`.
     pub num_seats: usize,
@@ -34,6 +35,7 @@ pub struct ActuationPass {
 impl ActuationPass {
     // -- State predicates -------------------------------------------------
 
+    /// Whether allocation and effect storage have the configured seat count.
     pub open spec fn type_invariant(&self) -> bool {
         &&& self.allocation.len() == self.num_seats
         &&& self.effects.len() == self.num_seats
@@ -70,6 +72,7 @@ impl ActuationPass {
         self.complete ==> self.ready_to_finish()
     }
 
+    /// Whether all allocation-to-effect lifecycle obligations hold.
     pub open spec fn invariant(&self) -> bool {
         &&& self.type_invariant()
         &&& self.effect_fidelity()
@@ -109,6 +112,7 @@ impl ActuationPass {
 
     // -- Executable admission predicates --------------------------------
 
+    /// Whether an in-range seat holds an allocation.
     pub fn is_allocated(&self, s: usize) -> (b: bool)
         requires
             s < self.allocation.len(),
@@ -121,6 +125,7 @@ impl ActuationPass {
         }
     }
 
+    /// Whether an in-range seat has committed its effect.
     pub fn is_actuated(&self, s: usize) -> (b: bool)
         requires
             s < self.effects.len(),
@@ -133,6 +138,7 @@ impl ActuationPass {
         }
     }
 
+    /// Whether allocation is enabled for a seat.
     pub fn can_allocate(&self, s: usize) -> (b: bool)
         requires
             self.type_invariant(),
@@ -143,6 +149,7 @@ impl ActuationPass {
         !self.complete && !self.is_allocated(s)
     }
 
+    /// Whether deallocation is enabled for a seat.
     pub fn can_deallocate(&self, s: usize) -> (b: bool)
         requires
             self.type_invariant(),
@@ -155,6 +162,7 @@ impl ActuationPass {
         !self.complete && self.is_allocated(s) && !self.is_actuated(s)
     }
 
+    /// Whether effect commitment is enabled for a seat.
     pub fn can_actuate(&self, s: usize) -> (b: bool)
         requires
             self.type_invariant(),
@@ -167,6 +175,7 @@ impl ActuationPass {
         !self.complete && !self.is_actuated(s) && self.is_allocated(s)
     }
 
+    /// Whether every allocation has a committed effect and closure is enabled.
     pub fn ready_to_finish_exec(&self) -> (b: bool)
         requires
             self.type_invariant(),

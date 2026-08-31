@@ -1,553 +1,583 @@
-// RelationshipGraph executable correspondence boundary.
+// RelationshipGraph assembled from the ResourceRegistry owner.
 //
-// RelationshipGraph is a weighted directed graph kept with a redundant
-// adjacency view that must stay consistent with the edge set. The TLA+ spec at
-// formal/structures/RelationshipGraph/RelationshipGraph.tla has two state variables — edges (a set of
-// <<src, dst, weight>> triples) and adjacency (Nodes -> SUBSET Nodes) — and
-// checks three invariants:
-//
-//   TypeInvariant        == edges ⊆ Nodes × Nodes × (0..MaxWeight)
-//                            /\ adjacency ∈ [Nodes -> SUBSET Nodes]
-//   AdjacencyConsistency == ∀ src: adjacency[src] =
-//                              {dst : ∃ w: <<src,dst,w>> ∈ edges}
-//   NoSelfLoops          == ∀ n: n ∉ adjacency[n]
-//
-// AdjacencyConsistency is an exact set equality between the independent
-// adjacency view and the edge-set projection: the TLA+ keeps both variables and
-// updates them in lockstep, so the invariant is maintained rather than
-// definitional. This module carries the same separation: `edges` is a weighted
-// edge list, carrying TypeInvariant's weight clause, and `adjacency` is an
-// independent (src, dst) pair list; AdjacencyConsistency is discharged as the
-// projection-equivalence has_pair(adjacency) <=> has_edge(edges) over every node
-// pair, under both actions (AddEdge, RemoveEdge). RemoveEdge drops every
-// (src,dst,*) edge, and its projection-preservation is the central proof
-// obligation.
-//
-// Nodes is the index universe 0..num_nodes-1 (usize ids).
+// The formal reduction stores each weighted edge as one ResourceRegistry key. The graph's
+// adjacency relation is the source/destination projection of those keys; it is not a second
+// mutable graph representation. AddEdge and RemoveEdge therefore mutate registry state only by
+// calling ResourceRegistry actions.
 
 use vstd::prelude::*;
 
+use crate::primitives::resource_registry::ResourceRegistry;
+
 verus! {
 
-/// has_edge over the first `n` entries: some edge among edges[0..n] goes s -> d.
-pub open spec fn has_edge(edges: Seq<(usize, usize, u64)>, n: int, s: usize, d: usize) -> bool {
-    exists|i: int| 0 <= i < n && edges[i].0 == s && edges[i].1 == d
-}
+/// `(source, destination, weight)` registry key.
+pub type EdgeKey = (usize, usize, u64);
+/// Registry entry used to retain an edge without a second payload.
+pub type EdgeBinding = (EdgeKey, ());
 
-/// Exact weighted-edge membership over a prefix.
-pub open spec fn has_exact_edge(
-    edges: Seq<(usize, usize, u64)>, n: int, s: usize, d: usize, w: u64,
+/// One weighted relationship is admitted by a RelationshipGraph universe.
+pub open spec fn edge_admitted(
+    num_nodes: usize,
+    max_weight: u64,
+    source: usize,
+    target: usize,
+    weight: u64,
 ) -> bool {
-    exists|i: int| 0 <= i < n && edges[i].0 == s && edges[i].1 == d && edges[i].2 == w
+    source < num_nodes && target < num_nodes && weight <= max_weight
 }
 
-/// has_pair over the first `n` entries: some pair among pairs[0..n] is (s, d).
-pub open spec fn has_pair(pairs: Seq<(usize, usize)>, n: int, s: usize, d: usize) -> bool {
-    exists|i: int| 0 <= i < n && pairs[i].0 == s && pairs[i].1 == d
+/// One adjacency relationship is admitted by a RelationshipGraph universe.
+pub open spec fn adjacency_admitted(
+    num_nodes: usize,
+    source: usize,
+    target: usize,
+) -> bool {
+    source < num_nodes && target < num_nodes
 }
 
-// ── projection-extension lemmas ─────────────────────────────────────────
-
-/// Extending the considered prefix by one edge: has_edge over [0..n+1] holds iff
-/// it held over [0..n] or the n-th edge itself goes s -> d.
-pub proof fn lemma_has_edge_extend(edges: Seq<(usize, usize, u64)>, n: int, s: usize, d: usize)
-    requires 0 <= n < edges.len(),
-    ensures
-        has_edge(edges, n + 1, s, d)
-            == (has_edge(edges, n, s, d) || (edges[n].0 == s && edges[n].1 == d)),
-{
-    if has_edge(edges, n + 1, s, d) {
-        let i = choose|i: int| 0 <= i < n + 1 && edges[i].0 == s && edges[i].1 == d;
-        assert(i < n || i == n);
-    }
-    if has_edge(edges, n, s, d) {
-        let i = choose|i: int| 0 <= i < n && edges[i].0 == s && edges[i].1 == d;
-        assert(0 <= i < n + 1 && edges[i].0 == s && edges[i].1 == d);
-    }
-    if edges[n].0 == s && edges[n].1 == d {
-        assert(0 <= n < n + 1 && edges[n].0 == s && edges[n].1 == d);
-    }
+/// One adjacency answer agrees with its weighted-edge source projection.
+pub open spec fn adjacency_consistent(
+    adjacency_present: bool,
+    edge_present: bool,
+) -> bool {
+    crate::connectives::projection::membership_consistent(
+        adjacency_present,
+        edge_present,
+    )
 }
 
-pub proof fn lemma_has_exact_edge_extend(
-    edges: Seq<(usize, usize, u64)>, n: int, s: usize, d: usize, w: u64,
+/// A present relationship is not reflexive.
+pub open spec fn edge_irreflexive(present: bool, source: usize, target: usize) -> bool {
+    present ==> source != target
+}
+
+/// Whether a registry prefix contains any weighted edge from `source` to `target`.
+pub open spec fn has_edge(
+    entries: Seq<EdgeBinding>,
+    n: int,
+    source: usize,
+    target: usize,
+) -> bool {
+    exists|index: int|
+        0 <= index < n
+            && entries[index].0.0 == source
+            && entries[index].0.1 == target
+}
+
+/// Exact weighted-edge membership in a registry prefix.
+pub open spec fn has_exact_edge(
+    entries: Seq<EdgeBinding>,
+    n: int,
+    source: usize,
+    target: usize,
+    weight: u64,
+) -> bool {
+    crate::primitives::resource_registry::has_pair(
+        entries,
+        n,
+        (source, target, weight),
+        (),
+    )
+}
+
+/// Extending the registry prefix exposes the new edge exactly once at the new position.
+pub proof fn lemma_has_edge_extend(
+    entries: Seq<EdgeBinding>,
+    n: int,
+    source: usize,
+    target: usize,
 )
-    requires 0 <= n < edges.len(),
-    ensures has_exact_edge(edges, n + 1, s, d, w)
-        == (has_exact_edge(edges, n, s, d, w)
-            || (edges[n].0 == s && edges[n].1 == d && edges[n].2 == w)),
+    requires 0 <= n < entries.len(),
+    ensures
+        has_edge(entries, n + 1, source, target)
+            == (has_edge(entries, n, source, target)
+                || (entries[n].0.0 == source && entries[n].0.1 == target)),
 {
-    if has_exact_edge(edges, n + 1, s, d, w) {
-        let i = choose|i: int| 0 <= i < n + 1 && edges[i].0 == s
-            && edges[i].1 == d && edges[i].2 == w;
-        assert(i < n || i == n);
+    if has_edge(entries, n + 1, source, target) {
+        let index = choose|index: int|
+            0 <= index < n + 1
+                && entries[index].0.0 == source
+                && entries[index].0.1 == target;
+        assert(index < n || index == n);
     }
-    if has_exact_edge(edges, n, s, d, w) {
-        let i = choose|i: int| 0 <= i < n && edges[i].0 == s
-            && edges[i].1 == d && edges[i].2 == w;
-        assert(0 <= i < n + 1);
+    if has_edge(entries, n, source, target) {
+        let index = choose|index: int|
+            0 <= index < n
+                && entries[index].0.0 == source
+                && entries[index].0.1 == target;
+        assert(0 <= index < n + 1);
     }
-    if edges[n].0 == s && edges[n].1 == d && edges[n].2 == w {
+    if entries[n].0.0 == source && entries[n].0.1 == target {
         assert(0 <= n < n + 1);
     }
 }
 
-/// has_pair analogue of lemma_has_edge_extend.
-pub proof fn lemma_has_pair_extend(pairs: Seq<(usize, usize)>, n: int, s: usize, d: usize)
-    requires 0 <= n < pairs.len(),
-    ensures
-        has_pair(pairs, n + 1, s, d)
-            == (has_pair(pairs, n, s, d) || (pairs[n].0 == s && pairs[n].1 == d)),
-{
-    if has_pair(pairs, n + 1, s, d) {
-        let i = choose|i: int| 0 <= i < n + 1 && pairs[i].0 == s && pairs[i].1 == d;
-        assert(i < n || i == n);
-    }
-    if has_pair(pairs, n, s, d) {
-        let i = choose|i: int| 0 <= i < n && pairs[i].0 == s && pairs[i].1 == d;
-        assert(0 <= i < n + 1 && pairs[i].0 == s && pairs[i].1 == d);
-    }
-    if pairs[n].0 == s && pairs[n].1 == d {
-        assert(0 <= n < n + 1 && pairs[n].0 == s && pairs[n].1 == d);
-    }
-}
-
-/// Pushing (a,b,w) makes has_edge at (s,d) hold iff it already held or
-/// (s,d) == (a,b).
-pub proof fn lemma_push_proj_edge(
-    edges: Seq<(usize, usize, u64)>, a: usize, b: usize, w: u64, s: usize, d: usize,
+/// Appending one registered edge extends adjacency by exactly its endpoint pair.
+pub proof fn lemma_push_has_edge(
+    entries: Seq<(EdgeKey, ())>,
+    added: EdgeKey,
+    source: usize,
+    target: usize,
 )
-    ensures
-        has_edge(edges.push((a, b, w)), edges.len() as int + 1, s, d)
-            == (has_edge(edges, edges.len() as int, s, d) || (s == a && d == b)),
+    ensures has_edge(entries.push((added, ())), entries.len() as int + 1, source, target)
+        == (has_edge(entries, entries.len() as int, source, target)
+            || (added.0 == source && added.1 == target)),
 {
-    let pushed = edges.push((a, b, w));
-    if has_edge(edges, edges.len() as int, s, d) {
-        let i = choose|i: int| 0 <= i < edges.len() && edges[i].0 == s && edges[i].1 == d;
-        assert(pushed[i] == edges[i]);
-    }
-    if s == a && d == b {
-        assert(pushed[edges.len() as int].0 == s && pushed[edges.len() as int].1 == d);
-    }
-    if has_edge(pushed, edges.len() as int + 1, s, d) {
-        let i = choose|i: int| 0 <= i < edges.len() as int + 1 && pushed[i].0 == s && pushed[i].1 == d;
-        if i < edges.len() {
-            assert(edges[i] == pushed[i]);
+    let pushed = entries.push((added, ()));
+    if has_edge(pushed, pushed.len() as int, source, target) {
+        let index = choose|index: int|
+            0 <= index < pushed.len()
+                && pushed[index].0.0 == source
+                && pushed[index].0.1 == target;
+        if index < entries.len() {
+            assert(pushed[index] == entries[index]);
+        } else {
+            assert(index == entries.len());
         }
     }
-}
-
-pub proof fn lemma_push_exact_edge(
-    edges: Seq<(usize, usize, u64)>, a: usize, b: usize, x: u64,
-    s: usize, d: usize, w: u64,
-)
-    ensures has_exact_edge(edges.push((a, b, x)), edges.len() as int + 1, s, d, w)
-        == (has_exact_edge(edges, edges.len() as int, s, d, w)
-            || (s == a && d == b && w == x)),
-{
-    let pushed = edges.push((a, b, x));
-    if has_exact_edge(edges, edges.len() as int, s, d, w) {
-        let i = choose|i: int| 0 <= i < edges.len() && edges[i].0 == s
-            && edges[i].1 == d && edges[i].2 == w;
-        assert(pushed[i] == edges[i]);
+    if has_edge(entries, entries.len() as int, source, target) {
+        let index = choose|index: int|
+            0 <= index < entries.len()
+                && entries[index].0.0 == source
+                && entries[index].0.1 == target;
+        assert(pushed[index] == entries[index]);
     }
-    if s == a && d == b && w == x {
-        assert(pushed[edges.len() as int] == (a, b, x));
-    }
-    if has_exact_edge(pushed, edges.len() as int + 1, s, d, w) {
-        let i = choose|i: int| 0 <= i < edges.len() as int + 1
-            && pushed[i].0 == s && pushed[i].1 == d && pushed[i].2 == w;
-        if i < edges.len() { assert(edges[i] == pushed[i]); }
+    if added.0 == source && added.1 == target {
+        assert(pushed[entries.len() as int].0 == added);
     }
 }
 
-/// Pushing (a,b) makes has_pair at (s,d) hold iff it already held or
-/// (s,d) == (a,b).
-pub proof fn lemma_push_proj_pair(
-    pairs: Seq<(usize, usize)>, a: usize, b: usize, s: usize, d: usize,
-)
-    ensures
-        has_pair(pairs.push((a, b)), pairs.len() as int + 1, s, d)
-            == (has_pair(pairs, pairs.len() as int, s, d) || (s == a && d == b)),
-{
-    let pushed = pairs.push((a, b));
-    if has_pair(pairs, pairs.len() as int, s, d) {
-        let i = choose|i: int| 0 <= i < pairs.len() && pairs[i].0 == s && pairs[i].1 == d;
-        assert(pushed[i] == pairs[i]);
-    }
-    if s == a && d == b {
-        assert(pushed[pairs.len() as int].0 == s && pushed[pairs.len() as int].1 == d);
-    }
-    if has_pair(pushed, pairs.len() as int + 1, s, d) {
-        let i = choose|i: int| 0 <= i < pairs.len() as int + 1 && pushed[i].0 == s && pushed[i].1 == d;
-        if i < pairs.len() {
-            assert(pairs[i] == pushed[i]);
-        }
-    }
-}
-
-/// A weighted directed graph with a consistent adjacency view.
+/// A weighted directed graph whose only mutable edge owner is ResourceRegistry.
 pub struct RelationshipGraph {
+    /// Number of nodes in the fixed universe.
     pub num_nodes: usize,
+    /// Inclusive edge-weight ceiling.
     pub max_weight: u64,
-    /// The edge set as a weighted list of (src, dst, weight).
-    pub edges: Vec<(usize, usize, u64)>,
-    /// The adjacency relation as an independent list of (src, dst) pairs.
-    pub adjacency: Vec<(usize, usize)>,
+    /// Owner of exact weighted edges.
+    pub registry: ResourceRegistry<EdgeKey, ()>,
 }
 
 impl RelationshipGraph {
-    // ── Specifications ──────────────────────────────────────────────────
-
-    /// `has_edge` over the whole edge list.
-    pub open spec fn edge_proj(&self, s: usize, d: usize) -> bool {
-        has_edge(self.edges@, self.edges@.len() as int, s, d)
+    /// Whether any registered weighted edge connects `source` to `target`.
+    pub open spec fn edge_proj(&self, source: usize, target: usize) -> bool {
+        has_edge(
+            self.registry.entries@,
+            self.registry.entries@.len() as int,
+            source,
+            target,
+        )
     }
 
-    pub open spec fn exact_edge(&self, s: usize, d: usize, w: u64) -> bool {
-        has_exact_edge(self.edges@, self.edges@.len() as int, s, d, w)
+    /// Whether the exact weighted edge is registered.
+    pub open spec fn exact_edge(&self, source: usize, target: usize, weight: u64) -> bool {
+        self.registry.maps_to((source, target, weight), ())
     }
 
-    /// `has_pair` over the whole adjacency list.
-    pub open spec fn adj_proj(&self, s: usize, d: usize) -> bool {
-        has_pair(self.adjacency@, self.adjacency@.len() as int, s, d)
+    /// Exact weighted membership projects to endpoint adjacency.
+    pub proof fn exact_edge_implies_pair(&self, source: usize, target: usize, weight: u64)
+        ensures self.exact_edge(source, target, weight) ==> self.edge_proj(source, target),
+    {
+        if self.exact_edge(source, target, weight) {
+            let index = choose|index: int|
+                0 <= index < self.registry.entries@.len()
+                    && self.registry.entries@[index].0 == (source, target, weight)
+                    && self.registry.entries@[index].1 == ();
+            assert(self.registry.entries@[index].0.0 == source);
+            assert(self.registry.entries@[index].0.1 == target);
+        }
     }
 
-    /// TLA+ `TypeInvariant`: edges and adjacency entries are well-typed.
+    /// The formal adjacency variable is the edge registry's pair projection.
+    pub open spec fn adj_proj(&self, source: usize, target: usize) -> bool {
+        self.edge_proj(source, target)
+    }
+
+    /// The registry is unique and every registered edge is in the configured universe.
     pub open spec fn type_invariant(&self) -> bool {
-        &&& (forall|i: int|
-                #![trigger self.edges@[i]]
-                0 <= i < self.edges.len() ==>
-                    self.edges@[i].0 < self.num_nodes && self.edges@[i].1 < self.num_nodes
-                        && self.edges@[i].2 <= self.max_weight)
-        &&& (forall|i: int|
-                #![trigger self.adjacency@[i]]
-                0 <= i < self.adjacency.len() ==>
-                    self.adjacency@[i].0 < self.num_nodes && self.adjacency@[i].1 < self.num_nodes)
+        &&& self.registry.unique_mapping()
+        &&& forall|index: int|
+            #![trigger self.registry.entries@[index]]
+            0 <= index < self.registry.entries@.len() ==> edge_admitted(
+                self.num_nodes,
+                self.max_weight,
+                self.registry.entries@[index].0.0,
+                self.registry.entries@[index].0.1,
+                self.registry.entries@[index].0.2,
+            )
     }
 
-    /// TLA+ `AdjacencyConsistency`: the adjacency projection equals the edge
-    /// projection at every node pair.
+    /// The adjacency projection and weighted-edge projection are the same derived relation.
     pub open spec fn adjacency_consistency(&self) -> bool {
-        forall|s: usize, d: usize|
-            s < self.num_nodes && d < self.num_nodes ==>
-                crate::connectives::projection::membership_consistent(
-                    #[trigger] self.adj_proj(s, d),
-                    self.edge_proj(s, d),
-                )
+        forall|source: usize, target: usize|
+            source < self.num_nodes && target < self.num_nodes ==> adjacency_consistent(
+                #[trigger] self.adj_proj(source, target),
+                self.edge_proj(source, target),
+            )
     }
 
-    /// TLA+ `NoSelfLoops`: no adjacency pair is a self-loop (so n ∉ adjacency[n]).
+    /// No registered edge is a self-loop.
     pub open spec fn no_self_loops(&self) -> bool {
-        forall|i: int|
-            #![trigger self.adjacency@[i]]
-            0 <= i < self.adjacency.len() ==> self.adjacency@[i].0 != self.adjacency@[i].1
+        forall|index: int|
+            #![trigger self.registry.entries@[index]]
+            0 <= index < self.registry.entries@.len() ==> edge_irreflexive(
+                true,
+                self.registry.entries@[index].0.0,
+                self.registry.entries@[index].0.1,
+            )
     }
 
-    /// Full maintained invariant.
+    /// Whether the edge registry and its derived adjacency relation are valid.
     pub open spec fn inv(&self) -> bool {
-        &&& self.type_invariant()
-        &&& self.adjacency_consistency()
-        &&& self.no_self_loops()
+        self.type_invariant() && self.adjacency_consistency() && self.no_self_loops()
     }
 
-    // ── Init (TLA+ Init) ────────────────────────────────────────────────
-
-    /// Empty graph: no edges, no adjacency. Realises the TLA+ `Init` predicate.
-    pub fn new(num_nodes: usize, max_weight: u64) -> (g: RelationshipGraph)
+    /// Storage facts needed by larger compositions using the graph owner.
+    pub proof fn expose_storage_facts(&self)
+        requires self.inv(),
         ensures
-            g.num_nodes == num_nodes,
-            g.max_weight == max_weight,
-            g.edges@.len() == 0,
-            g.adjacency@.len() == 0,
-            g.inv(),
+            self.registry.unique_mapping(),
+            forall|index: int| #![trigger self.registry.entries@[index]]
+                0 <= index < self.registry.entries@.len() ==>
+                    self.registry.entries@[index].0.0 < self.num_nodes
+                        && self.registry.entries@[index].0.1 < self.num_nodes
+                        && self.registry.entries@[index].0.2 <= self.max_weight
+                        && self.registry.entries@[index].0.0
+                            != self.registry.entries@[index].0.1,
     {
-        RelationshipGraph { num_nodes, max_weight, edges: Vec::new(), adjacency: Vec::new() }
+        reveal(RelationshipGraph::inv);
+        reveal(RelationshipGraph::type_invariant);
+        reveal(RelationshipGraph::no_self_loops);
+        reveal(edge_admitted);
+        reveal(edge_irreflexive);
     }
 
-    pub fn can_add_edge(&self, src: usize, dst: usize, weight: u64) -> (b: bool)
-        ensures b == (src < self.num_nodes && dst < self.num_nodes
-            && weight <= self.max_weight && src != dst),
+    /// Construct an empty graph from an empty edge registry.
+    pub fn new(num_nodes: usize, max_weight: u64) -> (graph: RelationshipGraph)
+        ensures
+            graph.num_nodes == num_nodes,
+            graph.max_weight == max_weight,
+            graph.registry.entries@.len() == 0,
+            graph.inv(),
     {
-        src < self.num_nodes && dst < self.num_nodes
-            && weight <= self.max_weight && src != dst
+        let registry = ResourceRegistry::new();
+        RelationshipGraph { num_nodes, max_weight, registry }
     }
 
-    pub fn contains_exact_edge(&self, src: usize, dst: usize, weight: u64) -> (b: bool)
-        ensures b == self.exact_edge(src, dst, weight),
+    /// Whether an exact weighted edge can be inserted.
+    pub fn can_add_edge(&self, source: usize, target: usize, weight: u64) -> (enabled: bool)
+        ensures enabled == (source < self.num_nodes
+            && target < self.num_nodes
+            && weight <= self.max_weight
+            && source != target),
     {
-        let len = self.edges.len();
-        let mut i: usize = 0;
-        while i < len
+        source < self.num_nodes
+            && target < self.num_nodes
+            && weight <= self.max_weight
+            && source != target
+    }
+
+    /// Query exact membership through the ResourceRegistry owner.
+    pub fn contains_exact_edge(
+        &self,
+        source: usize,
+        target: usize,
+        weight: u64,
+    ) -> (present: bool)
+        requires self.registry.unique_mapping(),
+        ensures present == self.exact_edge(source, target, weight),
+    {
+        match self.registry.lookup((source, target, weight)) {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// Scan the edge registry to answer the derived adjacency query.
+    pub fn contains_pair(&self, source: usize, target: usize) -> (present: bool)
+        ensures present == self.edge_proj(source, target),
+    {
+        let length = self.registry.entries.len();
+        let mut index: usize = 0;
+        while index < length
             invariant
-                i <= len,
-                len == self.edges.len(),
-                !has_exact_edge(self.edges@, i as int, src, dst, weight),
-            decreases len - i,
+                index <= length,
+                length == self.registry.entries.len(),
+                !has_edge(self.registry.entries@, index as int, source, target),
+            decreases length - index,
         {
-            if self.edges[i].0 == src && self.edges[i].1 == dst && self.edges[i].2 == weight {
+            let key = self.registry.entries[index].0;
+            if key.0 == source && key.1 == target {
                 return true;
             }
-            proof { lemma_has_exact_edge_extend(self.edges@, i as int, src, dst, weight); }
-            i = i + 1;
+            proof {
+                lemma_has_edge_extend(
+                    self.registry.entries@,
+                    index as int,
+                    source,
+                    target,
+                );
+            }
+            index = index + 1;
         }
         false
     }
 
-    pub fn contains_pair(&self, src: usize, dst: usize) -> (b: bool)
-        ensures b == self.adj_proj(src, dst),
-    {
-        let len = self.adjacency.len();
-        let mut i: usize = 0;
-        while i < len
-            invariant
-                i <= len,
-                len == self.adjacency.len(),
-                !has_pair(self.adjacency@, i as int, src, dst),
-            decreases len - i,
-        {
-            if self.adjacency[i].0 == src && self.adjacency[i].1 == dst {
-                return true;
-            }
-            proof { lemma_has_pair_extend(self.adjacency@, i as int, src, dst); }
-            i = i + 1;
-        }
-        false
-    }
-
-    // ── AddEdge (TLA+ AddEdge) ──────────────────────────────────────────
-
-    /// Add the weighted edge src -> dst. Guard src != dst (the TLA+ AddEdge
-    /// enabling condition). Both the edge list and the adjacency list gain the
-    /// pair, so the projections grow together and stay equivalent.
-    pub fn add_edge(&mut self, src: usize, dst: usize, weight: u64) -> (added: bool)
+    /// Register one exact weighted edge.
+    pub fn add_edge(
+        &mut self,
+        source: usize,
+        target: usize,
+        weight: u64,
+    ) -> (added: bool)
         requires
             old(self).inv(),
-            src < old(self).num_nodes,
-            dst < old(self).num_nodes,
+            source < old(self).num_nodes,
+            target < old(self).num_nodes,
             weight <= old(self).max_weight,
-            src != dst,
+            source != target,
         ensures
             final(self).inv(),
             final(self).num_nodes == old(self).num_nodes,
             final(self).max_weight == old(self).max_weight,
-            added == !old(self).exact_edge(src, dst, weight),
-            !added ==> final(self).edges@ == old(self).edges@
-                && final(self).adjacency@ == old(self).adjacency@,
-            added ==> final(self).edges@ == old(self).edges@.push((src, dst, weight)),
-            added && old(self).adj_proj(src, dst)
-                ==> final(self).adjacency@ == old(self).adjacency@,
-            added && !old(self).adj_proj(src, dst)
-                ==> final(self).adjacency@ == old(self).adjacency@.push((src, dst)),
+            added == !old(self).exact_edge(source, target, weight),
+            !added ==> final(self).registry.entries@ == old(self).registry.entries@,
+            added ==> final(self).registry.entries@
+                == old(self).registry.entries@.push(((source, target, weight), ())),
+            forall|other_source: usize, other_target: usize|
+                #[trigger] final(self).edge_proj(other_source, other_target)
+                    == (old(self).edge_proj(other_source, other_target)
+                        || (other_source == source && other_target == target)),
     {
-        if self.contains_exact_edge(src, dst, weight) {
+        proof { self.expose_storage_facts(); }
+        if self.contains_exact_edge(source, target, weight) {
             return false;
         }
-        let pair_present = self.contains_pair(src, dst);
-        self.edges.push((src, dst, weight));
-        if !pair_present {
-            self.adjacency.push((src, dst));
+        let ghost before = self.registry.entries@;
+        self.registry.register((source, target, weight), ());
+        assert(self.registry.entries@ == before.push(((source, target, weight), ())));
+        assert forall|other_source: usize, other_target: usize|
+            #[trigger] self.edge_proj(other_source, other_target)
+                == (has_edge(before, before.len() as int, other_source, other_target)
+                    || (other_source == source && other_target == target)) by {
+            lemma_push_has_edge(
+                before,
+                (source, target, weight),
+                other_source,
+                other_target,
+            );
         }
-        assert(self.adjacency_consistency()) by {
-            assert forall|s: usize, d: usize|
-                s < self.num_nodes && d < self.num_nodes
-                implies (#[trigger] self.adj_proj(s, d)) == self.edge_proj(s, d) by {
-                lemma_push_proj_edge(old(self).edges@, src, dst, weight, s, d);
-                assert(old(self).adj_proj(s, d) == old(self).edge_proj(s, d));
-                if pair_present {
-                    assert(old(self).adj_proj(src, dst));
+        assert(self.type_invariant()) by {
+            assert forall|index: int| #![trigger self.registry.entries@[index]]
+                0 <= index < self.registry.entries@.len() implies edge_admitted(
+                    self.num_nodes,
+                    self.max_weight,
+                    self.registry.entries@[index].0.0,
+                    self.registry.entries@[index].0.1,
+                    self.registry.entries@[index].0.2,
+                ) by {
+                if index < before.len() {
+                    assert(self.registry.entries@[index] == before[index]);
                 } else {
-                    lemma_push_proj_pair(old(self).adjacency@, src, dst, s, d);
+                    assert(index == before.len());
+                    assert(self.registry.entries@[index] == ((source, target, weight), ()));
                 }
             }
+        }
+        assert(self.no_self_loops()) by {
+            assert forall|index: int| #![trigger self.registry.entries@[index]]
+                0 <= index < self.registry.entries@.len() implies edge_irreflexive(
+                    true,
+                    self.registry.entries@[index].0.0,
+                    self.registry.entries@[index].0.1,
+                ) by {
+                if index < before.len() {
+                    assert(self.registry.entries@[index] == before[index]);
+                } else {
+                    assert(index == before.len());
+                    assert(self.registry.entries@[index] == ((source, target, weight), ()));
+                }
+            }
+        }
+        assert(self.adjacency_consistency()) by {
+            reveal(RelationshipGraph::adjacency_consistency);
+            reveal(RelationshipGraph::adj_proj);
+            reveal(adjacency_consistent);
+            reveal(crate::connectives::projection::membership_consistent);
         }
         true
     }
 
-    // ── RemoveEdge (TLA+ RemoveEdge) ────────────────────────────────────
-
-    /// Remove every edge src -> dst (all weights) and drop the pair from the
-    /// adjacency view. Both projections lose exactly the pair (src,dst), so
-    /// they remain equivalent.
-    pub fn remove_edge(&mut self, src: usize, dst: usize)
+    /// Remove every registered weight for one source/destination pair.
+    pub fn remove_edge(&mut self, source: usize, target: usize)
         requires old(self).inv(),
         ensures
             final(self).inv(),
             final(self).num_nodes == old(self).num_nodes,
             final(self).max_weight == old(self).max_weight,
-            forall|s: usize, d: usize|
-                #[trigger] final(self).edge_proj(s, d)
-                    == (!(s == src && d == dst) && old(self).edge_proj(s, d)),
-            forall|s: usize, d: usize|
-                #[trigger] final(self).adj_proj(s, d)
-                    == (!(s == src && d == dst) && old(self).adj_proj(s, d)),
-            forall|s: usize, d: usize, w: u64|
-                #[trigger] final(self).exact_edge(s, d, w)
-                    == (!(s == src && d == dst) && old(self).exact_edge(s, d, w)),
+            forall|s: usize, d: usize, weight: u64|
+                #[trigger] final(self).exact_edge(s, d, weight)
+                    == (!(s == source && d == target)
+                        && old(self).exact_edge(s, d, weight)),
+            !final(self).edge_proj(source, target),
     {
-        let new_edges = Self::filter_edges(&self.edges, src, dst, self.num_nodes, self.max_weight);
-        let new_adj = Self::filter_pairs(&self.adjacency, src, dst, self.num_nodes);
-        self.edges = new_edges;
-        self.adjacency = new_adj;
-        // type_invariant and no_self_loops follow directly: the filters return a
-        // well-typed (and, for pairs, self-loop-free) Vec for self.num_nodes /
-        // self.max_weight. Consistency: both projections drop exactly (src,dst),
-        // and they agreed before (old consistency).
+        proof { self.expose_storage_facts(); }
+        let ghost original = self.registry.entries@;
+        let ghost original_num_nodes = self.num_nodes;
+        let ghost original_max_weight = self.max_weight;
+        let mut index: usize = 0;
+        while index < self.registry.entries.len()
+            invariant
+                index <= self.registry.entries.len(),
+                self.num_nodes == original_num_nodes,
+                self.max_weight == original_max_weight,
+                self.registry.unique_mapping(),
+                forall|entry: int| #![trigger self.registry.entries@[entry]]
+                    0 <= entry < self.registry.entries@.len() ==>
+                        self.registry.entries@[entry].0.0 < self.num_nodes
+                            && self.registry.entries@[entry].0.1 < self.num_nodes
+                            && self.registry.entries@[entry].0.2 <= self.max_weight
+                            && self.registry.entries@[entry].0.0
+                                != self.registry.entries@[entry].0.1,
+                forall|entry: int| #![trigger self.registry.entries@[entry]]
+                    0 <= entry < index ==>
+                        !(self.registry.entries@[entry].0.0 == source
+                            && self.registry.entries@[entry].0.1 == target),
+                forall|s: usize, d: usize, weight: u64|
+                    !(s == source && d == target) ==>
+                        (#[trigger] has_exact_edge(
+                            self.registry.entries@,
+                            self.registry.entries@.len() as int,
+                            s,
+                            d,
+                            weight,
+                        ) == has_exact_edge(
+                            original,
+                            original.len() as int,
+                            s,
+                            d,
+                            weight,
+                        )),
+            decreases self.registry.entries.len() - index,
+        {
+            let key = self.registry.entries[index].0;
+            if key.0 == source && key.1 == target {
+                let ghost before = self.registry.entries@;
+                let _removed = self.registry.deregister_at(index);
+                assert(_removed.0 == key);
+                assert forall|entry: int| #![trigger self.registry.entries@[entry]]
+                    0 <= entry < self.registry.entries@.len() implies
+                        self.registry.entries@[entry].0.0 < self.num_nodes
+                            && self.registry.entries@[entry].0.1 < self.num_nodes
+                            && self.registry.entries@[entry].0.2 <= self.max_weight
+                            && self.registry.entries@[entry].0.0
+                                != self.registry.entries@[entry].0.1 by {
+                    before.remove_ensures(index as int);
+                    let old_entry = if entry < index { entry } else { entry + 1 };
+                    assert(0 <= old_entry < before.len());
+                    assert(self.registry.entries@[entry] == before[old_entry]);
+                }
+                assert forall|entry: int| #![trigger self.registry.entries@[entry]]
+                    0 <= entry < index implies
+                        !(self.registry.entries@[entry].0.0 == source
+                            && self.registry.entries@[entry].0.1 == target) by {
+                    before.remove_ensures(index as int);
+                    assert(self.registry.entries@[entry] == before[entry]);
+                }
+                assert forall|s: usize, d: usize, weight: u64|
+                    !(s == source && d == target) implies
+                        (#[trigger] has_exact_edge(
+                            self.registry.entries@,
+                            self.registry.entries@.len() as int,
+                            s,
+                            d,
+                            weight,
+                        ) == has_exact_edge(
+                            original,
+                            original.len() as int,
+                            s,
+                            d,
+                            weight,
+                    )) by {
+                    assert((s, d, weight) != key);
+                    assert(self.registry.maps_to((s, d, weight), ()) ==
+                        (has_exact_edge(
+                            before,
+                            before.len() as int,
+                            s,
+                            d,
+                            weight,
+                        ) && (s, d, weight) != key));
+                    assert(has_exact_edge(
+                        before,
+                        before.len() as int,
+                        s,
+                        d,
+                        weight,
+                    ) == has_exact_edge(
+                        original,
+                        original.len() as int,
+                        s,
+                        d,
+                        weight,
+                    ));
+                }
+            } else {
+                index = index + 1;
+            }
+        }
+        assert(!self.edge_proj(source, target)) by {
+            if self.edge_proj(source, target) {
+                let entry = choose|entry: int|
+                    0 <= entry < self.registry.entries@.len()
+                        && self.registry.entries@[entry].0.0 == source
+                        && self.registry.entries@[entry].0.1 == target;
+                assert(false);
+            }
+        }
+        assert(self.type_invariant());
+        assert(self.no_self_loops());
         assert(self.adjacency_consistency()) by {
-            assert forall|s: usize, d: usize|
-                s < self.num_nodes && d < self.num_nodes
-                implies (#[trigger] self.adj_proj(s, d)) == self.edge_proj(s, d) by {
-                assert(old(self).adj_proj(s, d) == old(self).edge_proj(s, d));
+            reveal(RelationshipGraph::adjacency_consistency);
+            reveal(RelationshipGraph::adj_proj);
+            reveal(adjacency_consistent);
+            reveal(crate::connectives::projection::membership_consistent);
+        }
+        assert forall|s: usize, d: usize, weight: u64|
+            #[trigger] self.exact_edge(s, d, weight)
+                == (!(s == source && d == target)
+                    && old(self).exact_edge(s, d, weight)) by {
+            if s == source && d == target {
+                if self.exact_edge(s, d, weight) {
+                    let entry = choose|entry: int|
+                        0 <= entry < self.registry.entries@.len()
+                            && self.registry.entries@[entry].0 == (s, d, weight)
+                            && self.registry.entries@[entry].1 == ();
+                    assert(has_edge(
+                        self.registry.entries@,
+                        self.registry.entries@.len() as int,
+                        source,
+                        target,
+                    ));
+                    assert(self.edge_proj(source, target));
+                }
+            } else {
+                assert(self.exact_edge(s, d, weight) == has_exact_edge(
+                    self.registry.entries@,
+                    self.registry.entries@.len() as int,
+                    s,
+                    d,
+                    weight,
+                ));
+                assert(old(self).exact_edge(s, d, weight) == has_exact_edge(
+                    original,
+                    original.len() as int,
+                    s,
+                    d,
+                    weight,
+                ));
             }
         }
-    }
-
-    // ── filter helpers ──────────────────────────────────────────────────
-
-    /// Edges with every src -> dst entry removed. Ensures the projection drops
-    /// exactly the pair (src,dst), and (given a well-typed input) the output is
-    /// well-typed too.
-    fn filter_edges(edges: &Vec<(usize, usize, u64)>, src: usize, dst: usize,
-        num_nodes: usize, max_weight: u64) -> (out: Vec<(usize, usize, u64)>)
-        requires
-            forall|i: int| #![trigger edges@[i]]
-                0 <= i < edges@.len() ==>
-                    edges@[i].0 < num_nodes && edges@[i].1 < num_nodes && edges@[i].2 <= max_weight,
-        ensures
-            forall|s: usize, d: usize|
-                #[trigger] has_edge(out@, out@.len() as int, s, d)
-                    == (!(s == src && d == dst) && has_edge(edges@, edges@.len() as int, s, d)),
-            forall|k: int| #![trigger out@[k]]
-                0 <= k < out@.len() ==>
-                    out@[k].0 < num_nodes && out@[k].1 < num_nodes && out@[k].2 <= max_weight,
-            forall|s: usize, d: usize, w: u64|
-                #[trigger] has_exact_edge(out@, out@.len() as int, s, d, w)
-                    == (!(s == src && d == dst)
-                        && has_exact_edge(edges@, edges@.len() as int, s, d, w)),
-    {
-        let _ = (num_nodes, max_weight);
-        let mut out: Vec<(usize, usize, u64)> = Vec::new();
-        let mut i: usize = 0;
-        while i < edges.len()
-            invariant
-                i <= edges.len(),
-                forall|t: int| #![trigger edges@[t]]
-                    0 <= t < edges@.len() ==>
-                        edges@[t].0 < num_nodes && edges@[t].1 < num_nodes && edges@[t].2 <= max_weight,
-                forall|s: usize, d: usize|
-                    #[trigger] has_edge(out@, out@.len() as int, s, d)
-                        == (!(s == src && d == dst) && has_edge(edges@, i as int, s, d)),
-                forall|k: int| #![trigger out@[k]]
-                    0 <= k < out@.len() ==>
-                        out@[k].0 < num_nodes && out@[k].1 < num_nodes && out@[k].2 <= max_weight,
-                forall|s: usize, d: usize, w: u64|
-                    #[trigger] has_exact_edge(out@, out@.len() as int, s, d, w)
-                        == (!(s == src && d == dst) && has_exact_edge(edges@, i as int, s, d, w)),
-            decreases edges.len() - i,
-        {
-            let e = edges[i];
-            assert(edges@[i as int].0 < num_nodes && edges@[i as int].1 < num_nodes
-                && edges@[i as int].2 <= max_weight);
-            let ghost ob = out@;
-            if !(e.0 == src && e.1 == dst) {
-                out.push(e);
-            }
-            assert forall|s: usize, d: usize|
-                #[trigger] has_edge(out@, out@.len() as int, s, d)
-                    == (!(s == src && d == dst) && has_edge(edges@, (i + 1) as int, s, d)) by {
-                lemma_has_edge_extend(edges@, i as int, s, d);
-                if !(e.0 == src && e.1 == dst) {
-                    lemma_push_proj_edge(ob, e.0, e.1, e.2, s, d);
-                }
-            }
-            assert forall|s: usize, d: usize, w: u64|
-                #[trigger] has_exact_edge(out@, out@.len() as int, s, d, w)
-                    == (!(s == src && d == dst)
-                        && has_exact_edge(edges@, (i + 1) as int, s, d, w)) by {
-                lemma_has_exact_edge_extend(edges@, i as int, s, d, w);
-                if !(e.0 == src && e.1 == dst) {
-                    lemma_push_exact_edge(ob, e.0, e.1, e.2, s, d, w);
-                }
-            }
-            assert forall|k: int| #![trigger out@[k]] 0 <= k < out@.len()
-                implies (out@[k].0 < num_nodes && out@[k].1 < num_nodes && out@[k].2 <= max_weight) by {
-                if k < ob.len() {
-                    assert(out@[k] == ob[k]);
-                    assert(ob[k].0 < num_nodes && ob[k].1 < num_nodes && ob[k].2 <= max_weight);
-                } else {
-                    assert(out@[k] == edges@[i as int]);
-                    assert(edges@[i as int].0 < num_nodes && edges@[i as int].1 < num_nodes
-                        && edges@[i as int].2 <= max_weight);
-                }
-            }
-            i = i + 1;
-        }
-        out
-    }
-
-    /// Adjacency pairs with every (src,dst) entry removed. Ensures the
-    /// projection drops exactly that pair, and (given a well-typed, self-loop-
-    /// free input) the output is well-typed and self-loop-free too.
-    fn filter_pairs(pairs: &Vec<(usize, usize)>, src: usize, dst: usize, num_nodes: usize)
-        -> (out: Vec<(usize, usize)>)
-        requires
-            forall|i: int| #![trigger pairs@[i]]
-                0 <= i < pairs@.len() ==>
-                    pairs@[i].0 < num_nodes && pairs@[i].1 < num_nodes && pairs@[i].0 != pairs@[i].1,
-        ensures
-            forall|s: usize, d: usize|
-                #[trigger] has_pair(out@, out@.len() as int, s, d)
-                    == (!(s == src && d == dst) && has_pair(pairs@, pairs@.len() as int, s, d)),
-            forall|k: int| #![trigger out@[k]]
-                0 <= k < out@.len() ==>
-                    out@[k].0 < num_nodes && out@[k].1 < num_nodes && out@[k].0 != out@[k].1,
-    {
-        let _ = num_nodes;
-        let mut out: Vec<(usize, usize)> = Vec::new();
-        let mut i: usize = 0;
-        while i < pairs.len()
-            invariant
-                i <= pairs.len(),
-                forall|t: int| #![trigger pairs@[t]]
-                    0 <= t < pairs@.len() ==>
-                        pairs@[t].0 < num_nodes && pairs@[t].1 < num_nodes && pairs@[t].0 != pairs@[t].1,
-                forall|s: usize, d: usize|
-                    #[trigger] has_pair(out@, out@.len() as int, s, d)
-                        == (!(s == src && d == dst) && has_pair(pairs@, i as int, s, d)),
-                forall|k: int| #![trigger out@[k]]
-                    0 <= k < out@.len() ==>
-                        out@[k].0 < num_nodes && out@[k].1 < num_nodes && out@[k].0 != out@[k].1,
-            decreases pairs.len() - i,
-        {
-            let p = pairs[i];
-            assert(pairs@[i as int].0 < num_nodes && pairs@[i as int].1 < num_nodes
-                && pairs@[i as int].0 != pairs@[i as int].1);
-            let ghost ob = out@;
-            if !(p.0 == src && p.1 == dst) {
-                out.push(p);
-            }
-            assert forall|s: usize, d: usize|
-                #[trigger] has_pair(out@, out@.len() as int, s, d)
-                    == (!(s == src && d == dst) && has_pair(pairs@, (i + 1) as int, s, d)) by {
-                lemma_has_pair_extend(pairs@, i as int, s, d);
-                if !(p.0 == src && p.1 == dst) {
-                    lemma_push_proj_pair(ob, p.0, p.1, s, d);
-                }
-            }
-            assert forall|k: int| #![trigger out@[k]] 0 <= k < out@.len()
-                implies (out@[k].0 < num_nodes && out@[k].1 < num_nodes && out@[k].0 != out@[k].1) by {
-                if k < ob.len() {
-                    assert(out@[k] == ob[k]);
-                    assert(ob[k].0 < num_nodes && ob[k].1 < num_nodes && ob[k].0 != ob[k].1);
-                } else {
-                    assert(out@[k] == pairs@[i as int]);
-                    assert(pairs@[i as int].0 < num_nodes && pairs@[i as int].1 < num_nodes
-                        && pairs@[i as int].0 != pairs@[i as int].1);
-                }
-            }
-            i = i + 1;
-        }
-        out
     }
 }
 

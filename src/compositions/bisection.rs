@@ -30,12 +30,14 @@ verus! {
 
 // Local power-of-two definition used by the probe-budget proof. It is local to
 // this module so the bound does not depend on another carrier's specification.
+/// Return two raised to the nonnegative exponent `k`.
 pub open spec fn pow2(k: u64) -> int
     decreases k,
 {
     if k == 0 { 1 } else { 2 * pow2((k - 1) as u64) }
 }
 
+/// Prove that every value returned by [`pow2`] is positive.
 pub proof fn lemma_pow2_positive(k: u64)
     ensures pow2(k) >= 1,
     decreases k,
@@ -45,6 +47,7 @@ pub proof fn lemma_pow2_positive(k: u64)
     }
 }
 
+/// Prove the successor recurrence for [`pow2`].
 pub proof fn lemma_pow2_step(k: u64)
     requires k > 0,
     ensures pow2(k) == 2 * pow2((k - 1) as u64),
@@ -53,13 +56,18 @@ pub proof fn lemma_pow2_step(k: u64)
 
 // ── The Bisection machine (TLA+ Bisection.tla: lo/hi/probes) ──────────────
 
+/// Bounded monotone-boundary bisection carrier.
 pub struct Bisection {
+    /// Size of the ordered domain.
     pub domain_size: u64,
-    pub max_probes: u64,
+    /// Budget that counts admitted probes.
+    pub budget: crate::primitives::budget::Budget,
+    /// Inclusive lower interval endpoint.
     pub lo: u64,
+    /// Inclusive upper interval endpoint.
     pub hi: u64,
+    /// Monotone boundary retained inside the interval.
     pub threshold: u64,
-    pub probes_taken: u64,
 }
 
 impl Bisection {
@@ -79,12 +87,14 @@ impl Bisection {
 
     /// TLA+ DomainFitsProbes constant assumption.
     pub open spec fn domain_fits_probes(&self) -> bool {
-        self.domain_size as int <= pow2(self.max_probes)
+        self.domain_size as int <= pow2(self.budget.capacity)
     }
 
     /// TLA+ ProbeBound safety invariant.
     pub open spec fn probe_bound(&self) -> bool {
-        self.probes_taken <= self.max_probes
+        &&& self.budget.safety_invariant()
+        &&& self.budget.reserved == 0
+        &&& self.budget.pending_eviction == 0
     }
 
     /// The TLAPS proof's exact inductive strengthening. ProbeBound alone is
@@ -93,9 +103,10 @@ impl Bisection {
     pub open spec fn width_exp_bound(&self) -> bool {
         &&& self.probe_bound()
         &&& self.hi as int - self.lo as int
-            <= pow2((self.max_probes - self.probes_taken) as u64)
+            <= pow2((self.budget.capacity - self.budget.allocated) as u64)
     }
 
+    /// Whether the interval, threshold, cursor, and probe budget are mutually consistent.
     pub open spec fn invariant(&self) -> bool {
         &&& self.type_invariant()
         &&& self.monotonicity()
@@ -128,11 +139,11 @@ impl Bisection {
             domain_size as int <= pow2(max_probes),
         ensures
             b.domain_size == domain_size,
-            b.max_probes == max_probes,
+            b.budget.capacity == max_probes,
             b.lo == lo,
             b.hi == hi,
             b.threshold == threshold,
-            b.probes_taken == 0,
+            b.budget.allocated == 0,
             b.invariant(),
     {
         proof {
@@ -141,11 +152,10 @@ impl Bisection {
         }
         Bisection {
             domain_size,
-            max_probes,
+            budget: crate::primitives::budget::Budget::new(max_probes),
             lo,
             hi,
             threshold,
-            probes_taken: 0,
         }
     }
 
@@ -174,13 +184,13 @@ impl Bisection {
             // Loop-termination measure: the width strictly decreases.
             final(self).hi - final(self).lo < old(self).hi - old(self).lo,
             final(self).domain_size == old(self).domain_size,
-            final(self).max_probes == old(self).max_probes,
+            final(self).budget.capacity == old(self).budget.capacity,
             final(self).threshold == old(self).threshold,
             crate::connectives::cursor::cursor_admitted(
                 old(self).lo as nat,
                 final(self).lo as nat,
             ),
-            final(self).probes_taken == old(self).probes_taken + 1,
+            final(self).budget.allocated == old(self).budget.allocated + 1,
             // The probe lands on the midpoint and frames the endpoint
             // that does not move. The five clauses above are properties of the
             // post-state interval's width and position -- including all three
@@ -196,17 +206,16 @@ impl Bisection {
         let old_lo = self.lo;
         let old_hi = self.hi;
         let old_width = self.hi - self.lo;
-        let old_probes = self.probes_taken;
-        let remaining = self.max_probes - self.probes_taken;
+        let remaining = self.budget.capacity - self.budget.allocated;
         let _ = (old_lo, old_hi, old_width, remaining);
         proof {
-            if self.probes_taken == self.max_probes {
+            if self.budget.allocated == self.budget.capacity {
                 assert(remaining == 0);
                 assert(pow2(remaining) == 1);
                 assert(self.hi as int - self.lo as int <= 1);
                 assert(false);
             }
-            assert(self.probes_taken < self.max_probes);
+            assert(self.budget.allocated < self.budget.capacity);
             assert(remaining > 0);
             lemma_pow2_step(remaining);
             lemma_pow2_positive((remaining - 1) as u64);
@@ -219,15 +228,16 @@ impl Bisection {
             // P(mid) = TRUE: threshold in [mid+1, hi] -> lo' = mid + 1
             self.lo = mid + 1;
         }
-        self.probes_taken = old_probes + 1;
+        let _accepted = self.budget.try_allocate(1);
+        assert(_accepted);
         proof {
             assert(self.hi - self.lo <= old_width / 2);
             assert(old_width as int <= pow2(remaining));
             assert(old_width as int / 2 <= pow2((remaining - 1) as u64));
             assert(self.hi as int - self.lo as int <= old_width as int / 2);
-            assert(self.max_probes - self.probes_taken == remaining - 1);
+            assert(self.budget.capacity - self.budget.allocated == remaining - 1);
             assert(self.hi as int - self.lo as int
-                <= pow2((self.max_probes - self.probes_taken) as u64));
+                <= pow2((self.budget.capacity - self.budget.allocated) as u64));
             assert(old_lo <= old_hi);
         }
     }
@@ -243,14 +253,14 @@ impl Bisection {
             final(self).invariant(),
             final(self).hi - final(self).lo < 2,
             final(self).domain_size == old(self).domain_size,
-            final(self).max_probes == old(self).max_probes,
+            final(self).budget.capacity == old(self).budget.capacity,
             final(self).threshold == old(self).threshold,
     {
         while self.hi - self.lo >= 2
             invariant
                 self.invariant(),
                 self.domain_size == old(self).domain_size,
-                self.max_probes == old(self).max_probes,
+                self.budget.capacity == old(self).budget.capacity,
                 self.threshold == old(self).threshold,
             decreases self.hi - self.lo,
         {

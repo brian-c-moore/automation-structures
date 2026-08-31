@@ -9,17 +9,27 @@ use vstd::prelude::*;
 
 verus! {
 
+/// Reversible auxiliary-state mutation retained for one descent.
 pub struct UndoToken {
+    /// Auxiliary value before the descent.
     pub saved: u64,
+    /// Mutation delta applied by the descent.
     pub delta: u64,
 }
 
+/// Reversible depth-first traversal owner.
 pub struct BacktrackingTraversal {
+    /// Number of admitted choices at each non-leaf depth.
     pub branch_factor: u64,
+    /// Required depth of a complete leaf path.
     pub max_depth: usize,
+    /// Auxiliary value at the root.
     pub init_aux: u64,
+    /// Current branch-choice path.
     pub path: Vec<u64>,
+    /// Current auxiliary value.
     pub aux: u64,
+    /// Undo tokens aligned with the current path.
     pub ledger: Vec<UndoToken>,
     /// A Vec is the executable representation of the TLA+ visited set;
     /// `visited_unique` and Visit's freshness guard preserve set semantics.
@@ -27,14 +37,17 @@ pub struct BacktrackingTraversal {
 }
 
 impl BacktrackingTraversal {
+    /// Apply the modulo-three mutation used by the traversal profile.
     pub open spec fn mutate_spec(v: u64, d: u64) -> int {
         ((v as int) + (d as int)) % 3
     }
 
+    /// Apply the inverse modulo-three mutation used during restoration.
     pub open spec fn undo_spec(v: u64, d: u64) -> int {
         ((v as int) + (3 - d as int)) % 3
     }
 
+    /// Whether path, ledger, auxiliary value, and choices have valid shape and bounds.
     pub open spec fn type_invariant(&self) -> bool {
         &&& self.init_aux < 3
         &&& self.aux < 3
@@ -76,16 +89,19 @@ impl BacktrackingTraversal {
         }
     }
 
+    /// Whether no full-depth path is recorded more than once.
     pub open spec fn visited_unique(&self) -> bool {
         forall|i: int, j: int|
             0 <= i < self.visited.len() && 0 <= j < self.visited.len() && i != j
                 ==> #[trigger] self.visited@[i]@ != #[trigger] self.visited@[j]@
     }
 
+    /// Whether the completed-path set contains `p`.
     pub open spec fn visited_contains(&self, p: Seq<u64>) -> bool {
         exists|e: int| 0 <= e < self.visited.len() && #[trigger] self.visited@[e]@ == p
     }
 
+    /// Whether all traversal and restoration obligations hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant()
             && self.pairing()
@@ -94,10 +110,12 @@ impl BacktrackingTraversal {
             && self.visited_unique()
     }
 
+    /// Whether the current path has reached the configured depth.
     pub open spec fn is_leaf(&self) -> bool {
         self.path.len() == self.max_depth
     }
 
+    /// Apply the modulo-three auxiliary mutation.
     pub fn mutate_exec(v: u64, d: u64) -> (out: u64)
         requires v < 3, 1 <= d <= 2,
         ensures out < 3, out as int == Self::mutate_spec(v, d),
@@ -109,6 +127,7 @@ impl BacktrackingTraversal {
         }
     }
 
+    /// Apply the inverse modulo-three auxiliary mutation.
     pub fn undo_exec(v: u64, d: u64) -> (out: u64)
         requires v < 3, 1 <= d <= 2,
         ensures out < 3, out as int == Self::undo_spec(v, d),
@@ -120,6 +139,7 @@ impl BacktrackingTraversal {
         }
     }
 
+    /// Prove that the undo operation reverses an admitted mutation.
     pub proof fn lemma_undo_inverts(v: u64, d: u64)
         requires v < 3, 1 <= d <= 2,
         ensures Self::undo_spec(Self::mutate_spec(v, d) as u64, d) == v as int,
@@ -137,6 +157,7 @@ impl BacktrackingTraversal {
         }
     }
 
+    /// Construct a traversal at its root with an empty visited set.
     pub fn new(branch_factor: u64, max_depth: usize, init_aux: u64) -> (t: BacktrackingTraversal)
         requires init_aux < 3,
         ensures
@@ -160,12 +181,14 @@ impl BacktrackingTraversal {
         }
     }
 
+    /// Whether the current path has reached the configured leaf depth.
     pub fn is_leaf_exec(&self) -> (b: bool)
         ensures b == self.is_leaf(),
     {
         self.path.len() == self.max_depth
     }
 
+    /// Whether a choice and mutation delta enable another descent.
     pub fn can_descend(&self, c: u64, d: u64) -> (b: bool)
         requires self.type_invariant(),
         ensures b == (!self.is_leaf() && 1 <= c <= self.branch_factor && 1 <= d <= 2),
@@ -175,12 +198,14 @@ impl BacktrackingTraversal {
             && 1 <= d && d <= 2
     }
 
+    /// Whether an undo token is available for ascent.
     pub fn can_ascend(&self) -> (b: bool)
         ensures b == (self.path.len() >= 1),
     {
         self.path.len() >= 1
     }
 
+    /// Whether a path occurs in the visited-leaf ledger.
     pub fn has_visited(&self, p: &Vec<u64>) -> (b: bool)
         ensures b == self.visited_contains(p@),
     {
@@ -202,6 +227,7 @@ impl BacktrackingTraversal {
         false
     }
 
+    /// Whether the current path is a fresh leaf that may be visited.
     pub fn can_visit(&self) -> (b: bool)
         ensures b == (self.is_leaf() && !self.visited_contains(self.path@)),
     {

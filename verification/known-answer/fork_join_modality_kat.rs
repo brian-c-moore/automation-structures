@@ -1,6 +1,7 @@
 extern crate automation_structures;
 
 use automation_structures::modalities::fork_join::ForkJoin;
+use automation_structures::ForkJoinPhase;
 
 fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     if got == want {
@@ -15,7 +16,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
 fn main() {
     let mut ok = true;
     let mut f = ForkJoin::new(3, 10, 0);
-    ok &= check("initial fork phase", f.phase, 0);
+    ok &= check("initial fork phase", f.phase, ForkJoinPhase::Fork);
     ok &= check("early output rejected", f.produce_output(), false);
     ok &= check("incomplete barrier rejected", f.barrier(), false);
     ok &= check("worker bound rejected", f.start_worker(3), false);
@@ -38,14 +39,14 @@ fn main() {
     ok &= check("worker 1 completes", f.complete_worker(1, 6), true);
     ok &= check("exact worker values", f.wvalue.clone(), vec![4, 6, 8]);
     ok &= check("barrier admits all-complete state", f.barrier(), true);
-    ok &= check("join phase", f.phase, 1);
+    ok &= check("join phase", f.phase, ForkJoinPhase::Join);
     ok &= check(
         "worker start rejected after barrier",
         f.start_worker(0),
         false,
     );
     ok &= check("output produced after join", f.produce_output(), true);
-    ok &= check("done phase", f.phase, 2);
+    ok &= check("done phase", f.phase, ForkJoinPhase::Done);
     ok &= check("output readiness", f.output_ready, true);
     ok &= check(
         "output is exact worker snapshot",

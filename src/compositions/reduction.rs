@@ -1,16 +1,17 @@
-// ReductionStream's additive and maximum instances.
+// AuditSink-backed ReductionStream named composition.
 //
-// ReductionStream's model state is `result, pos` over a constant source. The
-// additive Reducer retains an explicit prefix/suffix decomposition so the
-// constant source and exactly-once movement remain executable:
-// `pos = processed.len()`, `Src = original`, and
-// `processed ++ remaining = original`. The batch sum and max loops are two
-// named instances of the same ordered prefix-fold interface.
+// ReductionStreamFromAuditSink.tla has no held glue state: the source is
+// immutable configuration, the AuditSink log is the consumed prefix,
+// `result` is `last_hash`, and `pos` is `Len(log)`. AdditiveChain instantiates
+// AuditSink's operation with the reduction operator.
 //
 // Overflow ceiling: values bounded to <= 1e9, inputs to <= 1e9 elements,
 // so the accumulator stays under 1e18 < u64::MAX.
 
 use vstd::prelude::*;
+
+#[allow(unused_imports)]
+use crate::primitives::audit_sink::{AdditiveChain, AuditSink, ChainOperation};
 
 verus! {
 
@@ -74,116 +75,145 @@ pub proof fn lemma_sum_push(s: Seq<u64>, x: u64)
     assert(sum_to(t, n + 1) == t[n] as int + sum_to(t, n));
 }
 
-/// Additive ReductionStream instance with explicit processed/remaining views.
+/// Additive ReductionStream assembled from the AuditSink owner.
 pub struct Reducer {
-    pub result: u64,
-    pub processed: Vec<u64>,
-    pub remaining: Vec<u64>,
-    pub original: Ghost<Seq<u64>>,
+    /// Immutable reduction source.
+    pub source: Vec<u64>,
+    /// Owner of the consumed prefix, position, and result.
+    pub audit: AuditSink<AdditiveChain>,
 }
 
 impl Reducer {
-    /// Source decomposition used by the ReductionStream state mapping.
-    pub open spec fn partition(&self) -> bool {
-        crate::connectives::accumulator::carries(
-            self.original@,
-            self.processed@,
-            self.remaining@,
-        )
+    /// AuditSink's log is exactly the consumed source prefix.
+    pub open spec fn prefix_binding(&self) -> bool {
+        &&& self.audit.log.len() <= self.source.len()
+        &&& forall|index: int|
+            #![trigger self.audit.log@[index]]
+            0 <= index < self.audit.log.len() ==>
+                self.audit.log@[index].operation == self.source@[index]
     }
 
-    /// Additive instance of `ConsumedPrefixFold`.
+    /// AuditSink's carry is the fold of the consumed source prefix.
     pub open spec fn aggregate(&self) -> bool {
-        self.result as int == sum_spec(self.processed@)
+        self.audit.last_hash as int == sum_to(self.source@, self.audit.log.len() as int)
     }
 
-    /// Overflow ceiling: all values <= 1e9, total input <= 1e9 elements.
+    /// Overflow ceiling for the additive AuditSink operation.
     pub open spec fn bounded(&self) -> bool {
-        &&& forall|k: int| 0 <= k < self.processed@.len() ==> self.processed@[k] <= 1_000_000_000u64
-        &&& forall|k: int| 0 <= k < self.remaining@.len() ==> self.remaining@[k] <= 1_000_000_000u64
-        &&& self.original@.len() <= 1_000_000_000
+        &&& forall|k: int| 0 <= k < self.source@.len() ==> self.source@[k] <= 1_000_000_000u64
+        &&& self.source@.len() <= 1_000_000_000
     }
 
-    /// Empty consumed prefix, full remaining suffix, and additive identity.
+    /// Complete representation invariant of the named composition.
+    pub open spec fn inv(&self) -> bool {
+        &&& self.audit.inv()
+        &&& self.audit.max_log_len == self.source.len()
+        &&& self.prefix_binding()
+        &&& self.aggregate()
+        &&& self.bounded()
+    }
+
+    /// Empty AuditSink over the immutable source.
     pub fn new(items: Vec<u64>) -> (r: Reducer)
         requires
             forall|k: int| 0 <= k < items@.len() ==> items@[k] <= 1_000_000_000u64,
             items@.len() <= 1_000_000_000,
         ensures
-            r.partition(),
-            r.aggregate(),
-            r.bounded(),
-            r.original@ == items@,
-            r.remaining@ == items@,
+            r.inv(),
+            r.source@ == items@,
+            r.audit.log@.len() == 0,
+            r.audit.last_hash == 0,
     {
-        let ghost orig = items@;
-        let r = Reducer {
-            result: 0,
-            processed: Vec::new(),
-            remaining: items,
-            original: Ghost(orig),
-        };
+        let audit = AuditSink::with_operator(items.len(), AdditiveChain);
+        let r = Reducer { source: items, audit };
         proof {
-            assert(r.processed@.len() == 0);
-            assert(r.processed@ + r.remaining@ =~= r.original@);
-            assert(sum_spec(r.processed@) == 0);
+            assert(r.audit.log@.len() == 0);
+            assert(sum_to(r.source@, 0) == 0);
         }
         r
     }
 
-    pub fn done(&self) -> (d: bool)
-        ensures
-            d == (self.remaining@.len() == 0),
+    /// Number of source elements already consumed.
+    pub fn position(&self) -> (position: usize)
+        ensures position == self.audit.log@.len(),
     {
-        self.remaining.len() == 0
+        self.audit.log.len()
     }
 
-    /// Consume the next value exactly once and extend the additive prefix fold.
+    /// Current additive result, projected from AuditSink's carry.
+    pub fn result(&self) -> (result: u64)
+        ensures result == self.audit.last_hash,
+    {
+        self.audit.last_hash
+    }
+
+    /// Number of source elements not yet consumed.
+    pub fn remaining_len(&self) -> (remaining: usize)
+        requires self.prefix_binding(),
+        ensures remaining == self.source@.len() - self.audit.log@.len(),
+    {
+        self.source.len() - self.audit.log.len()
+    }
+
+    /// Whether the complete source prefix has been reduced.
+    pub fn done(&self) -> (d: bool)
+        requires self.prefix_binding(),
+        ensures
+            d == (self.audit.log@.len() == self.source@.len()),
+    {
+        self.audit.log.len() == self.source.len()
+    }
+
+    /// Consume the next source value through AuditSink's `Record` action.
     pub fn process(&mut self)
         requires
-            old(self).remaining@.len() > 0,
-            old(self).partition(),
-            old(self).aggregate(),
-            old(self).bounded(),
+            old(self).inv(),
+            old(self).audit.log@.len() < old(self).source@.len(),
         ensures
-            final(self).partition(),
-            final(self).aggregate(),
-            final(self).bounded(),
-            final(self).original@ == old(self).original@,
-            final(self).remaining@.len() == old(self).remaining@.len() - 1,
-            final(self).processed@ == old(self).processed@.push(old(self).remaining@[0]),
-            final(self).remaining@ == old(self).remaining@.subrange(
-                1, old(self).remaining@.len() as int),
-            final(self).result == old(self).result + old(self).remaining@[0],
+            final(self).inv(),
+            final(self).source@ == old(self).source@,
+            final(self).audit.log@.len() == old(self).audit.log@.len() + 1,
+            final(self).audit.last_hash
+                == old(self).audit.last_hash
+                    + old(self).source@[old(self).audit.log@.len() as int],
     {
-        let ghost p = self.processed@;
-        let ghost r = self.remaining@;
-        let x = self.remaining[0];
-        assert(crate::connectives::ordering_pass::selects_first(self.remaining@, x));
-
-        assert(self.processed@.len() <= self.original@.len()) by {
-            assert((p + r).len() == p.len() + r.len());
-        }
+        let old_position = self.audit.log.len();
+        let x = self.source[old_position];
+        let ghost old_log = self.audit.log@;
+        let ghost source = self.source@;
         proof {
-            lemma_sum_to_bounded(self.processed@, self.processed@.len() as int);
+            lemma_sum_to_bounded(self.source@, old_position as int);
+            assert(self.audit.last_hash as int
+                == sum_to(self.source@, old_position as int));
+            assert(self.audit.last_hash as int <= 1_000_000_000 * old_position as int);
+            assert(x <= 1_000_000_000u64);
+            assert(old_position < 1_000_000_000usize);
+            assert(self.audit.last_hash as int + x as int <= 1_000_000_000_000_000_000int);
+            assert(1_000_000_000_000_000_000int < u64::MAX as int);
+            assert(self.audit.operator.enabled(self.audit.last_hash, x));
         }
-
-        let removed = self.remaining.remove(0);
-        let _ = removed;
-        self.processed.push(x);
-        self.result = self.result + x;
+        let accepted = self.audit.record(x);
+        assert(accepted);
+        let _ = accepted;
 
         proof {
-            lemma_sum_push(p, x);
-            assert(self.remaining@ =~= r.subrange(1, r.len() as int));
-            assert(self.processed@ =~= p.push(x));
-            assert(r[0] == x);
-            assert(self.processed@ + self.remaining@ =~= self.original@);
-            assert(sum_spec(self.processed@) == sum_spec(p) + x as int);
-            assert(forall|k: int| 0 <= k < self.remaining@.len()
-                ==> self.remaining@[k] <= 1_000_000_000u64);
-            assert(forall|k: int| 0 <= k < self.processed@.len()
-                ==> self.processed@[k] <= 1_000_000_000u64);
+            assert(self.audit.log@[old_position as int].operation == x);
+            assert(self.prefix_binding()) by {
+                assert forall|index: int|
+                    #![trigger self.audit.log@[index]]
+                    0 <= index < self.audit.log.len() implies
+                        self.audit.log@[index].operation == self.source@[index] by {
+                    if index < old_position {
+                        assert(self.audit.log@[index] == old_log[index]);
+                    } else {
+                        assert(index == old_position);
+                    }
+                }
+            }
+            assert(sum_to(source, old_position as int + 1)
+                == source[old_position as int] as int
+                    + sum_to(source, old_position as int));
+            assert(self.aggregate());
         }
     }
 }
@@ -199,6 +229,7 @@ impl Reducer {
 // entry points, each proven against the SAME ordered-prefix spec instantiated
 // with its own operator. No reassociation theorem or arbitrary executable
 // operator is claimed.
+/// Fold the first `n` values of `s` from `identity` with `op`.
 pub open spec fn fold_to(s: Seq<u64>, n: int, identity: u64, op: spec_fn(u64, u64) -> u64) -> u64
     decreases n,
 {

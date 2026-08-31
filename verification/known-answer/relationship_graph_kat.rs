@@ -41,10 +41,9 @@ fn main() {
         g.add_edge(0, 1, 2),
         false,
     );
-    all_ok &= check("duplicate does not grow edge set carrier", g.edges.len(), 1);
     all_ok &= check(
-        "duplicate does not grow adjacency carrier",
-        g.adjacency.len(),
+        "duplicate does not grow edge registry",
+        g.registry.entries.len(),
         1,
     );
 
@@ -53,11 +52,15 @@ fn main() {
         g.add_edge(0, 1, 4),
         true,
     );
-    all_ok &= check("second weight grows weighted set", g.edges.len(), 2);
     all_ok &= check(
-        "same pair does not duplicate adjacency",
-        g.adjacency.len(),
-        1,
+        "second weight grows weighted registry",
+        g.registry.entries.len(),
+        2,
+    );
+    all_ok &= check(
+        "same pair remains present in adjacency projection",
+        g.contains_pair(0, 1),
+        true,
     );
     all_ok &= check(
         "second weighted member present",
@@ -89,18 +92,12 @@ fn main() {
         true,
     );
 
-    let before_edges = g.edges.clone();
-    let before_adj = g.adjacency.clone();
+    let before_edges = g.registry.entries.clone();
     g.remove_edge(2, 0);
     all_ok &= check(
-        "absent removal frames weighted carrier",
-        g.edges,
+        "absent removal frames edge registry",
+        g.registry.entries,
         before_edges,
-    );
-    all_ok &= check(
-        "absent removal frames adjacency carrier",
-        g.adjacency,
-        before_adj,
     );
 
     if all_ok {

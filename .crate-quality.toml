@@ -1,0 +1,91 @@
+schema = 1
+default_profile = "full"
+continue_on_failure = true
+timeout_seconds = 900
+cargo_deny = "required"
+cargo_semver_checks = "required"
+cargo_semver_checks_environment = { CARGO_BUILD_RUSTFLAGS = "-Cdebuginfo=0" }
+
+[policy]
+required_metadata = [
+    "description",
+    "repository",
+    "documentation",
+    "rust-version",
+    "readme",
+    "license",
+]
+required_metadata_arrays = ["keywords", "categories"]
+required_package_files = [
+    "Cargo.toml",
+    "Cargo.lock",
+    ".crate-quality.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "MAINTAINER_ARCHITECTURE.md",
+    "SECURITY.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "deny.toml",
+    "examples/catalog.rs",
+    "tests/public_api.rs",
+    "verification/README.md",
+    "verification/run_known_answer.sh",
+    "verification/run_packaged_consumer.sh",
+    "verification/run_verus_gate.sh",
+    "verification/run_packaged_verus_consumer.sh",
+]
+forbidden_package_components = [
+    "target",
+    "_apalache-out",
+    ".tlacache",
+    "__pycache__",
+]
+minimum_doctests = 36
+
+[[commands]]
+name = "known-answer"
+command = ["{bash}", "--login", "verification/run_known_answer.sh"]
+profiles = ["full", "release"]
+timeout_seconds = 900
+
+[[commands]]
+name = "packaged-public-api"
+command = ["{bash}", "--login", "verification/run_packaged_consumer.sh"]
+profiles = ["release"]
+environment = { PACKAGE_ALLOW_DIRTY = "1" }
+timeout_seconds = 1200
+
+[[commands]]
+name = "formal-verus"
+command = ["{bash}", "--login", "verification/run_verus_gate.sh"]
+profiles = ["release"]
+timeout_seconds = 1200
+
+[[commands]]
+name = "packaged-formal-consumer"
+command = ["{bash}", "--login", "verification/run_packaged_verus_consumer.sh"]
+profiles = ["release"]
+timeout_seconds = 1200
+
+[[commands]]
+name = "actionlint"
+command = ["actionlint", "-no-color"]
+profiles = ["release"]
+timeout_seconds = 120
+
+[[commands]]
+name = "shellcheck"
+command = [
+    "shellcheck",
+    "{crate}/verification/prepare_package.sh",
+    "{crate}/verification/prepare_path_consumer.sh",
+    "{crate}/verification/run_downstream_verus.sh",
+    "{crate}/verification/run_known_answer.sh",
+    "{crate}/verification/run_packaged_consumer.sh",
+    "{crate}/verification/run_packaged_verus_consumer.sh",
+    "{crate}/verification/run_verus_gate.sh",
+]
+profiles = ["release"]
+timeout_seconds = 120

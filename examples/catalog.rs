@@ -7,8 +7,9 @@ use automation_structures::{
     Budget, Buffer, CompetitiveSelectionHard, CompetitiveSelectionHardExclusive,
     CompetitiveSelectionRanked, CompetitiveSelectionSoft, ConvergenceGovernor, Counter, Cursor,
     EquivalenceClass, FederatedBudget, ForkJoin, Marker, PropagationPass, QualityHierarchy,
-    RateLimit, Reduction, RelationshipGraph, ResourceRegistry, Sampler, Sequential, Signal,
-    StepGraph, StreamGraph, TraversalEngine, projection_consistent, strictly_before,
+    RateLimit, Reduction, RelationshipGraph, ResourceRegistry, Sampler, SelectThenActuate,
+    Sequential, Signal, StepGraph, StreamGraph, TraversalEngine, projection_consistent,
+    strictly_before,
 };
 
 macro_rules! assert_debuggable {
@@ -96,6 +97,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut sampler = Sampler::new(vec![1, 1], 1);
     sampler.sample(0)?;
 
+    let mut select_then_actuate = SelectThenActuate::new(1, 2)?;
+    select_then_actuate.update_score(0, 0, 1)?;
+    assert_eq!(select_then_actuate.evaluate(0)?, 0);
+    select_then_actuate.actuate(0)?;
+    select_then_actuate.finish()?;
+
     let mut signal = Signal::new(0, 2, 1)?;
     assert!(signal.set_value(1)?);
     signal.notify(0)?;
@@ -130,6 +137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut accumulator = Accumulator::new(vec![1]);
     assert_eq!(accumulator.advance(), Some(1));
+    assert_eq!(accumulator.accumulated(0), Some(1));
 
     let mut marker = Marker::new(false);
     assert!(marker.set());
@@ -165,6 +173,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         reduction,
         graph,
         sampler,
+        select_then_actuate,
         signal,
         traversal,
         sequential,

@@ -21,6 +21,18 @@ pub enum SequentialBuildError {
 }
 
 /// A totally ordered, finite-step execution modality.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::Sequential;
+///
+/// let mut execution = Sequential::new(1, 3, 0)?;
+/// assert!(execution.begin_step());
+/// assert!(execution.complete_step(2));
+/// assert!(execution.is_done());
+/// # Ok::<(), automation_structures::SequentialBuildError>(())
+/// ```
 pub struct Sequential {
     inner: SequentialCarrier,
 }
@@ -30,6 +42,11 @@ impl Sequential {
     closed spec fn well_formed(&self) -> bool { self.inner.inv() }
 
     /// Validate and construct an inactive sequential execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero steps, an empty value domain, or an out-of-domain
+    /// initial value.
     pub fn new(steps: usize, value_domain_size: u64, initial_value: u64)
         -> (result: Result<Self, SequentialBuildError>) {
         if steps == 0 { return Err(SequentialBuildError::NoSteps); }
@@ -117,6 +134,20 @@ pub enum ForkJoinPhase {
 }
 
 /// A barriered fork-join execution with a stable output snapshot.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::ForkJoin;
+///
+/// let mut execution = ForkJoin::new(1, 4, 0)?;
+/// assert!(execution.start_worker(0));
+/// assert!(execution.complete_worker(0, 3));
+/// assert!(execution.barrier());
+/// assert!(execution.produce_output());
+/// assert_eq!(execution.outputs(), Some(&[3][..]));
+/// # Ok::<(), automation_structures::ForkJoinBuildError>(())
+/// ```
 pub struct ForkJoin {
     inner: ForkJoinCarrier,
 }
@@ -126,6 +157,10 @@ impl ForkJoin {
     closed spec fn well_formed(&self) -> bool { self.inner.inv() }
 
     /// Validate and construct a fork-join execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty value domain or an out-of-domain initial value.
     pub fn new(workers: usize, value_domain_size: u64, initial_value: u64)
         -> (result: Result<Self, ForkJoinBuildError>) {
         if value_domain_size == 0 { return Err(ForkJoinBuildError::EmptyValueDomain); }
@@ -143,9 +178,7 @@ impl ForkJoin {
 
     /// Current global phase.
     pub fn phase(&self) -> ForkJoinPhase {
-        if self.inner.phase == 0 { ForkJoinPhase::Fork }
-        else if self.inner.phase == 1 { ForkJoinPhase::Join }
-        else { ForkJoinPhase::Done }
+        self.inner.phase
     }
 
     /// Whether the output snapshot is ready.
@@ -155,9 +188,7 @@ impl ForkJoin {
     #[expect(clippy::indexing_slicing, reason = "the branch proves the worker index is in bounds")]
     pub fn worker_state(&self, worker: usize) -> Option<WorkerState> {
         if worker >= self.inner.wstate.len() { return None; }
-        Some(if self.inner.wstate[worker] == 0 { WorkerState::Ready }
-            else if self.inner.wstate[worker] == 1 { WorkerState::Running }
-            else { WorkerState::Complete })
+        Some(self.inner.wstate[worker])
     }
 
     /// Read one worker's current value.
@@ -243,6 +274,18 @@ pub enum StepState {
 }
 
 /// A predecessor-governed directed step graph.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::StepGraph;
+///
+/// let mut graph = StepGraph::new(2, vec![(0, 1)])?;
+/// assert!(graph.start(0));
+/// assert!(graph.complete(0));
+/// assert!(graph.become_ready(1));
+/// # Ok::<(), automation_structures::StepGraphBuildError>(())
+/// ```
 pub struct StepGraph {
     inner: StepGraphCarrier,
 }
@@ -252,6 +295,10 @@ impl StepGraph {
     closed spec fn well_formed(&self) -> bool { self.inner.inv() }
 
     /// Validate edges and construct initial readiness states.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an endpoint is outside the node universe or an edge is duplicated.
     pub fn new(num_nodes: usize, edges: Vec<(usize, usize)>)
         -> (result: Result<Self, StepGraphBuildError>) {
         if !step_edges_valid(&edges, num_nodes) {
@@ -280,10 +327,7 @@ impl StepGraph {
     #[expect(clippy::indexing_slicing, reason = "the branch proves the node index is in bounds")]
     pub fn state(&self, node: usize) -> Option<StepState> {
         if node >= self.inner.nstate.len() { return None; }
-        Some(if self.inner.nstate[node] == 0 { StepState::NotReady }
-            else if self.inner.nstate[node] == 1 { StepState::Ready }
-            else if self.inner.nstate[node] == 2 { StepState::Running }
-            else { StepState::Complete })
+        Some(self.inner.nstate[node])
     }
 
     /// Promote a blocked node after every predecessor completes.
@@ -328,8 +372,8 @@ impl StepGraph {
             invariant index <= self.inner.nstate.len(),
             decreases self.inner.nstate.len() - index,
         {
-            if self.inner.nstate[index] != 3 { return false; }
-            index = index + 1;
+            if !matches!(self.inner.nstate[index], StepState::Complete) { return false; }
+            index += 1;
         }
         true
     }
@@ -348,6 +392,19 @@ pub enum StreamGraphBuildError {
 }
 
 /// A bounded three- or four-stage FIFO stream graph.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::StreamGraph;
+///
+/// let mut graph = StreamGraph::new(3, 1, 1, 4)?;
+/// assert!(graph.ingest(3));
+/// assert!(graph.advance_first());
+/// assert_eq!(graph.consume(), Some(3));
+/// assert!(graph.is_done());
+/// # Ok::<(), automation_structures::StreamGraphBuildError>(())
+/// ```
 pub struct StreamGraph {
     inner: StreamGraphCarrier,
 }
@@ -357,6 +414,11 @@ impl StreamGraph {
     closed spec fn well_formed(&self) -> bool { self.inner.inv() }
 
     /// Validate and construct an empty stream graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported chain length, zero queue capacity, or an
+    /// empty record domain.
     pub fn new(chain_length: usize, capacity: usize, max_inputs: usize, record_domain_size: u64)
         -> (result: Result<Self, StreamGraphBuildError>) {
         if chain_length != 3 && chain_length != 4 {
@@ -373,13 +435,13 @@ impl StreamGraph {
     pub fn chain_length(&self) -> usize { self.inner.chain_length }
 
     /// Per-edge FIFO capacity.
-    pub fn capacity(&self) -> usize { self.inner.capacity }
+    pub fn capacity(&self) -> usize { self.inner.capacity() }
 
     /// Records admitted at the source.
-    pub fn ingested(&self) -> usize { self.inner.ingested }
+    pub fn ingested(&self) -> usize { self.inner.ingested.value() as usize }
 
     /// Records consumed at the sink.
-    pub fn emitted(&self) -> usize { self.inner.emitted }
+    pub fn emitted(&self) -> usize { self.inner.emitted.value() as usize }
 
     /// Current depth of the first queue.
     pub fn first_queue_len(&self) -> usize { self.inner.q1.len() }
@@ -429,10 +491,10 @@ impl StreamGraph {
         proof { use_type_invariant(&*self); }
         let value = if self.inner.chain_length == 3 {
             if self.inner.q2.is_empty() { return None; }
-            self.inner.q2[0]
+            self.inner.q2.values[0]
         } else {
             if self.inner.q3.is_empty() { return None; }
-            self.inner.q3[0]
+            self.inner.q3.values[0]
         };
         let mut carrier = stream_graph_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -447,7 +509,7 @@ impl StreamGraph {
 
     /// Whether the input bound is reached and every queue is drained.
     pub fn is_done(&self) -> bool {
-        self.inner.ingested == self.inner.max_inputs
+        self.inner.ingested.value() == self.inner.max_inputs as u64
             && self.inner.q1.is_empty()
             && self.inner.q2.is_empty()
             && self.inner.q3.is_empty()
@@ -531,27 +593,79 @@ fn stream_graph_sentinel() -> (carrier: StreamGraphCarrier)
 
 }
 
-macro_rules! impl_error {
-    ($type:ty, { $($variant:path => $message:literal),+ $(,)? }) => {
-        impl core::fmt::Display for $type {
-            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                formatter.write_str(match self { $($variant => $message),+ })
-            }
-        }
-        impl std::error::Error for $type {}
-    };
+impl Sequential {
+    /// Exclusive upper bound of carried values.
+    pub fn value_domain_size(&self) -> u64 {
+        self.inner.value_domain_size
+    }
+
+    /// Borrow completed-step values in execution order.
+    pub fn history_values(&self) -> &[u64] {
+        self.inner.history.as_slice()
+    }
 }
 
-macro_rules! impl_observational_debug {
-    ($type:ty, $name:literal, $($field:literal => $method:ident),+ $(,)?) => {
-        impl core::fmt::Debug for $type {
-            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                let mut state = formatter.debug_struct($name);
-                $(state.field($field, &self.$method());)+
-                state.finish()
-            }
-        }
-    };
+impl ForkJoin {
+    /// Exclusive upper bound of worker values.
+    pub fn value_domain_size(&self) -> u64 {
+        self.inner.value_domain_size
+    }
+
+    /// Borrow worker lifecycle states by worker index.
+    pub fn worker_states(&self) -> &[WorkerState] {
+        self.inner.wstate.as_slice()
+    }
+
+    /// Borrow current worker values by worker index.
+    pub fn worker_values(&self) -> &[u64] {
+        self.inner.wvalue.as_slice()
+    }
+
+    /// Borrow the stable output snapshot after output production.
+    pub fn outputs(&self) -> Option<&[u64]> {
+        self.inner
+            .output_ready
+            .then_some(self.inner.output_snapshot.as_slice())
+    }
+}
+
+impl StepGraph {
+    /// Borrow directed predecessor edges in configured order.
+    pub fn edges(&self) -> &[(usize, usize)] {
+        self.inner.edges.as_slice()
+    }
+
+    /// Borrow all current step states by node index.
+    pub fn states(&self) -> &[StepState] {
+        self.inner.nstate.as_slice()
+    }
+}
+
+impl StreamGraph {
+    /// Maximum number of source records admitted by this run.
+    pub fn max_inputs(&self) -> usize {
+        self.inner.max_inputs
+    }
+
+    /// Exclusive upper bound of record values.
+    pub fn record_domain_size(&self) -> u64 {
+        self.inner.record_domain_size
+    }
+
+    /// Borrow records waiting at the first FIFO edge.
+    pub fn first_queue(&self) -> &[u64] {
+        self.inner.q1.values.as_slice()
+    }
+
+    /// Borrow records waiting at the second FIFO edge.
+    pub fn second_queue(&self) -> &[u64] {
+        self.inner.q2.values.as_slice()
+    }
+
+    /// Borrow records waiting at the optional third FIFO edge.
+    pub fn third_queue(&self) -> &[u64] {
+        self.inner.q3.values.as_slice()
+    }
 }
 
 impl_observational_debug!(Sequential, "Sequential",
@@ -582,20 +696,20 @@ impl_observational_debug!(StreamGraph, "StreamGraph",
     "done" => is_done,
 );
 
-impl_error!(SequentialBuildError, {
+impl_public_error!(SequentialBuildError, {
     Self::NoSteps => "sequential execution requires at least one step",
     Self::EmptyValueDomain => "sequential value domain is empty",
     Self::InitialValueOutOfRange => "initial sequential value is outside its domain",
 });
-impl_error!(ForkJoinBuildError, {
+impl_public_error!(ForkJoinBuildError, {
     Self::EmptyValueDomain => "fork-join value domain is empty",
     Self::InitialValueOutOfRange => "initial worker value is outside its domain",
 });
-impl_error!(StepGraphBuildError, {
+impl_public_error!(StepGraphBuildError, {
     Self::EdgeEndpointOutOfRange => "step-graph edge endpoint is outside the node universe",
     Self::DuplicateEdge => "step graph contains a duplicate edge",
 });
-impl_error!(StreamGraphBuildError, {
+impl_public_error!(StreamGraphBuildError, {
     Self::UnsupportedChainLength => "stream graph supports only three- or four-stage chains",
     Self::ZeroCapacity => "stream-graph queue capacity must be positive",
     Self::EmptyRecordDomain => "stream-graph record domain is empty",

@@ -9,6 +9,7 @@ use crate::compositions::rate_limit::RateLimit as RateLimitCarrier;
 use crate::compositions::reduction::Reducer as ReductionCarrier;
 use crate::compositions::relationship_graph::RelationshipGraph as RelationshipGraphCarrier;
 use crate::compositions::sampler::Sampler as SamplerCarrier;
+use crate::compositions::select_then_actuate::SelectThenActuate as SelectThenActuateCarrier;
 use crate::compositions::signal::Signal as SignalCarrier;
 use crate::compositions::traversal_engine::TraversalEngine as TraversalEngineCarrier;
 use vstd::prelude::*;
@@ -30,6 +31,17 @@ pub enum AllocationSnapshotError {
 }
 
 /// A reusable accepted-node snapshot coupled to one capacity budget.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::AllocationSnapshot;
+///
+/// let mut snapshot = AllocationSnapshot::new(7, 3);
+/// snapshot.accept(0, 3)?;
+/// assert_eq!(snapshot.accepted_entries().copied().collect::<Vec<_>>(), vec![(0, 3)]);
+/// # Ok::<(), automation_structures::AllocationSnapshotError>(())
+/// ```
 pub struct AllocationSnapshot {
     inner: AllocationSnapshotCarrier,
 }
@@ -46,39 +58,65 @@ impl AllocationSnapshot {
     }
 
     /// Fixed capacity ceiling.
-    pub fn capacity(&self) -> u64 { self.inner.capacity }
+    pub fn capacity(&self) -> u64 { self.inner.budget.capacity }
 
     /// Size of the admitted node universe.
     pub fn num_nodes(&self) -> u64 { self.inner.num_nodes }
 
     /// Cost accepted into the snapshot.
-    pub fn total_cost(&self) -> u64 { self.inner.total_cost }
+    pub fn total_cost(&self) -> u64 { self.inner.budget.allocated }
 
     /// Capacity not yet consumed.
-    pub fn budget_remaining(&self) -> u64 { self.inner.budget_remaining }
+    pub fn budget_remaining(&self) -> u64 {
+        proof { use_type_invariant(&*self); }
+        self.inner.budget.available()
+    }
 
     /// Number of accepted nodes.
-    pub fn len(&self) -> usize { self.inner.accepted.len() }
+    pub fn len(&self) -> usize { self.inner.registry.entries.len() }
 
     /// Whether no nodes have been accepted.
-    pub fn is_empty(&self) -> bool { self.inner.accepted.is_empty() }
+    pub fn is_empty(&self) -> bool { self.inner.registry.entries.is_empty() }
 
     /// Whether a node has been accepted.
-    pub fn contains(&self, node: u64) -> bool { self.inner.contains_exec(node) }
+    pub fn contains(&self, node: u64) -> bool {
+        proof { use_type_invariant(&*self); }
+        self.inner.contains_exec(node)
+    }
 
     /// Read one accepted node by insertion order.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the accepted-node index is in bounds")]
     pub fn accepted(&self, index: usize) -> Option<u64> {
-        if index < self.inner.accepted.len() { Some(self.inner.accepted[index]) } else { None }
+        if index < self.inner.registry.entries.len() {
+            Some(self.inner.registry.entries[index].0)
+        } else {
+            None
+        }
+    }
+
+    /// Read the cost registered for one accepted node by insertion order.
+    #[expect(clippy::indexing_slicing, reason = "the branch proves the registry index is in bounds")]
+    pub fn accepted_cost(&self, index: usize) -> Option<u64> {
+        if index < self.inner.registry.entries.len() {
+            Some(self.inner.registry.entries[index].1)
+        } else {
+            None
+        }
     }
 
     /// Accept a fresh node whose positive cost fits the remaining capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the node or cost violates the configured universe,
+    /// uniqueness, positivity, or capacity constraints.
     pub fn accept(&mut self, node: u64, cost: u64) -> (result: Result<(), AllocationSnapshotError>) {
         proof { use_type_invariant(&*self); }
         if node >= self.inner.num_nodes { return Err(AllocationSnapshotError::NodeOutOfRange); }
         if self.inner.contains_exec(node) { return Err(AllocationSnapshotError::NodeAlreadyAccepted); }
         if cost == 0 { return Err(AllocationSnapshotError::ZeroCost); }
-        if cost > self.inner.budget_remaining { return Err(AllocationSnapshotError::InsufficientBudget); }
+        let available = self.inner.budget.available();
+        if cost > available { return Err(AllocationSnapshotError::InsufficientBudget); }
         let mut carrier = allocation_snapshot_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
         carrier.accept_node(node, cost);
@@ -88,6 +126,17 @@ impl AllocationSnapshot {
 }
 
 /// A master capacity pool divided into reusable sub-pools.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::FederatedBudget;
+///
+/// let mut budget = FederatedBudget::new(10, 2);
+/// assert!(budget.try_delegate(0, 6));
+/// assert!(budget.try_allocate(0, 4));
+/// assert_eq!(budget.pool_allocated(0), Some(4));
+/// ```
 pub struct FederatedBudget {
     inner: FederatedBudgetCarrier,
 }
@@ -102,27 +151,36 @@ impl FederatedBudget {
     }
 
     /// Fixed master capacity.
-    pub fn master_capacity(&self) -> u64 { self.inner.master_capacity }
+    pub fn master_capacity(&self) -> u64 { self.inner.master.capacity }
 
     /// Master capacity currently delegated to sub-pools.
-    pub fn master_allocated(&self) -> u64 { self.inner.master_allocated }
+    pub fn master_allocated(&self) -> u64 { self.inner.master.allocated }
 
     /// Number of sub-pools.
-    pub fn len(&self) -> usize { self.inner.sub_capacities.len() }
+    pub fn len(&self) -> usize { self.inner.sub_pools.len() }
 
     /// Whether no sub-pools are configured.
-    pub fn is_empty(&self) -> bool { self.inner.sub_capacities.is_empty() }
+    pub fn is_empty(&self) -> bool { self.inner.sub_pools.is_empty() }
 
     /// Read one sub-pool capacity.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the pool index is in bounds")]
     pub fn pool_capacity(&self, pool: usize) -> Option<u64> {
-        if pool < self.inner.sub_capacities.len() { Some(self.inner.sub_capacities[pool]) } else { None }
+        proof { use_type_invariant(&*self); }
+        if pool < self.inner.sub_pools.len() {
+            Some(self.inner.sub_pools[pool].allocated + self.inner.sub_pools[pool].reserved)
+        } else {
+            None
+        }
     }
 
     /// Read one sub-pool allocation.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the pool index is in bounds")]
     pub fn pool_allocated(&self, pool: usize) -> Option<u64> {
-        if pool < self.inner.sub_allocated.len() { Some(self.inner.sub_allocated[pool]) } else { None }
+        if pool < self.inner.sub_pools.len() {
+            Some(self.inner.sub_pools[pool].allocated)
+        } else {
+            None
+        }
     }
 
     /// Try to delegate master capacity to a sub-pool.
@@ -178,6 +236,17 @@ pub enum BisectionError {
 }
 
 /// A bounded monotone-boundary bisection machine.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::Bisection;
+///
+/// let mut search = Bisection::new(16, 11)?;
+/// search.converge();
+/// assert!(search.lower() <= 11 && 11 <= search.upper());
+/// # Ok::<(), automation_structures::BisectionBuildError>(())
+/// ```
 pub struct Bisection {
     inner: BisectionCarrier,
 }
@@ -187,6 +256,11 @@ impl Bisection {
     closed spec fn well_formed(&self) -> bool { self.inner.invariant() }
 
     /// Construct a full-domain bisection using the complete `u64` probe budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain has fewer than two points or the threshold
+    /// is not strictly inside the domain.
     pub fn new(domain_size: u64, threshold: u64) -> (result: Result<Self, BisectionBuildError>) {
         if domain_size < 2 { return Err(BisectionBuildError::DomainTooSmall); }
         if threshold < 1 || threshold >= domain_size {
@@ -207,10 +281,10 @@ impl Bisection {
     pub fn threshold(&self) -> u64 { self.inner.threshold }
 
     /// Number of probes taken.
-    pub fn probes_taken(&self) -> u64 { self.inner.probes_taken }
+    pub fn probes_taken(&self) -> u64 { self.inner.budget.allocated }
 
     /// Maximum number of probes.
-    pub fn max_probes(&self) -> u64 { self.inner.max_probes }
+    pub fn max_probes(&self) -> u64 { self.inner.budget.capacity }
 
     /// Whether the candidate interval has width less than two.
     pub fn is_converged(&self) -> bool {
@@ -219,6 +293,10 @@ impl Bisection {
     }
 
     /// Perform one midpoint probe.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BisectionError::AlreadyConverged`] when no further probe is enabled.
     pub fn probe(&mut self) -> (result: Result<(), BisectionError>) {
         proof { use_type_invariant(&*self); }
         if self.inner.hi - self.inner.lo < 2 { return Err(BisectionError::AlreadyConverged); }
@@ -248,6 +326,17 @@ pub enum EquivalenceClassError {
 }
 
 /// A bounded union-by-rank equivalence-class partition.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::EquivalenceClass;
+///
+/// let mut classes = EquivalenceClass::new(3, 2);
+/// assert!(classes.union(0, 1)?);
+/// assert!(classes.equivalent(0, 1)?);
+/// # Ok::<(), automation_structures::EquivalenceClassError>(())
+/// ```
 pub struct EquivalenceClass {
     inner: EquivalenceClassCarrier,
 }
@@ -268,12 +357,16 @@ impl EquivalenceClass {
     pub fn is_empty(&self) -> bool { self.inner.n == 0 }
 
     /// Successful union operations performed.
-    pub fn unions_performed(&self) -> u64 { self.inner.ops_done }
+    pub fn unions_performed(&self) -> u64 { self.inner.budget.allocated }
 
     /// Configured union-operation ceiling.
-    pub fn max_unions(&self) -> u64 { self.inner.max_ops }
+    pub fn max_unions(&self) -> u64 { self.inner.budget.capacity }
 
     /// Find an element's representative.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EquivalenceClassError::ElementOutOfRange`] for an unknown element.
     pub fn representative(&self, element: usize) -> (result: Result<usize, EquivalenceClassError>) {
         proof { use_type_invariant(&*self); }
         if element >= self.inner.n { return Err(EquivalenceClassError::ElementOutOfRange); }
@@ -281,6 +374,10 @@ impl EquivalenceClass {
     }
 
     /// Merge two classes, returning false if equal or the operation ceiling is exhausted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EquivalenceClassError::ElementOutOfRange`] when either element is unknown.
     pub fn union(&mut self, left: usize, right: usize) -> (result: Result<bool, EquivalenceClassError>) {
         proof { use_type_invariant(&*self); }
         if left >= self.inner.n || right >= self.inner.n {
@@ -294,6 +391,10 @@ impl EquivalenceClass {
     }
 
     /// Test whether two elements have the same representative.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EquivalenceClassError::ElementOutOfRange`] when either element is unknown.
     pub fn equivalent(&self, left: usize, right: usize) -> (result: Result<bool, EquivalenceClassError>) {
         proof { use_type_invariant(&*self); }
         if left >= self.inner.n || right >= self.inner.n {
@@ -320,6 +421,17 @@ pub enum RateLimitError {
 }
 
 /// A logical-clock, fixed-window rate limit.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::RateLimit;
+///
+/// let mut limit = RateLimit::new(2, 5, 10)?;
+/// assert!(limit.try_acquire());
+/// limit.tick()?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct RateLimit {
     inner: RateLimitCarrier,
 }
@@ -331,6 +443,10 @@ impl RateLimit {
     }
 
     /// Construct a rate limit at logical clock zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RateLimitBuildError::ZeroLimit`] when no operation can be admitted.
     pub fn new(max_per_window: u64, window_duration: u64, max_clock: u64)
         -> (result: Result<Self, RateLimitBuildError>) {
         if max_per_window == 0 { return Err(RateLimitBuildError::ZeroLimit); }
@@ -338,13 +454,13 @@ impl RateLimit {
     }
 
     /// Per-window admission ceiling.
-    pub fn max_per_window(&self) -> u64 { self.inner.max_per_window }
+    pub fn max_per_window(&self) -> u64 { self.inner.budget.capacity }
 
     /// Window duration in logical-clock units.
     pub fn window_duration(&self) -> u64 { self.inner.window_duration }
 
     /// Acquisitions admitted in the current window.
-    pub fn count(&self) -> u64 { self.inner.count }
+    pub fn count(&self) -> u64 { self.inner.budget.allocated }
 
     /// Current logical clock.
     pub fn clock(&self) -> u64 { self.inner.clock }
@@ -364,6 +480,10 @@ impl RateLimit {
     }
 
     /// Advance the bounded logical clock by one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RateLimitError::ClockExhausted`] at the configured clock ceiling.
     pub fn tick(&mut self) -> (result: Result<(), RateLimitError>) {
         proof { use_type_invariant(&*self); }
         if self.inner.clock >= self.inner.max_clock { return Err(RateLimitError::ClockExhausted); }
@@ -394,6 +514,17 @@ pub enum ReductionError {
 }
 
 /// An incremental additive ordered-prefix reduction.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::Reduction;
+///
+/// let mut reduction = Reduction::new(vec![2, 3])?;
+/// reduction.process_next()?;
+/// assert_eq!(reduction.result(), 2);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct Reduction {
     inner: ReductionCarrier,
 }
@@ -401,10 +532,14 @@ pub struct Reduction {
 impl Reduction {
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool {
-        self.inner.partition() && self.inner.aggregate() && self.inner.bounded()
+        self.inner.inv()
     }
 
     /// Validate and construct an incremental sum reduction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the item count or an item value exceeds its verified ceiling.
     pub fn new(items: Vec<u64>) -> (result: Result<Self, ReductionBuildError>) {
         if items.len() > 1_000_000_000 { return Err(ReductionBuildError::TooManyItems); }
         if !values_within_max(&items, 1_000_000_000) {
@@ -414,21 +549,31 @@ impl Reduction {
     }
 
     /// Current additive result.
-    pub fn result(&self) -> u64 { self.inner.result }
+    pub fn result(&self) -> u64 { self.inner.result() }
 
     /// Number of consumed items.
-    pub fn processed_len(&self) -> usize { self.inner.processed.len() }
+    pub fn processed_len(&self) -> usize { self.inner.position() }
 
     /// Number of pending items.
-    pub fn remaining_len(&self) -> usize { self.inner.remaining.len() }
+    pub fn remaining_len(&self) -> usize {
+        proof { use_type_invariant(&*self); }
+        self.inner.remaining_len()
+    }
 
     /// Whether the whole input has been consumed.
-    pub fn is_complete(&self) -> bool { self.inner.done() }
+    pub fn is_complete(&self) -> bool {
+        proof { use_type_invariant(&*self); }
+        self.inner.done()
+    }
 
     /// Consume the next item in original order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReductionError::Complete`] after every item has been consumed.
     pub fn process_next(&mut self) -> (result: Result<(), ReductionError>) {
         proof { use_type_invariant(&*self); }
-        if self.inner.remaining.is_empty() { return Err(ReductionError::Complete); }
+        if self.inner.done() { return Err(ReductionError::Complete); }
         let mut carrier = reduction_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
         carrier.process();
@@ -450,6 +595,17 @@ pub enum RelationshipGraphError {
 }
 
 /// A weighted directed graph with a consistent adjacency projection.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::RelationshipGraph;
+///
+/// let mut graph = RelationshipGraph::new(3, 10);
+/// assert!(graph.add_edge(0, 1, 4)?);
+/// assert!(graph.contains(0, 1));
+/// # Ok::<(), automation_structures::RelationshipGraphError>(())
+/// ```
 pub struct RelationshipGraph {
     inner: RelationshipGraphCarrier,
 }
@@ -470,20 +626,28 @@ impl RelationshipGraph {
     pub fn max_weight(&self) -> u64 { self.inner.max_weight }
 
     /// Number of concrete weighted edges.
-    pub fn edge_count(&self) -> usize { self.inner.edges.len() }
+    pub fn edge_count(&self) -> usize { self.inner.registry.entries.len() }
 
     /// Read a concrete weighted edge by insertion order.
-    #[expect(clippy::indexing_slicing, reason = "the branch proves the edge index is in bounds")]
     pub fn edge(&self, index: usize) -> Option<(usize, usize, u64)> {
-        if index < self.inner.edges.len() { Some(self.inner.edges[index]) } else { None }
+        if index < self.inner.registry.entries.len() {
+            Some(self.inner.registry.entries[index].0)
+        } else {
+            None
+        }
     }
 
     /// Whether any weighted edge exists for a source-destination pair.
     pub fn contains(&self, source: usize, destination: usize) -> bool {
+        proof { use_type_invariant(&*self); }
         self.inner.contains_pair(source, destination)
     }
 
     /// Add one concrete weighted edge if it is not already present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown endpoint, an excessive weight, or a self-loop.
     pub fn add_edge(&mut self, source: usize, destination: usize, weight: u64)
         -> (result: Result<bool, RelationshipGraphError>) {
         proof { use_type_invariant(&*self); }
@@ -524,6 +688,17 @@ pub enum SamplerError {
 }
 
 /// A bounded without-replacement sampler over caller-supplied proposals.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::Sampler;
+///
+/// let mut sampler = Sampler::new(vec![3, 1, 0], 2);
+/// sampler.sample(0)?;
+/// assert_eq!(sampler.selected().collect::<Vec<_>>(), vec![0]);
+/// # Ok::<(), automation_structures::SamplerError>(())
+/// ```
 pub struct Sampler {
     inner: SamplerCarrier,
 }
@@ -538,32 +713,42 @@ impl Sampler {
     }
 
     /// Number of distribution items.
-    pub fn len(&self) -> usize { self.inner.num_items }
+    pub fn len(&self) -> usize { self.inner.actuation.num_seats }
 
     /// Whether the distribution contains no items.
-    pub fn is_empty(&self) -> bool { self.inner.num_items == 0 }
+    pub fn is_empty(&self) -> bool { self.inner.actuation.num_seats == 0 }
 
     /// Maximum selected cardinality.
-    pub fn sample_size(&self) -> usize { self.inner.sample_size }
+    pub fn sample_size(&self) -> usize { self.inner.budget.capacity as usize }
 
     /// Number of selected items.
-    pub fn selected_len(&self) -> usize { self.inner.selected.len() }
+    pub fn selected_len(&self) -> usize { self.inner.budget.allocated as usize }
 
     /// Read one distribution weight.
-    #[expect(clippy::indexing_slicing, reason = "the branch proves the item index is in bounds")]
     pub fn weight(&self, item: usize) -> Option<u64> {
-        if item < self.inner.distribution.len() { Some(self.inner.distribution[item]) } else { None }
+        proof { use_type_invariant(&*self); }
+        if item < self.inner.actuation.num_seats { Some(self.inner.weight(item)) } else { None }
     }
 
     /// Whether an item has already been selected.
-    pub fn contains(&self, item: usize) -> bool { self.inner.contains_exec(item) }
+    pub fn contains(&self, item: usize) -> bool {
+        proof { use_type_invariant(&*self); }
+        self.inner.contains_exec(item)
+    }
 
     /// Admit one supported item directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the item is unknown, unsupported, already selected, or
+    /// the sample is full.
     pub fn sample(&mut self, item: usize) -> (result: Result<(), SamplerError>) {
         proof { use_type_invariant(&*self); }
-        if item >= self.inner.num_items { return Err(SamplerError::ItemOutOfRange); }
-        if self.inner.selected.len() >= self.inner.sample_size { return Err(SamplerError::SampleFull); }
-        if self.inner.distribution[item] == 0 { return Err(SamplerError::OutsideSupport); }
+        if item >= self.inner.actuation.num_seats { return Err(SamplerError::ItemOutOfRange); }
+        if self.inner.budget.allocated >= self.inner.budget.capacity {
+            return Err(SamplerError::SampleFull);
+        }
+        if self.inner.weight(item) == 0 { return Err(SamplerError::OutsideSupport); }
         if self.inner.contains_exec(item) { return Err(SamplerError::AlreadySelected); }
         let mut carrier = sampler_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -584,9 +769,13 @@ impl Sampler {
     }
 
     /// Apply weighted rejection to an externally proposed item and entropy value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SamplerError::ItemOutOfRange`] for an unknown item.
     pub fn draw_weighted(&mut self, item: usize, entropy: u64) -> (result: Result<bool, SamplerError>) {
         proof { use_type_invariant(&*self); }
-        if item >= self.inner.num_items { return Err(SamplerError::ItemOutOfRange); }
+        if item >= self.inner.actuation.num_seats { return Err(SamplerError::ItemOutOfRange); }
         let mut carrier = sampler_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
         let accepted = carrier.draw_weighted(item, entropy);
@@ -595,9 +784,13 @@ impl Sampler {
     }
 
     /// Apply uniform-support admission to an externally proposed item.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SamplerError::ItemOutOfRange`] for an unknown item.
     pub fn draw_uniform(&mut self, item: usize) -> (result: Result<bool, SamplerError>) {
         proof { use_type_invariant(&*self); }
-        if item >= self.inner.num_items { return Err(SamplerError::ItemOutOfRange); }
+        if item >= self.inner.actuation.num_seats { return Err(SamplerError::ItemOutOfRange); }
         let mut carrier = sampler_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
         let accepted = carrier.draw_uniform(item);
@@ -624,9 +817,23 @@ pub enum SignalError {
     ListenerOutOfRange,
     /// The listener has no pending notification.
     ListenerNotPending,
+    /// The configured change log cannot accept another value change.
+    ChangeCapacityExhausted,
 }
 
 /// A change-detecting signal with per-listener notification provenance.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::Signal;
+///
+/// let mut signal = Signal::new(0, 2, 1)?;
+/// assert!(signal.set_value(1)?);
+/// signal.notify(0)?;
+/// assert_eq!(signal.is_notified(0), Some(true));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct Signal {
     inner: SignalCarrier,
 }
@@ -634,26 +841,53 @@ pub struct Signal {
 impl Signal {
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool {
-        self.inner.type_invariant()
-            && self.inner.pending_notified_disjointness()
-            && self.inner.notification_provenance()
+        self.inner.inv()
     }
 
-    /// Construct a signal with no pending notification.
+    /// Construct a signal with no pending notification and the largest representable change log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SignalBuildError::InitialValueOutOfRange`] when the initial value is
+    /// outside the configured value universe.
     pub fn new(initial_value: u64, num_values: u64, num_listeners: usize)
         -> (result: Result<Self, SignalBuildError>) {
+        Self::with_change_capacity(initial_value, num_values, num_listeners, usize::MAX)
+    }
+
+    /// Construct a signal with an explicit maximum number of retained value changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SignalBuildError::InitialValueOutOfRange`] when the initial value is
+    /// outside the configured value universe.
+    pub fn with_change_capacity(
+        initial_value: u64,
+        num_values: u64,
+        num_listeners: usize,
+        max_changes: usize,
+    ) -> (result: Result<Self, SignalBuildError>) {
         if initial_value >= num_values { return Err(SignalBuildError::InitialValueOutOfRange); }
-        Ok(Self { inner: SignalCarrier::new(initial_value, num_values, num_listeners) })
+        Ok(Self { inner: SignalCarrier::new(initial_value, num_values, num_listeners, max_changes) })
     }
 
     /// Current retained value.
-    pub fn value(&self) -> u64 { self.inner.current_value }
+    pub fn value(&self) -> u64 {
+        proof { use_type_invariant(&*self); }
+        self.inner.current_value()
+    }
 
     /// Number of listeners.
     pub fn listener_count(&self) -> usize { self.inner.num_listeners }
 
     /// Whether any actual value change has occurred.
-    pub fn change_observed(&self) -> bool { self.inner.change_observed }
+    pub fn change_observed(&self) -> bool { !self.inner.audit.log.is_empty() }
+
+    /// Maximum number of retained value changes.
+    pub fn change_capacity(&self) -> usize { self.inner.audit.max_log_len }
+
+    /// Number of retained value changes.
+    pub fn change_count(&self) -> usize { self.inner.audit.log.len() }
 
     /// Whether one listener has a pending notification.
     pub fn is_pending(&self, listener: usize) -> Option<bool> {
@@ -668,17 +902,31 @@ impl Signal {
     }
 
     /// Set a value, returning false for an unchanged value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is outside the configured universe or the
+    /// retained change log is full.
     pub fn set_value(&mut self, value: u64) -> (result: Result<bool, SignalError>) {
         proof { use_type_invariant(&*self); }
         if value >= self.inner.num_values { return Err(SignalError::ValueOutOfRange); }
+        let current = self.inner.current_value();
+        if value == current { return Ok(false); }
+        if self.inner.audit.log.len() >= self.inner.audit.max_log_len {
+            return Err(SignalError::ChangeCapacityExhausted);
+        }
         let mut carrier = signal_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
-        let changed = carrier.set_value(value);
+        carrier.set_value(value);
         core::mem::swap(&mut self.inner, &mut carrier);
-        Ok(changed)
+        Ok(true)
     }
 
     /// Move one listener's pending notification into delivered state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the listener is unknown or has no pending notification.
     pub fn notify(&mut self, listener: usize) -> (result: Result<(), SignalError>) {
         proof { use_type_invariant(&*self); }
         if listener >= self.inner.num_listeners { return Err(SignalError::ListenerOutOfRange); }
@@ -716,6 +964,17 @@ pub enum TraversalError {
 }
 
 /// A budgeted star-graph traversal with accepted-subset tracking.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::TraversalEngine;
+///
+/// let mut traversal = TraversalEngine::new(3, 0, 2)?;
+/// traversal.visit(0)?;
+/// assert!(traversal.is_visited(0));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct TraversalEngine {
     inner: TraversalEngineCarrier,
 }
@@ -723,13 +982,14 @@ pub struct TraversalEngine {
 impl TraversalEngine {
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool {
-        self.inner.type_invariant()
-            && self.inner.budget_invariant()
-            && self.inner.accepted_subset_visited()
-            && self.inner.root < self.inner.num_nodes
+        self.inner.inv()
     }
 
     /// Construct a traversal rooted in the configured node universe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the node universe is empty or the root is outside it.
     pub fn new(num_nodes: usize, root: usize, budget: u64)
         -> (result: Result<Self, TraversalBuildError>) {
         if num_nodes == 0 { return Err(TraversalBuildError::NoNodes); }
@@ -744,13 +1004,16 @@ impl TraversalEngine {
     pub fn root(&self) -> usize { self.inner.root }
 
     /// Remaining traversal budget.
-    pub fn budget_remaining(&self) -> u64 { self.inner.budget_remaining }
+    pub fn budget_remaining(&self) -> u64 {
+        proof { use_type_invariant(&*self); }
+        self.inner.budget_remaining()
+    }
 
     /// Number of queued nodes.
     pub fn queued_len(&self) -> usize { self.inner.queue.len() }
 
     /// Number of visited nodes.
-    pub fn visited_len(&self) -> usize { self.inner.visited.len() }
+    pub fn visited_len(&self) -> usize { self.inner.visited_count() }
 
     /// Number of budget-accepted nodes.
     pub fn accepted_len(&self) -> usize { self.inner.accepted.len() }
@@ -765,6 +1028,10 @@ impl TraversalEngine {
     pub fn is_accepted(&self, node: usize) -> bool { self.inner.accepted_contains(node) }
 
     /// Visit one queued, unvisited node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the node is unknown, not queued, or already visited.
     pub fn visit(&mut self, node: usize) -> (result: Result<(), TraversalError>) {
         proof { use_type_invariant(&*self); }
         if node >= self.inner.num_nodes { return Err(TraversalError::NodeOutOfRange); }
@@ -778,6 +1045,10 @@ impl TraversalEngine {
     }
 
     /// Remove one queued node without visiting it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the node is unknown, not queued, or already visited.
     pub fn skip(&mut self, node: usize) -> (result: Result<(), TraversalError>) {
         proof { use_type_invariant(&*self); }
         if node >= self.inner.num_nodes { return Err(TraversalError::NodeOutOfRange); }
@@ -790,12 +1061,210 @@ impl TraversalEngine {
     }
 
     /// Confirm the terminal stutter when no queued work remains.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraversalError::QueueNotEmpty`] while work remains queued.
     pub fn terminate(&mut self) -> (result: Result<(), TraversalError>) {
         proof { use_type_invariant(&*self); }
         if !self.inner.queue.is_empty() { return Err(TraversalError::QueueNotEmpty); }
         let mut carrier = traversal_engine_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
         carrier.terminate();
+        core::mem::swap(&mut self.inner, &mut carrier);
+        Ok(())
+    }
+}
+
+/// Invalid select-then-actuate configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SelectThenActuateBuildError {
+    /// Hard selection requires at least one candidate.
+    NoCandidates,
+}
+
+/// A disabled select-then-actuate transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SelectThenActuateError {
+    /// The seat index is outside the configured seat universe.
+    SeatOutOfRange,
+    /// The candidate index is outside the configured candidate universe.
+    CandidateOutOfRange,
+    /// The pass has already committed its closure transition.
+    PassComplete,
+    /// The seat already has a selected allocation.
+    SeatAlreadyAllocated,
+    /// A score cannot change after the seat's effect has been applied.
+    EffectAlreadyApplied,
+    /// The seat has no selected allocation to actuate.
+    SeatNotAllocated,
+    /// The seat's selected allocation has already been actuated.
+    SeatAlreadyActuated,
+    /// At least one allocated seat still awaits actuation.
+    PassNotReady,
+}
+
+/// Hard selection per seat followed by the shared `ActuationPass` lifecycle.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::SelectThenActuate;
+///
+/// let mut pass = SelectThenActuate::new(1, 2)?;
+/// pass.update_score(0, 1, 9)?;
+/// assert_eq!(pass.evaluate(0)?, 1);
+/// pass.actuate(0)?;
+/// pass.finish()?;
+/// assert!(pass.is_complete());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct SelectThenActuate {
+    inner: SelectThenActuateCarrier,
+}
+
+impl SelectThenActuate {
+    #[verifier::type_invariant]
+    closed spec fn well_formed(&self) -> bool { self.inner.inv() }
+
+    /// Construct empty seat allocations over a nonempty candidate universe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either configured dimension is zero.
+    pub fn new(num_seats: usize, num_candidates: usize)
+        -> (result: Result<Self, SelectThenActuateBuildError>) {
+        if num_candidates == 0 { return Err(SelectThenActuateBuildError::NoCandidates); }
+        Ok(Self { inner: SelectThenActuateCarrier::new(num_seats, num_candidates) })
+    }
+
+    /// Number of independently selected seats.
+    pub fn seat_count(&self) -> usize { self.inner.selections.len() }
+
+    /// Number of candidates available to each seat.
+    pub fn candidate_count(&self) -> usize { self.inner.num_candidates }
+
+    /// Read one score when both indices are in range.
+    pub fn score(&self, seat: usize, candidate: usize) -> Option<u64> {
+        proof { use_type_invariant(&*self); }
+        if seat >= self.inner.selections.len() || candidate >= self.inner.num_candidates {
+            None
+        } else {
+            Some(self.inner.score_at(seat, candidate))
+        }
+    }
+
+    /// Read one seat's current selected candidate.
+    pub fn allocation(&self, seat: usize) -> Option<usize> {
+        proof { use_type_invariant(&*self); }
+        if seat >= self.inner.selections.len() { None } else { self.inner.allocation_at(seat) }
+    }
+
+    /// Whether one in-range seat has applied its selected effect.
+    pub fn is_actuated(&self, seat: usize) -> Option<bool> {
+        proof { use_type_invariant(&*self); }
+        if seat >= self.inner.selections.len() { None } else { Some(self.inner.is_actuated(seat)) }
+    }
+
+    /// Whether the shared actuation pass is complete.
+    pub fn is_complete(&self) -> bool { self.inner.is_complete() }
+
+    /// Revise one unapplied seat's candidate score.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown seat or candidate, or after evaluation has begun.
+    pub fn update_score(
+        &mut self,
+        seat: usize,
+        candidate: usize,
+        value: u64,
+    ) -> (result: Result<(), SelectThenActuateError>) {
+        proof { use_type_invariant(&*self); }
+        if seat >= self.inner.selections.len() {
+            return Err(SelectThenActuateError::SeatOutOfRange);
+        }
+        if candidate >= self.inner.num_candidates {
+            return Err(SelectThenActuateError::CandidateOutOfRange);
+        }
+        if self.inner.actuation.complete { return Err(SelectThenActuateError::PassComplete); }
+        if self.inner.is_actuated(seat) {
+            return Err(SelectThenActuateError::EffectAlreadyApplied);
+        }
+        let mut carrier = select_then_actuate_sentinel();
+        core::mem::swap(&mut self.inner, &mut carrier);
+        carrier.update_score(seat, candidate, value);
+        core::mem::swap(&mut self.inner, &mut carrier);
+        Ok(())
+    }
+
+    /// Select the highest-scoring candidate for one empty seat.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the seat is unknown, already evaluated, or evaluation is disabled.
+    pub fn evaluate(&mut self, seat: usize) -> (result: Result<usize, SelectThenActuateError>) {
+        proof { use_type_invariant(&*self); }
+        if seat >= self.inner.selections.len() {
+            return Err(SelectThenActuateError::SeatOutOfRange);
+        }
+        if self.inner.actuation.complete { return Err(SelectThenActuateError::PassComplete); }
+        if self.inner.is_allocated(seat) {
+            return Err(SelectThenActuateError::SeatAlreadyAllocated);
+        }
+        let mut carrier = select_then_actuate_sentinel();
+        core::mem::swap(&mut self.inner, &mut carrier);
+        carrier.evaluate(seat);
+        let winner = match carrier.allocation_at(seat) {
+            Some(candidate) => candidate,
+            None => {
+                core::mem::swap(&mut self.inner, &mut carrier);
+                return Err(SelectThenActuateError::SeatNotAllocated);
+            },
+        };
+        core::mem::swap(&mut self.inner, &mut carrier);
+        Ok(winner)
+    }
+
+    /// Apply one seat's selected candidate through ActuationPass.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the seat is unknown, not evaluated, already actuated, or
+    /// actuation is disabled.
+    pub fn actuate(&mut self, seat: usize) -> (result: Result<(), SelectThenActuateError>) {
+        proof { use_type_invariant(&*self); }
+        if seat >= self.inner.selections.len() {
+            return Err(SelectThenActuateError::SeatOutOfRange);
+        }
+        if self.inner.actuation.complete { return Err(SelectThenActuateError::PassComplete); }
+        if !self.inner.is_allocated(seat) {
+            return Err(SelectThenActuateError::SeatNotAllocated);
+        }
+        if self.inner.is_actuated(seat) {
+            return Err(SelectThenActuateError::SeatAlreadyActuated);
+        }
+        let mut carrier = select_then_actuate_sentinel();
+        core::mem::swap(&mut self.inner, &mut carrier);
+        carrier.actuate(seat);
+        core::mem::swap(&mut self.inner, &mut carrier);
+        Ok(())
+    }
+
+    /// Close the shared ActuationPass after every allocation is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the pass is already complete or not all seats were actuated.
+    pub fn finish(&mut self) -> (result: Result<(), SelectThenActuateError>) {
+        proof { use_type_invariant(&*self); }
+        if self.inner.actuation.complete { return Err(SelectThenActuateError::PassComplete); }
+        if !self.inner.can_finish() { return Err(SelectThenActuateError::PassNotReady); }
+        let mut carrier = select_then_actuate_sentinel();
+        core::mem::swap(&mut self.inner, &mut carrier);
+        carrier.finish();
         core::mem::swap(&mut self.inner, &mut carrier);
         Ok(())
     }
@@ -833,7 +1302,7 @@ fn rate_limit_sentinel() -> (carrier: RateLimitCarrier)
 { RateLimitCarrier::new(1, 1, 0) }
 
 fn reduction_sentinel() -> (carrier: ReductionCarrier)
-    ensures carrier.partition(), carrier.aggregate(), carrier.bounded(),
+    ensures carrier.inv(),
 {
     let values: Vec<u64> = Vec::new();
     ReductionCarrier::new(values)
@@ -851,43 +1320,159 @@ fn sampler_sentinel() -> (carrier: SamplerCarrier)
 }
 
 fn signal_sentinel() -> (carrier: SignalCarrier)
-    ensures
-        carrier.type_invariant(),
-        carrier.pending_notified_disjointness(),
-        carrier.notification_provenance(),
-{ SignalCarrier::new(0, 1, 0) }
+    ensures carrier.inv(),
+{ SignalCarrier::new(0, 1, 0, 0) }
 
 fn traversal_engine_sentinel() -> (carrier: TraversalEngineCarrier)
-    ensures
-        carrier.type_invariant(),
-        carrier.budget_invariant(),
-        carrier.accepted_subset_visited(),
-        carrier.root < carrier.num_nodes,
+    ensures carrier.inv(),
 { TraversalEngineCarrier::new(1, 0, 0) }
 
+fn select_then_actuate_sentinel() -> (carrier: SelectThenActuateCarrier)
+    ensures carrier.inv(),
+{ SelectThenActuateCarrier::new(0, 1) }
+
 }
 
-macro_rules! impl_error {
-    ($type:ty, { $($variant:path => $message:literal),+ $(,)? }) => {
-        impl core::fmt::Display for $type {
-            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                formatter.write_str(match self { $($variant => $message),+ })
-            }
-        }
-        impl std::error::Error for $type {}
-    };
+impl AllocationSnapshot {
+    /// Iterate over accepted `(node, cost)` pairs in insertion order.
+    pub fn accepted_entries(&self) -> impl ExactSizeIterator<Item = &(u64, u64)> {
+        self.inner.registry.entries.iter()
+    }
 }
 
-macro_rules! impl_observational_debug {
-    ($type:ty, $name:literal, $($field:literal => $method:ident),+ $(,)?) => {
-        impl core::fmt::Debug for $type {
-            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                let mut state = formatter.debug_struct($name);
-                $(state.field($field, &self.$method());)+
-                state.finish()
-            }
-        }
-    };
+impl FederatedBudget {
+    /// Master capacity not yet delegated to a sub-pool.
+    pub fn master_available(&self) -> u64 {
+        self.inner.master.available()
+    }
+
+    /// Iterate over `(delegated capacity, allocated capacity)` for each sub-pool.
+    pub fn pools(&self) -> impl ExactSizeIterator<Item = (u64, u64)> + '_ {
+        self.inner
+            .sub_pools
+            .iter()
+            .map(|pool| (pool.allocated + pool.reserved, pool.allocated))
+    }
+}
+
+impl EquivalenceClass {
+    /// Iterate over each element and its current representative.
+    pub fn representatives(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + '_ {
+        (0..self.len()).map(|element| (element, self.inner.find(element)))
+    }
+}
+
+impl RateLimit {
+    /// Inclusive ceiling of the logical clock.
+    pub fn max_clock(&self) -> u64 {
+        self.inner.max_clock
+    }
+
+    /// Operations still available in the current window.
+    pub fn available(&self) -> u64 {
+        self.inner.budget.available()
+    }
+}
+
+impl Reduction {
+    /// Borrow the immutable reduction input in original order.
+    pub fn items(&self) -> &[u64] {
+        self.inner.source.as_slice()
+    }
+
+    /// Borrow the unprocessed suffix.
+    pub fn remaining(&self) -> &[u64] {
+        &self.inner.source[self.processed_len()..]
+    }
+}
+
+impl RelationshipGraph {
+    /// Borrow exact weighted edges in insertion order.
+    pub fn edges(&self) -> impl ExactSizeIterator<Item = (usize, usize, u64)> + '_ {
+        self.inner.registry.entries.iter().map(|entry| entry.0)
+    }
+}
+
+impl Sampler {
+    /// Iterate over support weights by item index.
+    pub fn weights(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
+        self.inner
+            .actuation
+            .allocation
+            .iter()
+            .map(|entry| entry.unwrap_or(0))
+    }
+
+    /// Iterate over selected item indices.
+    pub fn selected(&self) -> impl Iterator<Item = usize> + '_ {
+        self.inner
+            .actuation
+            .effects
+            .iter()
+            .enumerate()
+            .filter_map(|(item, effect)| effect.is_some().then_some(item))
+    }
+}
+
+impl Signal {
+    /// Exclusive upper bound of the signal value domain.
+    pub fn value_domain_size(&self) -> u64 {
+        self.inner.num_values
+    }
+
+    /// Iterate over `(pending, notified)` listener states.
+    pub fn listeners(&self) -> impl ExactSizeIterator<Item = (bool, bool)> + '_ {
+        (0..self.listener_count()).map(|listener| {
+            (
+                self.inner.is_pending(listener),
+                self.inner.is_notified(listener),
+            )
+        })
+    }
+}
+
+impl TraversalEngine {
+    /// Iterate over queued nodes in frontier order.
+    pub fn queued(&self) -> impl ExactSizeIterator<Item = &usize> {
+        self.inner.queue.values.iter()
+    }
+
+    /// Iterate over visited node indices.
+    pub fn visited(&self) -> impl Iterator<Item = usize> + '_ {
+        self.inner
+            .visited
+            .iter()
+            .enumerate()
+            .filter_map(|(node, marker)| marker.marked.then_some(node))
+    }
+
+    /// Iterate over accepted nodes in traversal order.
+    pub fn accepted(&self) -> impl ExactSizeIterator<Item = &usize> {
+        self.inner.accepted.accumulated.iter()
+    }
+}
+
+impl SelectThenActuate {
+    /// Borrow one seat's candidate scores.
+    pub fn scores(&self, seat: usize) -> Option<&[u64]> {
+        self.inner
+            .selections
+            .get(seat)
+            .map(|selection| selection.scores.as_slice())
+    }
+
+    /// Iterate over current seat allocations.
+    pub fn allocations(&self) -> impl ExactSizeIterator<Item = Option<usize>> + '_ {
+        self.inner
+            .selections
+            .iter()
+            .map(|selection| selection.allocation)
+    }
+
+    /// Borrow committed effects by seat.
+    pub fn effects(&self) -> &[Option<u64>] {
+        self.inner.actuation.effects.as_slice()
+    }
 }
 
 impl_observational_debug!(AllocationSnapshot, "AllocationSnapshot",
@@ -951,50 +1536,69 @@ impl_observational_debug!(TraversalEngine, "TraversalEngine",
     "visited_len" => visited_len,
     "accepted_len" => accepted_len,
 );
+impl_observational_debug!(SelectThenActuate, "SelectThenActuate",
+    "seat_count" => seat_count,
+    "candidate_count" => candidate_count,
+    "complete" => is_complete,
+);
 
-impl_error!(AllocationSnapshotError, {
+impl_public_error!(AllocationSnapshotError, {
     Self::NodeOutOfRange => "node is outside the snapshot universe",
     Self::NodeAlreadyAccepted => "node is already accepted",
     Self::ZeroCost => "accepted node cost must be positive",
     Self::InsufficientBudget => "node cost exceeds the remaining budget",
 });
-impl_error!(BisectionBuildError, {
+impl_public_error!(BisectionBuildError, {
     Self::DomainTooSmall => "bisection domain must contain at least two points",
     Self::ThresholdOutOfRange => "bisection threshold is outside the domain",
 });
-impl_error!(BisectionError, { Self::AlreadyConverged => "bisection is already converged" });
-impl_error!(EquivalenceClassError, { Self::ElementOutOfRange => "element is outside the partition" });
-impl_error!(RateLimitBuildError, { Self::ZeroLimit => "rate limit must admit at least one operation" });
-impl_error!(RateLimitError, { Self::ClockExhausted => "rate-limit logical clock is exhausted" });
-impl_error!(ReductionBuildError, {
+impl_public_error!(BisectionError, { Self::AlreadyConverged => "bisection is already converged" });
+impl_public_error!(EquivalenceClassError, { Self::ElementOutOfRange => "element is outside the partition" });
+impl_public_error!(RateLimitBuildError, { Self::ZeroLimit => "rate limit must admit at least one operation" });
+impl_public_error!(RateLimitError, { Self::ClockExhausted => "rate-limit logical clock is exhausted" });
+impl_public_error!(ReductionBuildError, {
     Self::TooManyItems => "reduction input exceeds the verified item ceiling",
     Self::ValueOutOfRange => "reduction input exceeds the verified value ceiling",
 });
-impl_error!(ReductionError, { Self::Complete => "reduction is already complete" });
-impl_error!(RelationshipGraphError, {
+impl_public_error!(ReductionError, { Self::Complete => "reduction is already complete" });
+impl_public_error!(RelationshipGraphError, {
     Self::NodeOutOfRange => "graph node is outside the configured universe",
     Self::WeightOutOfRange => "edge weight exceeds the configured maximum",
     Self::SelfLoop => "relationship graph does not admit self-loops",
 });
-impl_error!(SamplerError, {
+impl_public_error!(SamplerError, {
     Self::ItemOutOfRange => "sample item is outside the distribution",
     Self::SampleFull => "bounded sample is full",
     Self::OutsideSupport => "sample item has zero support weight",
     Self::AlreadySelected => "sample item is already selected",
 });
-impl_error!(SignalBuildError, { Self::InitialValueOutOfRange => "initial signal value is outside its universe" });
-impl_error!(SignalError, {
+impl_public_error!(SignalBuildError, { Self::InitialValueOutOfRange => "initial signal value is outside its universe" });
+impl_public_error!(SignalError, {
     Self::ValueOutOfRange => "signal value is outside its universe",
     Self::ListenerOutOfRange => "listener is outside the signal universe",
     Self::ListenerNotPending => "listener has no pending notification",
+    Self::ChangeCapacityExhausted => "signal change capacity is exhausted",
 });
-impl_error!(TraversalBuildError, {
+impl_public_error!(TraversalBuildError, {
     Self::NoNodes => "traversal requires at least one node",
     Self::RootOutOfRange => "traversal root is outside the node universe",
 });
-impl_error!(TraversalError, {
+impl_public_error!(TraversalError, {
     Self::NodeOutOfRange => "traversal node is outside the configured universe",
     Self::NodeNotQueued => "traversal node is not queued",
     Self::NodeAlreadyVisited => "traversal node was already visited",
     Self::QueueNotEmpty => "traversal queue is not empty",
+});
+impl_public_error!(SelectThenActuateBuildError, {
+    Self::NoCandidates => "select-then-actuate requires at least one candidate",
+});
+impl_public_error!(SelectThenActuateError, {
+    Self::SeatOutOfRange => "seat is outside the configured universe",
+    Self::CandidateOutOfRange => "candidate is outside the configured universe",
+    Self::PassComplete => "actuation pass is already complete",
+    Self::SeatAlreadyAllocated => "seat already has an allocation",
+    Self::EffectAlreadyApplied => "applied seat score cannot change",
+    Self::SeatNotAllocated => "seat has no allocation",
+    Self::SeatAlreadyActuated => "seat allocation is already actuated",
+    Self::PassNotReady => "actuation pass still has unapplied allocations",
 });

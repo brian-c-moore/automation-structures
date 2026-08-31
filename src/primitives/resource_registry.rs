@@ -11,7 +11,7 @@
 //   Register(k,v)  == entries' = { e ∈ entries : e[1] /= k } ∪ { <<k,v>> }   (upsert)
 //   Deregister(k)  == (∃ v : <<k,v>> ∈ entries) ∧ entries' = { e ∈ entries : e[1] /= k }
 //
-// `entries` is represented as a duplicate-key-free Vec<(u64,u64)>. `register` is
+// `entries` is represented as a duplicate-key-free Vec<(K,V)>. `register` is
 // the upsert (drop any pair for k, then append <<k,v>>); `deregister`
 // removes the pair for a present key. UniqueMapping is an `ensures` on both.
 //
@@ -23,7 +23,7 @@
 // key, the pair set is preserved in both directions.
 //
 // Representation:
-//   - entries: Vec<(u64,u64)> of (key, value) pairs (the TLA+ set of <<k,v>>).
+//   - entries: Vec<(K,V)> of (key, value) pairs (the TLA+ set of <<k,v>>).
 //   - UniqueMapping == no two distinct entries share a key (the cardinality<=1
 //     constraint, since two pairs with the same key are the only way the
 //     cardinality of {v : <<k,v>>} exceeds 1).
@@ -34,15 +34,17 @@
 
 use vstd::prelude::*;
 
+pub use crate::value_eq::ValueEq as RegistryKey;
+
 verus! {
 
 /// has_key over the first `n` entries: some pair among entries[0..n] has key `k`.
-pub open spec fn has_key(entries: Seq<(u64, u64)>, n: int, k: u64) -> bool {
+pub open spec fn has_key<K, V>(entries: Seq<(K, V)>, n: int, k: K) -> bool {
     exists|i: int| 0 <= i < n && entries[i].0 == k
 }
 
 /// Extending the considered prefix by one entry.
-pub proof fn lemma_has_key_extend(entries: Seq<(u64, u64)>, n: int, k: u64)
+pub proof fn lemma_has_key_extend<K, V>(entries: Seq<(K, V)>, n: int, k: K)
     requires 0 <= n < entries.len(),
     ensures
         has_key(entries, n + 1, k) == (has_key(entries, n, k) || entries[n].0 == k),
@@ -61,7 +63,7 @@ pub proof fn lemma_has_key_extend(entries: Seq<(u64, u64)>, n: int, k: u64)
 }
 
 /// Pushing (a,b) makes has_key at kk hold iff it already held or kk == a.
-pub proof fn lemma_push_has_key(entries: Seq<(u64, u64)>, a: u64, b: u64, kk: u64)
+pub proof fn lemma_push_has_key<K, V>(entries: Seq<(K, V)>, a: K, b: V, kk: K)
     ensures
         has_key(entries.push((a, b)), entries.len() as int + 1, kk)
             == (has_key(entries, entries.len() as int, kk) || kk == a),
@@ -86,42 +88,22 @@ pub proof fn lemma_push_has_key(entries: Seq<(u64, u64)>, a: u64, b: u64, kk: u6
 /// The value-level counterpart of `has_key`, which records presence only:
 /// framing with `has_key` alone says the key survives but says nothing about
 /// what it is bound to.
-pub open spec fn has_pair(entries: Seq<(u64, u64)>, n: int, k: u64, v: u64) -> bool {
+pub open spec fn has_pair<K, V>(entries: Seq<(K, V)>, n: int, k: K, v: V) -> bool {
     exists|i: int| 0 <= i < n && entries[i].0 == k && entries[i].1 == v
 }
 
 /// Reusable logical form of ResourceRegistry's unique-key obligation.
-///
-/// A fused composition can expose its logical entries to this predicate without allocating a
-/// second runtime registry beside the authoritative representation.
-pub open spec fn unique_mapping_entries(entries: Seq<(u64, u64)>) -> bool {
+pub open spec fn unique_mapping_entries<K, V>(entries: Seq<(K, V)>) -> bool {
     forall|i: int, j: int|
         (0 <= i < entries.len() && 0 <= j < entries.len() && i != j)
             ==> #[trigger] entries[i].0 != #[trigger] entries[j].0
 }
 
 /// Reusable key-only form of ResourceRegistry uniqueness.
-///
-/// A checked physical registry may retain values or other metadata elsewhere while exposing its
-/// key projection to this predicate. No runtime registry allocation is implied.
 pub open spec fn unique_keys<K>(keys: Seq<K>) -> bool {
     forall|i: int, j: int|
         (0 <= i < keys.len() && 0 <= j < keys.len() && i != j)
             ==> #[trigger] keys[i] != #[trigger] keys[j]
-}
-
-/// ResourceRegistry uniqueness for a fixed physical table with empty sentinel slots.
-///
-/// Only present keys participate in the registry. This lets a bounded or fused realization expose
-/// its logical ownership without allocating or maintaining a second compacted registry.
-pub open spec fn unique_present_keys<K>(keys: Seq<K>, empty: K) -> bool {
-    forall|i: int, j: int|
-        (0 <= i < keys.len()
-            && 0 <= j < keys.len()
-            && i != j
-            && #[trigger] keys[i] != empty
-            && #[trigger] keys[j] != empty)
-            ==> keys[i] != keys[j]
 }
 
 /// Whether one key occurs in a key-only ResourceRegistry projection.
@@ -185,8 +167,52 @@ pub proof fn contains_key_value_remove_unique<K>(keys: Seq<K>, removed: int, key
     }
 }
 
+/// Removing one entry from a unique-key registry removes exactly that key's binding.
+pub proof fn has_pair_remove_unique<K, V>(
+    entries: Seq<(K, V)>,
+    removed: int,
+    key: K,
+    value: V,
+)
+    requires
+        unique_mapping_entries(entries),
+        0 <= removed < entries.len(),
+    ensures
+        has_pair(entries.remove(removed), (entries.len() - 1) as int, key, value)
+            == (has_pair(entries, entries.len() as int, key, value)
+                && key != entries[removed].0),
+{
+    entries.remove_ensures(removed);
+    let reduced = entries.remove(removed);
+    if has_pair(reduced, reduced.len() as int, key, value) {
+        let index = choose|index: int|
+            0 <= index < reduced.len()
+                && reduced[index].0 == key
+                && reduced[index].1 == value;
+        let old_index = if index < removed { index } else { index + 1 };
+        assert(0 <= old_index < entries.len());
+        assert(old_index != removed);
+        assert(reduced[index] == entries[old_index]);
+        assert(has_pair(entries, entries.len() as int, key, value));
+        if key == entries[removed].0 {
+            assert(entries[old_index].0 == entries[removed].0);
+            assert(false);
+        }
+    }
+    if has_pair(entries, entries.len() as int, key, value) && key != entries[removed].0 {
+        let old_index = choose|index: int|
+            0 <= index < entries.len()
+                && entries[index].0 == key
+                && entries[index].1 == value;
+        assert(old_index != removed);
+        let index = if old_index < removed { old_index } else { old_index - 1 };
+        assert(0 <= index < reduced.len());
+        assert(reduced[index] == entries[old_index]);
+    }
+}
+
 /// Extending the considered prefix by one entry (pair-level `lemma_has_key_extend`).
-pub proof fn lemma_has_pair_extend(entries: Seq<(u64, u64)>, n: int, k: u64, v: u64)
+pub proof fn lemma_has_pair_extend<K, V>(entries: Seq<(K, V)>, n: int, k: K, v: V)
     requires 0 <= n < entries.len(),
     ensures
         has_pair(entries, n + 1, k, v)
@@ -206,7 +232,7 @@ pub proof fn lemma_has_pair_extend(entries: Seq<(u64, u64)>, n: int, k: u64, v: 
 }
 
 /// Pushing (a,b) makes has_pair at (kk,vv) hold iff it already held or (kk,vv) = (a,b).
-pub proof fn lemma_push_has_pair(entries: Seq<(u64, u64)>, a: u64, b: u64, kk: u64, vv: u64)
+pub proof fn lemma_push_has_pair<K, V>(entries: Seq<(K, V)>, a: K, b: V, kk: K, vv: V)
     ensures
         has_pair(entries.push((a, b)), entries.len() as int + 1, kk, vv)
             == (has_pair(entries, entries.len() as int, kk, vv) || (kk == a && vv == b)),
@@ -230,11 +256,12 @@ pub proof fn lemma_push_has_pair(entries: Seq<(u64, u64)>, a: u64, b: u64, kk: u
 }
 
 /// A unique-key registry: a set of (key, value) pairs with no repeated key.
-pub struct ResourceRegistry {
-    pub entries: Vec<(u64, u64)>,
+pub struct ResourceRegistry<K, V> {
+    /// Unique-key entries in deterministic storage order.
+    pub entries: Vec<(K, V)>,
 }
 
-impl ResourceRegistry {
+impl<K: RegistryKey + Copy, V: Copy> ResourceRegistry<K, V> {
     // ── Specifications ──────────────────────────────────────────────────
 
     /// TLA+ `UniqueMapping`: no two distinct entries share a key.
@@ -243,17 +270,17 @@ impl ResourceRegistry {
     }
 
     /// `k ∈ keys(entries)` (∃ v : <<k,v>> ∈ entries).
-    pub open spec fn contains_key(&self, k: u64) -> bool {
+    pub open spec fn contains_key(&self, k: K) -> bool {
         has_key(self.entries@, self.entries@.len() as int, k)
     }
 
     /// `<<k,v>> ∈ entries`.
-    pub open spec fn maps_to(&self, k: u64, v: u64) -> bool {
+    pub open spec fn maps_to(&self, k: K, v: V) -> bool {
         has_pair(self.entries@, self.entries@.len() as int, k, v)
     }
 
     /// A unique key cannot map to two different values.
-    pub proof fn unique_value(&self, k: u64, left: u64, right: u64)
+    pub proof fn unique_value(&self, k: K, left: V, right: V)
         requires
             self.unique_mapping(),
             self.maps_to(k, left),
@@ -275,7 +302,7 @@ impl ResourceRegistry {
     }
 
     /// Every exact key-value witness also establishes key presence.
-    pub proof fn maps_to_implies_contains(&self, k: u64, v: u64)
+    pub proof fn maps_to_implies_contains(&self, k: K, v: V)
         requires self.maps_to(k, v),
         ensures self.contains_key(k),
     {
@@ -286,11 +313,22 @@ impl ResourceRegistry {
         assert(0 <= index < self.entries@.len() && self.entries@[index].0 == k);
     }
 
+    /// Every present key has a value witness in the registry.
+    pub proof fn contains_has_value(&self, k: K)
+        requires self.contains_key(k),
+        ensures exists|v: V| self.maps_to(k, v),
+    {
+        let index = choose|index: int|
+            0 <= index < self.entries@.len() && self.entries@[index].0 == k;
+        let value = self.entries@[index].1;
+        assert(self.maps_to(k, value));
+    }
+
     // ── Init (TLA+ Init) ────────────────────────────────────────────────
 
     /// Empty registry. Realises the TLA+ `Init` (entries = {}); UniqueMapping
     /// holds vacuously.
-    pub fn new() -> (r: ResourceRegistry)
+    pub fn new() -> (r: ResourceRegistry<K, V>)
         ensures
             r.entries@.len() == 0,
             r.unique_mapping(),
@@ -303,7 +341,7 @@ impl ResourceRegistry {
     /// Every entry whose key is not `k`. Given a unique-key input, the output is
     /// unique-key, contains no key `k`, and preserves the presence of every other
     /// key (the projection equivalence).
-    fn without_key(entries: &Vec<(u64, u64)>, k: u64) -> (out: Vec<(u64, u64)>)
+    fn without_key(entries: &Vec<(K, V)>, k: K) -> (out: Vec<(K, V)>)
         requires
             forall|i: int, j: int|
                 (0 <= i < entries@.len() && 0 <= j < entries@.len() && i != j)
@@ -316,18 +354,19 @@ impl ResourceRegistry {
                 (0 <= i < out@.len() && 0 <= j < out@.len() && i != j)
                     ==> #[trigger] out@[i].0 != #[trigger] out@[j].0,
             // projection: a key kk /= k survives iff it was present
-            forall|kk: u64|
+            forall|kk: K|
                 kk != k ==>
                     (#[trigger] has_key(out@, out@.len() as int, kk)
                         == has_key(entries@, entries@.len() as int, kk)),
             // value projection: a PAIR whose key is not k survives iff it was
             // present. The copy loop preserves values, and the contract says so.
-            forall|kk: u64, vv: u64|
+            forall|kk: K, vv: V|
                 kk != k ==>
                     (#[trigger] has_pair(out@, out@.len() as int, kk, vv)
                         == has_pair(entries@, entries@.len() as int, kk, vv)),
+            !has_key(entries@, entries@.len() as int, k) ==> out@ == entries@,
     {
-        let mut out: Vec<(u64, u64)> = Vec::new();
+        let mut out: Vec<(K, V)> = Vec::new();
         let mut i: usize = 0;
         while i < entries.len()
             invariant
@@ -339,19 +378,21 @@ impl ResourceRegistry {
                 forall|a: int, b: int|
                     (0 <= a < out@.len() && 0 <= b < out@.len() && a != b)
                         ==> #[trigger] out@[a].0 != #[trigger] out@[b].0,
-                forall|kk: u64|
+                forall|kk: K|
                     kk != k ==>
                         (#[trigger] has_key(out@, out@.len() as int, kk)
                             == has_key(entries@, i as int, kk)),
-                forall|kk: u64, vv: u64|
+                forall|kk: K, vv: V|
                     kk != k ==>
                         (#[trigger] has_pair(out@, out@.len() as int, kk, vv)
                             == has_pair(entries@, i as int, kk, vv)),
+                !has_key(entries@, entries@.len() as int, k)
+                    ==> out@ == entries@.subrange(0, i as int),
             decreases entries.len() - i,
         {
             let e = entries[i];
             let ghost ob = out@;
-            if e.0 != k {
+            if !e.0.value_eq(&k) {
                 // e.0 is not yet in out: out's keys are exactly entries[0..i]'s
                 // keys (minus k), and entries is unique-key, so entries[i].0 does
                 // not occur in entries[0..i], hence not in out.
@@ -379,7 +420,7 @@ impl ResourceRegistry {
                 }
             }
             // projection update for every kk /= k
-            assert forall|kk: u64| kk != k implies
+            assert forall|kk: K| kk != k implies
                 (#[trigger] has_key(out@, out@.len() as int, kk)
                     == has_key(entries@, (i + 1) as int, kk)) by {
                 lemma_has_key_extend(entries@, i as int, kk);
@@ -391,7 +432,7 @@ impl ResourceRegistry {
             // dropped (e.0 == k) `out` is unchanged and the new prefix entry's key
             // is k, so neither side moves; when it is copied, both sides gain the
             // same pair.
-            assert forall|kk: u64, vv: u64| kk != k implies
+            assert forall|kk: K, vv: V| kk != k implies
                 (#[trigger] has_pair(out@, out@.len() as int, kk, vv)
                     == has_pair(entries@, (i + 1) as int, kk, vv)) by {
                 lemma_has_pair_extend(entries@, i as int, kk, vv);
@@ -399,7 +440,22 @@ impl ResourceRegistry {
                     lemma_push_has_pair(ob, e.0, e.1, kk, vv);
                 }
             }
+            proof {
+                if !has_key(entries@, entries@.len() as int, k) {
+                    assert(e.0 != k) by {
+                        if e.0 == k {
+                            assert(has_key(entries@, entries@.len() as int, k));
+                        }
+                    }
+                    assert(out@ == entries@.subrange(0, (i + 1) as int));
+                }
+            }
             i = i + 1;
+        }
+        proof {
+            if !has_key(entries@, entries@.len() as int, k) {
+                assert(entries@.subrange(0, entries@.len() as int) =~= entries@);
+            }
         }
         out
     }
@@ -408,7 +464,7 @@ impl ResourceRegistry {
 
     /// Look up the value bound to `k`, or None if `k` is unmapped. Under
     /// UniqueMapping the answer is unambiguous.
-    pub fn lookup(&self, k: u64) -> (res: Option<u64>)
+    pub fn lookup(&self, k: K) -> (res: Option<V>)
         requires self.unique_mapping(),
         ensures
             res matches Option::Some(v) ==> self.maps_to(k, v),
@@ -423,7 +479,7 @@ impl ResourceRegistry {
                 forall|t: int| 0 <= t < i ==> self.entries@[t].0 != k,
             decreases len - i,
         {
-            if self.entries[i].0 == k {
+            if self.entries[i].0.value_eq(&k) {
                 assert(self.entries@[i as int].0 == k && self.entries@[i as int].1 == self.entries@[i as int].1);
                 return Some(self.entries[i].1);
             }
@@ -438,25 +494,34 @@ impl ResourceRegistry {
     /// Upsert `k |-> v`: drop any existing pair for `k`, then append <<k,v>>.
     /// Realises the TLA+ `Register(k,v)`; re-establishes UniqueMapping and
     /// establishes `maps_to(k,v)`, preserving every other key's presence.
-    pub fn register(&mut self, k: u64, v: u64)
+    pub fn register(&mut self, k: K, v: V)
         requires old(self).unique_mapping(),
         ensures
             final(self).unique_mapping(),
             final(self).maps_to(k, v),
             // every other key's presence is unchanged
-            forall|kk: u64|
+            forall|kk: K|
                 kk != k ==>
                     (#[trigger] final(self).contains_key(kk) == old(self).contains_key(kk)),
             // Every other key's value is unchanged. Presence alone would
             // admit a body that silently re-binds k' to a different value while
-            // leaving k' present; the canonical `Register` determines the
+            // leaving k' present; the `Register` action determines the
             // post-state, so the contract has to frame values, not just keys.
-            forall|kk: u64, vv: u64|
+            forall|kk: K, vv: V|
                 kk != k ==>
                     (#[trigger] final(self).maps_to(kk, vv) == old(self).maps_to(kk, vv)),
+            !old(self).contains_key(k)
+                ==> final(self).entries@ == old(self).entries@.push((k, v)),
     {
+        let ghost old_entries = self.entries@;
+        let ghost was_absent = !self.contains_key(k);
         let filtered = Self::without_key(&self.entries, k);
         let ghost fb = filtered@;
+        proof {
+            if was_absent {
+                assert(fb == old_entries);
+            }
+        }
         self.entries = filtered;
         self.entries.push((k, v));
         // UniqueMapping: filtered is unique-key and has no key k; appending
@@ -479,13 +544,13 @@ impl ResourceRegistry {
         }
         // frame: presence of any kk /= k is the filtered presence, which equals
         // the original presence (projection), and the appended <<k,v>> only adds k.
-        assert forall|kk: u64| kk != k implies
+        assert forall|kk: K| kk != k implies
             (#[trigger] self.contains_key(kk) == old(self).contains_key(kk)) by {
             lemma_push_has_key(fb, k, v, kk);
         }
         // value frame: same argument one level down. `without_key` preserved every
         // pair whose key is not k, and the appended pair has key k.
-        assert forall|kk: u64, vv: u64| kk != k implies
+        assert forall|kk: K, vv: V| kk != k implies
             (#[trigger] self.maps_to(kk, vv) == old(self).maps_to(kk, vv)) by {
             lemma_push_has_pair(fb, k, v, kk, vv);
         }
@@ -493,9 +558,54 @@ impl ResourceRegistry {
 
     // ── Deregister (TLA+ Deregister) ────────────────────────────────────
 
+    /// Remove the binding at a known registry position.
+    ///
+    /// This is the positional form of `Deregister`: callers that discover a key while scanning
+    /// the registry can remove that binding without rebuilding or replacing registry
+    /// storage outside this owner.
+    pub fn deregister_at(&mut self, index: usize) -> (removed: (K, V))
+        requires
+            old(self).unique_mapping(),
+            index < old(self).entries.len(),
+        ensures
+            removed == old(self).entries@[index as int],
+            final(self).entries@ == old(self).entries@.remove(index as int),
+            final(self).entries@.len() + 1 == old(self).entries@.len(),
+            final(self).unique_mapping(),
+            forall|key: K, value: V|
+                #[trigger] final(self).maps_to(key, value)
+                    == (old(self).maps_to(key, value) && key != removed.0),
+    {
+        let ghost before = self.entries@;
+        let removed = self.entries.remove(index);
+        assert(self.entries@ == before.remove(index as int));
+        assert(self.unique_mapping()) by {
+            assert forall|left: int, right: int|
+                0 <= left < self.entries@.len()
+                    && 0 <= right < self.entries@.len()
+                    && left != right
+                implies #[trigger] self.entries@[left].0 != #[trigger] self.entries@[right].0 by {
+                before.remove_ensures(index as int);
+                let old_left = if left < index { left } else { left + 1 };
+                let old_right = if right < index { right } else { right + 1 };
+                assert(0 <= old_left < before.len());
+                assert(0 <= old_right < before.len());
+                assert(old_left != old_right);
+                assert(self.entries@[left] == before[old_left]);
+                assert(self.entries@[right] == before[old_right]);
+            }
+        }
+        assert forall|key: K, value: V|
+            #[trigger] self.maps_to(key, value)
+                == (old(self).maps_to(key, value) && key != removed.0) by {
+            has_pair_remove_unique(before, index as int, key, value);
+        }
+        removed
+    }
+
     /// Remove the pair for `k`. Realises the TLA+ `Deregister(k)` (guard:
     /// `k` is present). Re-establishes UniqueMapping; `k` is afterwards absent.
-    pub fn deregister(&mut self, k: u64)
+    pub fn deregister(&mut self, k: K)
         requires
             old(self).unique_mapping(),
             old(self).contains_key(k),
@@ -503,18 +613,18 @@ impl ResourceRegistry {
             final(self).unique_mapping(),
             !final(self).contains_key(k),
             // every other key's presence is unchanged
-            forall|kk: u64|
+            forall|kk: K|
                 kk != k ==>
                     (#[trigger] final(self).contains_key(kk) == old(self).contains_key(kk)),
             // Every other key's value is unchanged (see `register`).
-            forall|kk: u64, vv: u64|
+            forall|kk: K, vv: V|
                 kk != k ==>
                     (#[trigger] final(self).maps_to(kk, vv) == old(self).maps_to(kk, vv)),
     {
         let filtered = Self::without_key(&self.entries, k);
         let ghost fb = filtered@;
         self.entries = filtered;
-        assert forall|kk: u64, vv: u64| kk != k implies
+        assert forall|kk: K, vv: V| kk != k implies
             (#[trigger] self.maps_to(kk, vv) == old(self).maps_to(kk, vv)) by {
             assert(has_pair(fb, fb.len() as int, kk, vv)
                 == has_pair(old(self).entries@, old(self).entries@.len() as int, kk, vv));

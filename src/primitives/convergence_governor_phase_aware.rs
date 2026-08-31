@@ -22,7 +22,7 @@
 // already TRUE, and ClassifyPhase returns COLD only when peak is FALSE.
 //
 // `update` computes the post-slide window average internally. Callers supply
-// only the new delta, so ordinary Rust and verified callers share one canonical
+// only the new delta, so ordinary Rust and verified callers share one
 // transition boundary.
 
 use vstd::prelude::*;
@@ -58,13 +58,21 @@ pub enum Phase {
 
 /// A phase-aware convergence governor.
 pub struct ConvergenceGovernorPhaseAware {
+    /// Delta threshold used for convergence classification.
     pub threshold: u64,
+    /// Window-sum threshold that reawakens a converged governor.
     pub awaken_threshold: u64,
+    /// Maximum retained delta-history length.
     pub window: usize,
+    /// Inclusive ceiling of observed delta values.
     pub max_delta: u64,
+    /// Current convergence state.
     pub state: GovState,
+    /// Current gradient-trajectory phase.
     pub gradient_phase: Phase,
+    /// Retained recent deltas from oldest to newest.
     pub delta_history: Vec<u64>,
+    /// Whether any threshold-reaching delta has been observed.
     pub peak_observed: bool,
 }
 

@@ -33,7 +33,7 @@ fn main() {
     );
     all_ok &= check(
         "rejected capacity requests frame master",
-        f.master_allocated,
+        f.master.allocated,
         0,
     );
 
@@ -42,9 +42,17 @@ fn main() {
         f.allocate_sub_pool(0, 4),
         true,
     );
-    all_ok &= check("capacity commit moves master", f.master_allocated, 4);
-    all_ok &= check("capacity commit moves named pool", f.sub_capacities[0], 4);
-    all_ok &= check("capacity commit frames other pool", f.sub_capacities[1], 0);
+    all_ok &= check("capacity commit moves master", f.master.allocated, 4);
+    all_ok &= check(
+        "capacity commit moves named pool",
+        f.sub_pools[0].allocated + f.sub_pools[0].reserved,
+        4,
+    );
+    all_ok &= check(
+        "capacity commit frames other pool",
+        f.sub_pools[1].allocated + f.sub_pools[1].reserved,
+        0,
+    );
     all_ok &= check(
         "master overspend rejected",
         f.allocate_sub_pool(1, 3),
@@ -57,8 +65,11 @@ fn main() {
     );
     all_ok &= check(
         "master equals finite capacity sum",
-        f.master_allocated,
-        f.sub_capacities[0] + f.sub_capacities[1],
+        f.master.allocated,
+        f.sub_pools[0].allocated
+            + f.sub_pools[0].reserved
+            + f.sub_pools[1].allocated
+            + f.sub_pools[1].reserved,
     );
 
     all_ok &= check(
@@ -76,10 +87,14 @@ fn main() {
         f.allocate_from_sub_pool(0, 3),
         true,
     );
-    all_ok &= check("consumption commit moves named pool", f.sub_allocated[0], 3);
+    all_ok &= check(
+        "consumption commit moves named pool",
+        f.sub_pools[0].allocated,
+        3,
+    );
     all_ok &= check(
         "consumption commit frames other pool",
-        f.sub_allocated[1],
+        f.sub_pools[1].allocated,
         0,
     );
     all_ok &= check(
@@ -89,7 +104,7 @@ fn main() {
     );
     all_ok &= check(
         "overspend rejection frames allocation",
-        f.sub_allocated[0],
+        f.sub_pools[0].allocated,
         3,
     );
 
@@ -113,9 +128,21 @@ fn main() {
         f.release_from_sub_pool(0, 1),
         true,
     );
-    all_ok &= check("release exact named-pool effect", f.sub_allocated[0], 2);
-    all_ok &= check("release frames capacity", f.sub_capacities[0], 4);
-    all_ok &= check("release frames other allocation", f.sub_allocated[1], 0);
+    all_ok &= check(
+        "release exact named-pool effect",
+        f.sub_pools[0].allocated,
+        2,
+    );
+    all_ok &= check(
+        "release frames capacity",
+        f.sub_pools[0].allocated + f.sub_pools[0].reserved,
+        4,
+    );
+    all_ok &= check(
+        "release frames other allocation",
+        f.sub_pools[1].allocated,
+        0,
+    );
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (FederatedBudget)");

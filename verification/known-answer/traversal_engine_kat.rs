@@ -12,11 +12,15 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
+fn visited_view(engine: &TraversalEngine) -> Vec<bool> {
+    engine.visited.iter().map(|marker| marker.is_marked()).collect()
+}
+
 fn main() {
     let mut all_ok = true;
 
     let mut walk = TraversalEngine::new(4, 0, 6);
-    all_ok &= check("Init queues exactly root", walk.queue.clone(), vec![0]);
+    all_ok &= check("Init queues exactly root", walk.queue.values.clone(), vec![0]);
     all_ok &= check(
         "Visit admission accepts queued root",
         walk.can_visit(0),
@@ -42,19 +46,19 @@ fn main() {
     all_ok &= check("root removed from queue", walk.queue_contains(0), false);
     all_ok &= check(
         "root visit enqueues exact star",
-        walk.queue.clone(),
+        walk.queue.values.clone(),
         vec![1, 2, 3],
     );
     all_ok &= check("root visited", walk.visited_contains(0), true);
     all_ok &= check("root accepted", walk.accepted_contains(0), true);
-    all_ok &= check("root cost charged", walk.budget_remaining, 4);
+    all_ok &= check("root cost charged", walk.budget_remaining(), 4);
     all_ok &= check("duplicate visit disabled", walk.can_visit(0), false);
 
     walk.visit_node(1);
     all_ok &= check("child removed from queue", walk.queue_contains(1), false);
-    all_ok &= check("leaf adds no children", walk.queue.clone(), vec![2, 3]);
+    all_ok &= check("leaf adds no children", walk.queue.values.clone(), vec![2, 3]);
     all_ok &= check("child accepted", walk.accepted_contains(1), true);
-    all_ok &= check("second cost charged", walk.budget_remaining, 2);
+    all_ok &= check("second cost charged", walk.budget_remaining(), 2);
 
     let mut exhausted = TraversalEngine::new(2, 0, 2);
     exhausted.visit_node(0);
@@ -71,7 +75,7 @@ fn main() {
     );
     all_ok &= check(
         "unaffordable visit frames zero budget",
-        exhausted.budget_remaining,
+        exhausted.budget_remaining(),
         0,
     );
     all_ok &= check(
@@ -85,19 +89,19 @@ fn main() {
         true,
     );
     let before = (
-        exhausted.budget_remaining,
-        exhausted.visited.clone(),
-        exhausted.accepted.clone(),
-        exhausted.queue.clone(),
+        exhausted.budget_remaining(),
+        visited_view(&exhausted),
+        exhausted.accepted.accumulated.clone(),
+        exhausted.queue.values.clone(),
     );
     exhausted.terminate();
     all_ok &= check(
         "Terminate is exact stutter",
         (
-            exhausted.budget_remaining,
-            exhausted.visited.clone(),
-            exhausted.accepted.clone(),
-            exhausted.queue.clone(),
+            exhausted.budget_remaining(),
+            visited_view(&exhausted),
+            exhausted.accepted.accumulated.clone(),
+            exhausted.queue.values.clone(),
         ),
         before,
     );
@@ -105,9 +109,9 @@ fn main() {
     let mut skipped = TraversalEngine::new(3, 0, 4);
     skipped.visit_node(0);
     let skip_frames = (
-        skipped.budget_remaining,
-        skipped.visited.clone(),
-        skipped.accepted.clone(),
+        skipped.budget_remaining(),
+        visited_view(&skipped),
+        skipped.accepted.accumulated.clone(),
     );
     all_ok &= check(
         "Skip admission accepts queued child",
@@ -117,15 +121,15 @@ fn main() {
     skipped.skip(1);
     all_ok &= check(
         "Skip removes exactly selected child",
-        skipped.queue.clone(),
+        skipped.queue.values.clone(),
         vec![2],
     );
     all_ok &= check(
         "Skip frames budget visited accepted",
         (
-            skipped.budget_remaining,
-            skipped.visited.clone(),
-            skipped.accepted.clone(),
+            skipped.budget_remaining(),
+            visited_view(&skipped),
+            skipped.accepted.accumulated.clone(),
         ),
         skip_frames,
     );

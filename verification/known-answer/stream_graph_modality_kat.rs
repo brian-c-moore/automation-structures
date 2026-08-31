@@ -18,7 +18,7 @@ fn conserved(s: &StreamGraph) -> bool {
     } else {
         s.q1.len() + s.q2.len() + s.q3.len()
     };
-    s.ingested == queued + s.emitted
+    s.ingested.value() as usize == queued + s.emitted.value() as usize
 }
 
 fn main() {
@@ -57,7 +57,11 @@ fn main() {
     let mut s = StreamGraph::new(3, 2, 3, 8);
     ok &= check(
         "initial queues empty",
-        (s.q1.clone(), s.q2.clone(), s.q3.clone()),
+        (
+            s.q1.values.clone(),
+            s.q2.values.clone(),
+            s.q3.values.clone(),
+        ),
         (vec![], vec![], vec![]),
     );
     ok &= check("initial conservation", conserved(&s), true);
@@ -73,11 +77,11 @@ fn main() {
     ok &= check("first source ingest", s.source_ingest(3), true);
     ok &= check("second source ingest", s.source_ingest(5), true);
     ok &= check("full source queue blocks ingest", s.source_ingest(7), false);
-    ok &= check("source FIFO", s.q1.clone(), vec![3, 5]);
+    ok &= check("source FIFO", s.q1.values.clone(), vec![3, 5]);
     ok &= check("conservation at full source", conserved(&s), true);
     ok &= check("first middle transfer", s.middle2_fire(), true);
     ok &= check("second middle transfer", s.middle2_fire(), true);
-    ok &= check("middle FIFO", s.q2.clone(), vec![3, 5]);
+    ok &= check("middle FIFO", s.q2.values.clone(), vec![3, 5]);
     ok &= check("third source ingest after room", s.source_ingest(7), true);
     ok &= check("full output queue blocks middle", s.middle2_fire(), false);
     ok &= check("first sink consume", s.sink_consume(), true);
@@ -86,20 +90,28 @@ fn main() {
         s.middle2_fire(),
         true,
     );
-    ok &= check("FIFO after backpressure release", s.q2.clone(), vec![5, 7]);
+    ok &= check(
+        "FIFO after backpressure release",
+        s.q2.values.clone(),
+        vec![5, 7],
+    );
     ok &= check("second sink consume", s.sink_consume(), true);
     ok &= check("third sink consume", s.sink_consume(), true);
     ok &= check("drain conservation", conserved(&s), true);
     ok &= check("input bound blocks later ingest", s.source_ingest(1), false);
     ok &= check("terminal stutter enabled", s.done_stuttering(), true);
-    ok &= check("terminal counters", (s.ingested, s.emitted), (3, 3));
+    ok &= check(
+        "terminal counters",
+        (s.ingested.value(), s.emitted.value()),
+        (3, 3),
+    );
 
     let mut l = StreamGraph::new(4, 1, 1, 16);
     ok &= check("long-chain source", l.source_ingest(11), true);
     ok &= check("long-chain first middle", l.middle2_fire(), true);
-    ok &= check("long-chain record at q2", l.q2.clone(), vec![11]);
+    ok &= check("long-chain record at q2", l.q2.values.clone(), vec![11]);
     ok &= check("long-chain second middle", l.middle3_fire(), true);
-    ok &= check("long-chain record at q3", l.q3.clone(), vec![11]);
+    ok &= check("long-chain record at q3", l.q3.values.clone(), vec![11]);
     ok &= check("long-chain sink", l.sink_consume(), true);
     ok &= check("long-chain conservation", conserved(&l), true);
     ok &= check("long-chain terminal", l.done_stuttering(), true);

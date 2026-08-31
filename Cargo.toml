@@ -1,17 +1,35 @@
 [package]
 name = "automation-structures"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Brian Moore"]
 description = "Reusable, formally specified building blocks for composing automation systems."
-license = "MIT"
+license = "MIT OR Apache-2.0"
 readme = "README.md"
 documentation = "https://docs.rs/automation-structures"
 repository = "https://github.com/brian-c-moore/automation-structures"
 keywords = ["automation", "composition", "state-machine", "formal-methods", "verification"]
 categories = ["algorithms", "data-structures"]
 publish = ["crates-io"]
+include = [
+    "/src/**",
+    "/examples/**",
+    "/tests/**",
+    "/verification/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/MAINTAINER_ARCHITECTURE.md",
+    "/SECURITY.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/deny.toml",
+    "/rust-toolchain.toml",
+    "/.crate-quality.toml",
+]
 
 # The research repository's pinned verifier checks this same Rust source.
 # Cargo supplies the ordinary downstream-consumer boundary.
@@ -20,11 +38,20 @@ publish = ["crates-io"]
 name = "automation_structures"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Exposes the Verus carriers and relations for verified downstream
+# crates. The checked runtime API remains available at the crate root.
+proof-api = []
+
 [dependencies]
-vstd = "=0.0.0-2026-08-23-0033"
+vstd = "=0.0.0-2026-05-24-0157"
 
 [package.metadata.verus]
 verify = true
+
+[package.metadata.docs.rs]
+all-features = true
 
 [lints.rust]
 warnings = "deny"
@@ -37,6 +64,8 @@ assign_op_pattern = "allow"
 if_same_then_else = "allow"
 len_zero = "allow"
 manual_range_contains = "allow"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
 new_without_default = "allow"
 ptr_arg = "allow"
 redundant_pattern_matching = "allow"

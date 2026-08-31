@@ -19,15 +19,29 @@
 //                         (total_cost + budget_remaining = MaxBudget),
 //                         AcceptedSubsetVisited.
 
+//! Named-composition carriers and their proof relations.
+
+/// Budget-coupled accepted-node snapshots.
 pub mod allocation_snapshot;
+/// Monotone-boundary bisection.
 pub mod bisection;
+/// Budgeted union-find equivalence classes.
 pub mod equivalence_class;
+/// Master and sub-pool budget federation.
 pub mod federated_budget;
+/// Fixed-window rate limiting.
 pub mod rate_limit;
+/// Ordered additive and maximum reductions.
 pub mod reduction;
+/// Registry-backed weighted relationship graphs.
 pub mod relationship_graph;
+/// Budgeted supported sampling.
 pub mod sampler;
+/// Selection coupled to governed actuation.
 pub mod select_then_actuate;
+/// Change notification with per-listener cursors.
 pub mod signal;
+/// Proof facade for traversal and budget coupling.
 pub mod traversal_budget_composition;
+/// Graph traversal assembled from shared structure owners.
 pub mod traversal_engine;

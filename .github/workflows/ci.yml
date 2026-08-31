@@ -31,7 +31,7 @@ jobs:
             toolchain: stable
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust toolchain
@@ -44,14 +44,34 @@ jobs:
         run: cargo +${{ matrix.toolchain }} run --locked --example catalog
 
   quality:
-    name: Formatting, Clippy, and documentation
+    name: Static analysis, formatting, Clippy, and documentation
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Lint GitHub Actions workflows
+        shell: bash
+        run: |
+          curl --fail --location --proto '=https' --retry 3 --show-error \
+            --output actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' \
+            | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -no-color
+      - name: Lint shell scripts
+        shell: bash
+        run: |
+          curl --fail --location --proto '=https' --retry 3 --show-error \
+            --output shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  shellcheck.tar.xz' \
+            | sha256sum --check --strict
+          tar -xJf shellcheck.tar.xz shellcheck-v0.11.0/shellcheck
+          shellcheck-v0.11.0/shellcheck verification/*.sh
       - name: Install the minimum supported Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
       - name: Check formatting
@@ -63,17 +83,51 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo +1.95.0 doc --locked --no-deps --all-features
 
-  package:
-    name: Verify crates.io package
-    needs: [quality, test]
+  known-answer:
+    name: Known-answer executables
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the minimum supported Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal
-      - name: Build and verify the publication archive
-        run: cargo +1.95.0 package --locked
+      - name: Compile and run every known-answer executable
+        shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: sh verification/run_known_answer.sh
+
+  semver:
+    name: Public API compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare with the latest published API
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          feature-group: all-features
+          rust-toolchain: stable
+
+  package:
+    name: Verify crates.io package
+    needs: [known-answer, quality, semver, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Build and consume the publication archive
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: sh verification/run_packaged_consumer.sh

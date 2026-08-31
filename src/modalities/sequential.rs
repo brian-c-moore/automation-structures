@@ -1,25 +1,66 @@
-// Faithful executable carrier for formal/execution/carriers/Sequential.tla.
-// A finite value domain is represented by indices 0..value_domain_size.
+//! Total-order execution carrier.
 
 use vstd::prelude::*;
 
 verus! {
 
+/// Transition for beginning one sequential position.
+pub open spec fn begin_step_action(
+    before_position: nat,
+    after_position: nat,
+    steps: nat,
+    selected: bool,
+    accepted: bool,
+) -> bool {
+    let enabled = selected && before_position < steps;
+    &&& accepted == enabled
+    &&& after_position == before_position
+}
+
+/// Transition for completing one sequential position.
+pub open spec fn complete_step_action(
+    before_position: nat,
+    after_position: nat,
+    steps: nat,
+    selected: bool,
+    value_admitted: bool,
+    accepted: bool,
+) -> bool {
+    let enabled = selected
+        && value_admitted
+        && before_position < steps;
+    &&& accepted == enabled
+    &&& after_position == if accepted {
+        before_position + 1
+    } else {
+        before_position
+    }
+}
+
+/// Totally ordered execution owner.
 pub struct Sequential {
+    /// Total number of steps.
     pub steps: usize,
+    /// Exclusive upper bound of carried values.
     pub value_domain_size: u64,
+    /// Program counter identifying the next step.
     pub pc: usize,
+    /// Current carried value.
     pub value: u64,
+    /// Whether the current step is active.
     pub active: bool,
+    /// Values committed by completed steps.
     pub history: Vec<u64>,
 }
 
 impl Sequential {
+    /// Whether every retained value lies within the configured value domain.
     pub open spec fn values_valid(&self) -> bool {
         forall|i: int| 0 <= i < self.history@.len()
             ==> #[trigger] self.history@[i] < self.value_domain_size
     }
 
+    /// Whether cursor, activity, history, and values have consistent shape.
     pub open spec fn type_invariant(&self) -> bool {
         &&& self.steps > 0
         &&& self.value_domain_size > 0
@@ -28,18 +69,22 @@ impl Sequential {
         &&& self.values_valid()
     }
 
+    /// Whether the history records one total execution order.
     pub open spec fn total_order(&self) -> bool {
         self.history@.len() == self.pc
     }
 
+    /// Whether an active step always precedes terminal completion.
     pub open spec fn active_before_done(&self) -> bool {
         self.active ==> self.pc < self.steps
     }
 
+    /// Whether all sequential-execution obligations hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant() && self.total_order() && self.active_before_done()
     }
 
+    /// Construct an inactive execution at the first step.
     pub fn new(steps: usize, value_domain_size: u64, initial_value: u64) -> (s: Sequential)
         requires
             steps > 0,
@@ -69,6 +114,18 @@ impl Sequential {
         requires old(self).inv(),
         ensures
             accepted == (old(self).pc < old(self).steps && !old(self).active),
+            begin_step_action(
+                old(self).pc as nat,
+                final(self).pc as nat,
+                old(self).steps as nat,
+                !old(self).active,
+                accepted,
+            ),
+            crate::connectives::marker::set_if(
+                old(self).active,
+                final(self).active,
+                accepted,
+            ),
             final(self).steps == old(self).steps,
             final(self).value_domain_size == old(self).value_domain_size,
             if accepted {
@@ -95,10 +152,24 @@ impl Sequential {
     /// `CompleteStep`, including its nondeterministic ValueDomain choice as an
     /// explicit caller value. An out-of-domain choice is not an enabled TLA+
     /// action and therefore stutters with `false`.
+    #[expect(clippy::arithmetic_side_effects, reason = "Verus proves pc remains within the step bound")]
     pub fn complete_step(&mut self, next_value: u64) -> (accepted: bool)
         requires old(self).inv(),
         ensures
             accepted == (old(self).active && next_value < old(self).value_domain_size),
+            complete_step_action(
+                old(self).pc as nat,
+                final(self).pc as nat,
+                old(self).steps as nat,
+                old(self).active,
+                next_value < old(self).value_domain_size,
+                accepted,
+            ),
+            crate::connectives::marker::clear_if(
+                old(self).active,
+                final(self).active,
+                accepted,
+            ),
             final(self).steps == old(self).steps,
             final(self).value_domain_size == old(self).value_domain_size,
             if accepted {
@@ -118,7 +189,7 @@ impl Sequential {
             let ghost old_history = self.history@;
             self.value = next_value;
             self.history.push(next_value);
-            self.pc = self.pc + 1;
+            self.pc += 1;
             self.active = false;
             assert(self.values_valid()) by {
                 assert forall|i: int| 0 <= i < self.history@.len()

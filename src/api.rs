@@ -41,6 +41,16 @@ pub enum BudgetError {
 }
 
 /// A checked budget whose three claims cannot exceed its fixed capacity.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::Budget;
+///
+/// let mut budget = Budget::new(8);
+/// assert!(budget.try_allocate(3));
+/// assert_eq!(budget.available(), 5);
+/// ```
 pub struct Budget {
     inner: BudgetCarrier,
 }
@@ -106,6 +116,10 @@ impl Budget {
     }
 
     /// Move held capacity into committed allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BudgetError::AmountExceedsReservation`] when `amount` exceeds the held reservation.
     pub fn commit_reservation(&mut self, amount: u64) -> (result: Result<(), BudgetError>) {
         proof { use_type_invariant(&*self); }
         if amount <= self.inner.reserved {
@@ -120,6 +134,10 @@ impl Budget {
     }
 
     /// Release committed allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BudgetError::AmountExceedsAllocation`] when `amount` exceeds the allocation.
     pub fn release(&mut self, amount: u64) -> (result: Result<(), BudgetError>) {
         proof { use_type_invariant(&*self); }
         if amount <= self.inner.allocated {
@@ -134,6 +152,10 @@ impl Budget {
     }
 
     /// Move committed allocation into pending eviction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BudgetError::AmountExceedsAllocation`] when `amount` exceeds the allocation.
     pub fn mark_eviction(&mut self, amount: u64) -> (result: Result<(), BudgetError>) {
         proof { use_type_invariant(&*self); }
         if amount <= self.inner.allocated {
@@ -148,6 +170,10 @@ impl Budget {
     }
 
     /// Finish reclaiming pending eviction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BudgetError::AmountExceedsPendingEviction`] when `amount` exceeds pending eviction.
     pub fn complete_eviction(&mut self, amount: u64) -> (result: Result<(), BudgetError>) {
         proof { use_type_invariant(&*self); }
         if amount <= self.inner.pending_eviction {
@@ -163,8 +189,18 @@ impl Budget {
 }
 
 /// A unique-key resource registry.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::ResourceRegistry;
+///
+/// let mut registry = ResourceRegistry::new();
+/// assert_eq!(registry.insert(7, 42), None);
+/// assert_eq!(registry.get(7), Some(42));
+/// ```
 pub struct ResourceRegistry {
-    inner: RegistryCarrier,
+    inner: RegistryCarrier<u64, u64>,
 }
 
 impl ResourceRegistry {
@@ -234,6 +270,20 @@ impl ResourceRegistry {
 }
 
 /// A public immutable audit record.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::{AuditRecord, AuditSink};
+///
+/// let mut sink = AuditSink::new(1);
+/// assert!(sink.try_record(9));
+/// assert_eq!(sink.record(0), Some(AuditRecord {
+///     operation: 9,
+///     previous_hash: 0,
+///     hash: 10,
+/// }));
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuditRecord {
     /// The operation recorded by the sink.
@@ -245,6 +295,17 @@ pub struct AuditRecord {
 }
 
 /// A bounded append-only audit chain.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::AuditSink;
+///
+/// let mut sink = AuditSink::new(2);
+/// assert!(sink.try_record(4));
+/// assert!(sink.validate());
+/// assert_eq!(sink.records().count(), 1);
+/// ```
 pub struct AuditSink {
     inner: AuditSinkCarrier,
 }
@@ -323,6 +384,17 @@ pub enum CursorError {
 }
 
 /// A checked retained position for consumer progress.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::Cursor;
+///
+/// let mut cursor = Cursor::new(2);
+/// cursor.advance_to(5)?;
+/// assert_eq!(cursor.position(), 5);
+/// # Ok::<(), automation_structures::CursorError>(())
+/// ```
 pub struct Cursor {
     inner: CursorCarrier,
 }
@@ -339,6 +411,10 @@ impl Cursor {
     }
 
     /// Move monotonically to `position`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CursorError::Regression`] when `position` precedes the retained position.
     pub fn advance_to(&mut self, position: usize) -> (result: Result<(), CursorError>) {
         if position < self.inner.position {
             return Err(CursorError::Regression);
@@ -379,6 +455,20 @@ pub enum PropagationError {
 }
 
 /// A snapshot-local bounded propagation pass.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::PropagationPass;
+///
+/// let mut pass = PropagationPass::new(1, 9, vec![(0, 1)], vec![0, 1])?;
+/// pass.start_round()?;
+/// pass.update_node(0)?;
+/// pass.update_node(1)?;
+/// pass.end_round()?;
+/// assert_eq!(pass.values(), &[0, 0]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct PropagationPass {
     inner: PropagationPassCarrier,
 }
@@ -390,6 +480,10 @@ impl PropagationPass {
     }
 
     /// Validate and construct a pass. The node universe is the initial value length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PropagationBuildError`] when a value exceeds `max_value` or an edge endpoint is absent.
     pub fn new(
         max_iterations: u64,
         max_value: u64,
@@ -474,6 +568,10 @@ impl PropagationPass {
     }
 
     /// Begin a new snapshot round.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PropagationError`] when a round is active or the pass has terminated.
     pub fn start_round(&mut self) -> (result: Result<(), PropagationError>) {
         proof { use_type_invariant(&*self); }
         match self.inner.round {
@@ -493,6 +591,10 @@ impl PropagationPass {
     }
 
     /// Commit one node's snapshot-local update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PropagationError`] for an invalid node, inactive pass, or duplicate node update.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the update index is in bounds")]
     pub fn update_node(&mut self, node: usize) -> (result: Result<(), PropagationError>) {
         proof { use_type_invariant(&*self); }
@@ -516,6 +618,10 @@ impl PropagationPass {
     }
 
     /// Finish a fully updated round and charge one iteration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PropagationError`] unless every node was updated in the active round.
     pub fn end_round(&mut self) -> (result: Result<(), PropagationError>) {
         proof { use_type_invariant(&*self); }
         match self.inner.round {
@@ -535,6 +641,10 @@ impl PropagationPass {
     }
 
     /// Confirm the terminal self-loop at settlement or the iteration ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PropagationError`] while a round is active or the pass is not terminal.
     pub fn terminate(&mut self) -> (result: Result<(), PropagationError>) {
         proof { use_type_invariant(&*self); }
         match self.inner.round {
@@ -573,6 +683,18 @@ pub enum ActuationError {
 }
 
 /// A governed resource actuation pass.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::ActuationPass;
+///
+/// let mut pass = ActuationPass::new(vec![Some(11)]);
+/// pass.actuate(0)?;
+/// pass.finish()?;
+/// assert_eq!(pass.effects(), &[Some(11)]);
+/// # Ok::<(), automation_structures::ActuationError>(())
+/// ```
 pub struct ActuationPass {
     inner: ActuationPassCarrier,
 }
@@ -626,6 +748,10 @@ impl ActuationPass {
     }
 
     /// Assign an unallocated seat.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActuationError`] when the seat is invalid, allocated, or the pass is complete.
     pub fn allocate(&mut self, seat: usize, resource: u64) -> (result: Result<(), ActuationError>) {
         proof { use_type_invariant(&*self); }
         if seat >= self.inner.num_seats {
@@ -645,6 +771,10 @@ impl ActuationPass {
     }
 
     /// Withdraw a seat that has not committed an effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActuationError`] when the seat cannot be deallocated in the current state.
     pub fn deallocate(&mut self, seat: usize) -> (result: Result<(), ActuationError>) {
         proof { use_type_invariant(&*self); }
         if seat >= self.inner.num_seats {
@@ -667,6 +797,10 @@ impl ActuationPass {
     }
 
     /// Commit the effect for an allocated seat.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActuationError`] when the seat cannot be actuated in the current state.
     pub fn actuate(&mut self, seat: usize) -> (result: Result<(), ActuationError>) {
         proof { use_type_invariant(&*self); }
         if seat >= self.inner.num_seats {
@@ -695,6 +829,10 @@ impl ActuationPass {
     }
 
     /// Commit closure after every allocated seat has committed an effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActuationError`] when the pass is complete or an allocation is not actuated.
     pub fn finish(&mut self) -> (result: Result<(), ActuationError>) {
         proof { use_type_invariant(&*self); }
         if self.inner.complete {
@@ -740,6 +878,19 @@ pub enum QualityHierarchyError {
 }
 
 /// A checked refinement forest over levels, costs, parents, and child edges.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::QualityHierarchy;
+///
+/// let mut hierarchy = QualityHierarchy::new(2, 3);
+/// hierarchy.set_node_properties(0, 2, 1)?;
+/// hierarchy.set_node_properties(1, 1, 2)?;
+/// hierarchy.add_child(0, 1)?;
+/// assert_eq!(hierarchy.parent(1), Some(0));
+/// # Ok::<(), automation_structures::QualityHierarchyError>(())
+/// ```
 pub struct QualityHierarchy {
     inner: QualityHierarchyCarrier,
 }
@@ -824,6 +975,10 @@ impl QualityHierarchy {
     }
 
     /// Set the level and cost of an isolated node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QualityHierarchyError`] for an invalid node, invalid value, or non-isolated node.
     pub fn set_node_properties(
         &mut self,
         node: usize,
@@ -851,6 +1006,10 @@ impl QualityHierarchy {
     }
 
     /// Add one admitted parent-child relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QualityHierarchyError`] when the edge would violate the refinement forest.
     pub fn add_child(
         &mut self,
         parent: usize,
@@ -888,7 +1047,7 @@ impl QualityHierarchy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BacktrackingBuildError {
-    /// The initial auxiliary value must be in the canonical modulo-three domain.
+    /// The initial auxiliary value must be in the modulo-three domain.
     InitialAuxOutOfRange,
 }
 
@@ -900,7 +1059,7 @@ pub enum BacktrackingError {
     AtLeaf,
     /// The branch choice is outside the admitted branch set.
     ChoiceOutOfRange,
-    /// The mutation delta is outside the canonical inverse-pair domain.
+    /// The mutation delta is outside the required inverse-pair domain.
     DeltaOutOfRange,
     /// Visit requires a full-depth leaf.
     NotLeaf,
@@ -911,6 +1070,19 @@ pub enum BacktrackingError {
 }
 
 /// A checked paired do-undo backtracking traversal.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::BacktrackingTraversal;
+///
+/// let mut traversal = BacktrackingTraversal::new(2, 1, 0)?;
+/// traversal.descend(1, 2)?;
+/// traversal.visit()?;
+/// traversal.ascend()?;
+/// assert_eq!(traversal.choices(), &[]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct BacktrackingTraversal {
     inner: BacktrackingTraversalCarrier,
 }
@@ -922,6 +1094,10 @@ impl BacktrackingTraversal {
     }
 
     /// Validate and construct an empty traversal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BacktrackingBuildError::InitialAuxOutOfRange`] when `initial_aux` is not in `0..3`.
     pub fn new(
         branch_factor: u64,
         max_depth: usize,
@@ -970,6 +1146,10 @@ impl BacktrackingTraversal {
     }
 
     /// Descend one level and record the paired undo token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BacktrackingError`] at a leaf or for an invalid choice or delta.
     pub fn descend(&mut self, choice: u64, delta: u64) -> (result: Result<(), BacktrackingError>) {
         proof { use_type_invariant(&*self); }
         if self.inner.is_leaf_exec() {
@@ -989,6 +1169,10 @@ impl BacktrackingTraversal {
     }
 
     /// Record the current leaf when it has not been visited.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BacktrackingError`] when the traversal is not at a fresh leaf.
     pub fn visit(&mut self) -> (result: Result<(), BacktrackingError>) {
         proof { use_type_invariant(&*self); }
         if !self.inner.is_leaf_exec() {
@@ -1005,6 +1189,10 @@ impl BacktrackingTraversal {
     }
 
     /// Ascend one level and restore the paired auxiliary state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BacktrackingError::AtRoot`] when no parent frame exists.
     pub fn ascend(&mut self) -> (result: Result<(), BacktrackingError>) {
         proof { use_type_invariant(&*self); }
         if !self.inner.can_ascend() {
@@ -1047,6 +1235,18 @@ pub enum CompetitiveSelectionError {
 }
 
 /// Lowest-index argmax selection for one set of candidate scores.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::CompetitiveSelectionHard;
+///
+/// let mut selection = CompetitiveSelectionHard::new(2)?;
+/// selection.update_score(0, 4)?;
+/// selection.update_score(1, 7)?;
+/// assert_eq!(selection.evaluate(), 1);
+/// # Ok::<(), automation_structures::CompetitiveSelectionError>(())
+/// ```
 pub struct CompetitiveSelectionHard {
     inner: CompetitiveSelectionHardCarrier,
 }
@@ -1058,6 +1258,10 @@ impl CompetitiveSelectionHard {
     }
 
     /// Construct a selection over `num_candidates` initially zero-valued scores.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError::NoCandidates`] for an empty candidate universe.
     pub fn new(num_candidates: usize) -> (result: Result<Self, CompetitiveSelectionError>) {
         if num_candidates == 0 {
             return Err(CompetitiveSelectionError::NoCandidates);
@@ -1092,6 +1296,10 @@ impl CompetitiveSelectionHard {
     }
 
     /// Replace one candidate score and invalidate the previous winner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError::CandidateOutOfRange`] for an invalid candidate.
     pub fn update_score(
         &mut self,
         candidate: usize,
@@ -1125,6 +1333,19 @@ impl CompetitiveSelectionHard {
 }
 
 /// Lowest-index argmax selection across seats with exclusive candidates.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::CompetitiveSelectionHardExclusive;
+///
+/// let mut selection = CompetitiveSelectionHardExclusive::new(2, 2, 10)?;
+/// selection.update_score(0, 0, 10)?;
+/// selection.update_score(1, 0, 9)?;
+/// assert_eq!(selection.evaluate(0)?, 0);
+/// assert_eq!(selection.candidate_available(1, 0), Some(false));
+/// # Ok::<(), automation_structures::CompetitiveSelectionError>(())
+/// ```
 pub struct CompetitiveSelectionHardExclusive {
     inner: CompetitiveSelectionHardExclusiveCarrier,
 }
@@ -1136,6 +1357,10 @@ impl CompetitiveSelectionHardExclusive {
     }
 
     /// Construct `num_seats` empty allocations over a nonempty candidate set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError::NoCandidates`] for an empty candidate universe.
     pub fn new(
         num_seats: usize,
         num_candidates: usize,
@@ -1202,6 +1427,10 @@ impl CompetitiveSelectionHardExclusive {
     }
 
     /// Replace one score and invalidate every coupled seat allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError`] for an invalid seat, candidate, or score.
     pub fn update_score(
         &mut self,
         seat: usize,
@@ -1226,6 +1455,10 @@ impl CompetitiveSelectionHardExclusive {
     }
 
     /// Select the lowest-index available argmax for one empty seat.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError`] when the seat is invalid, allocated, or has no candidate.
     #[expect(clippy::indexing_slicing, reason = "the guards prove the seat index is in bounds")]
     pub fn evaluate(
         &mut self,
@@ -1254,6 +1487,16 @@ impl CompetitiveSelectionHardExclusive {
 }
 
 /// Reserved-floor sequential Webster apportionment over mutable scores.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::CompetitiveSelectionSoft;
+///
+/// let selection = CompetitiveSelectionSoft::new(vec![3, 1], 4, 3)?;
+/// assert_eq!(selection.weights().collect::<Vec<_>>(), vec![3, 1]);
+/// # Ok::<(), automation_structures::CompetitiveSelectionError>(())
+/// ```
 pub struct CompetitiveSelectionSoft {
     inner: CompetitiveSelectionSoftCarrier,
 }
@@ -1265,6 +1508,10 @@ impl CompetitiveSelectionSoft {
     }
 
     /// Construct a complete apportionment for `weight_total` units.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError`] when scores or weight bounds are invalid.
     pub fn new(
         scores: Vec<u64>,
         weight_total: u64,
@@ -1290,6 +1537,10 @@ impl CompetitiveSelectionSoft {
     }
 
     /// Construct only the reserved floor so awards can be assigned incrementally.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError`] when scores or weight bounds are invalid.
     pub fn begin(
         scores: Vec<u64>,
         weight_total: u64,
@@ -1366,6 +1617,10 @@ impl CompetitiveSelectionSoft {
     }
 
     /// Award the next available unit to the current lowest-index priority winner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError::AllocationComplete`] after every unit is assigned.
     pub fn assign_next(&mut self) -> (result: Result<usize, CompetitiveSelectionError>) {
         proof { use_type_invariant(&*self); }
         if self.inner.assigned_weight() >= self.inner.weight_total {
@@ -1379,6 +1634,10 @@ impl CompetitiveSelectionSoft {
     }
 
     /// Replace one score and reset every candidate to its reserved unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError`] for an invalid candidate or score.
     pub fn update_score(
         &mut self,
         candidate: usize,
@@ -1400,6 +1659,17 @@ impl CompetitiveSelectionSoft {
 }
 
 /// Stable top-k selection by descending score and ascending candidate index.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::CompetitiveSelectionRanked;
+///
+/// let mut selection = CompetitiveSelectionRanked::new(vec![7, 7, 3], 2, 7)?;
+/// selection.select();
+/// assert_eq!(selection.selections(), &[true, true, false]);
+/// # Ok::<(), automation_structures::CompetitiveSelectionError>(())
+/// ```
 pub struct CompetitiveSelectionRanked {
     inner: CompetitiveSelectionRankedCarrier,
 }
@@ -1411,6 +1681,10 @@ impl CompetitiveSelectionRanked {
     }
 
     /// Construct an empty selection over the supplied scores.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError::ScoreOutOfRange`] when a score exceeds `max_score`.
     pub fn new(
         scores: Vec<u64>,
         k: usize,
@@ -1473,6 +1747,10 @@ impl CompetitiveSelectionRanked {
     }
 
     /// Replace all scores and clear the current selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompetitiveSelectionError`] when the count changes or a score exceeds `max_score`.
     pub fn update_scores(
         &mut self,
         scores: Vec<u64>,
@@ -1513,6 +1791,17 @@ pub enum ConvergenceError {
 }
 
 /// A moving-window convergence state machine with peak-aware phases.
+///
+/// # Examples
+///
+/// ```rust
+/// use automation_structures::ConvergenceGovernor;
+///
+/// let mut governor = ConvergenceGovernor::new(10, 30, 3, 50)?;
+/// assert_eq!(governor.update(12)?, 12);
+/// assert_eq!(governor.history_values(), &[12]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct ConvergenceGovernor {
     inner: ConvergenceGovernorCarrier,
 }
@@ -1524,6 +1813,10 @@ impl ConvergenceGovernor {
     }
 
     /// Validate arithmetic bounds and construct an active governor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConvergenceBuildError`] when the threshold, window, or maximum delta is invalid.
     pub fn new(
         threshold: u64,
         awaken_threshold: u64,
@@ -1606,6 +1899,10 @@ impl ConvergenceGovernor {
     }
 
     /// Submit one delta, returning the resulting moving-window average.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConvergenceError::DeltaOutOfRange`] when `delta` exceeds the configured maximum.
     pub fn update(&mut self, delta: u64) -> (result: Result<u64, ConvergenceError>) {
         proof { use_type_invariant(&*self); }
         if delta > self.inner.max_delta {
@@ -1625,7 +1922,7 @@ fn budget_sentinel() -> (carrier: BudgetCarrier)
     BudgetCarrier::new(0)
 }
 
-fn registry_sentinel() -> (carrier: RegistryCarrier)
+fn registry_sentinel() -> (carrier: RegistryCarrier<u64, u64>)
     ensures carrier.unique_mapping(),
 {
     RegistryCarrier::new()
@@ -1779,22 +2076,204 @@ fn edges_within_nodes(edges: &Vec<(usize, usize)>, num_nodes: usize) -> (valid: 
 
 } // verus!
 
+impl Budget {
+    /// Whether the budget currently holds no claims.
+    pub fn is_empty(&self) -> bool {
+        self.allocated() == 0 && self.reserved() == 0 && self.pending_eviction() == 0
+    }
+
+    /// Whether every capacity unit is currently claimed.
+    pub fn is_full(&self) -> bool {
+        self.available() == 0
+    }
+}
+
+impl ResourceRegistry {
+    /// Whether `key` has a registered value.
+    pub fn contains_key(&self, key: u64) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Borrow registered entries in deterministic storage order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &(u64, u64)> {
+        self.inner.entries.iter()
+    }
+}
+
+impl AuditSink {
+    /// Whether the sink has reached its record capacity.
+    pub fn is_full(&self) -> bool {
+        self.len() == self.capacity()
+    }
+
+    /// Iterate over immutable records in chain order.
+    pub fn records(&self) -> impl ExactSizeIterator<Item = AuditRecord> + '_ {
+        self.inner.log.iter().map(|entry| AuditRecord {
+            operation: entry.operation,
+            previous_hash: entry.prev_hash,
+            hash: entry.hash,
+        })
+    }
+}
+
+impl PropagationPass {
+    /// Borrow directed propagation edges in configured order.
+    pub fn edges(&self) -> &[(usize, usize)] {
+        self.inner.edges.as_slice()
+    }
+
+    /// Borrow the current node values.
+    pub fn values(&self) -> &[u64] {
+        self.inner.values.as_slice()
+    }
+
+    /// Borrow the snapshot captured for the current or latest round.
+    pub fn snapshot_values(&self) -> &[u64] {
+        self.inner.snapshot.as_slice()
+    }
+
+    /// Borrow the per-node update markers for the current or latest round.
+    pub fn updated_nodes(&self) -> &[bool] {
+        self.inner.updated.as_slice()
+    }
+}
+
+impl ActuationPass {
+    /// Borrow current seat allocations.
+    pub fn allocations(&self) -> &[Option<u64>] {
+        self.inner.allocation.as_slice()
+    }
+
+    /// Borrow committed seat effects.
+    pub fn effects(&self) -> &[Option<u64>] {
+        self.inner.effects.as_slice()
+    }
+}
+
+impl QualityHierarchy {
+    /// Borrow all node levels by node index.
+    pub fn levels(&self) -> &[u64] {
+        self.inner.level.as_slice()
+    }
+
+    /// Borrow all node costs by node index.
+    pub fn costs(&self) -> &[u64] {
+        self.inner.cost.as_slice()
+    }
+
+    /// Borrow encoded parent identifiers by node index.
+    ///
+    /// The sentinel `self.len()` represents a node without a parent.
+    pub fn encoded_parents(&self) -> &[usize] {
+        self.inner.parent.as_slice()
+    }
+
+    /// Borrow parent-child edges in insertion order.
+    pub fn edges(&self) -> &[(usize, usize)] {
+        self.inner.edges.as_slice()
+    }
+
+    /// Whether an in-range node has at least one child.
+    pub fn has_children(&self, node: usize) -> Option<bool> {
+        (node < self.len()).then(|| self.inner.has_children(node))
+    }
+
+    /// Whether an in-range parent-child edge is present.
+    pub fn has_edge(&self, parent: usize, child: usize) -> Option<bool> {
+        (parent < self.len() && child < self.len()).then(|| self.inner.has_edge(parent, child))
+    }
+}
+
+impl BacktrackingTraversal {
+    /// Number of choices admitted at each non-leaf depth.
+    pub fn branch_factor(&self) -> u64 {
+        self.inner.branch_factor
+    }
+
+    /// Auxiliary value used at the root.
+    pub fn initial_auxiliary(&self) -> u64 {
+        self.inner.init_aux
+    }
+
+    /// Borrow the current choice path.
+    pub fn choices(&self) -> &[u64] {
+        self.inner.path.as_slice()
+    }
+
+    /// Borrow visited leaf paths in visit order.
+    pub fn visited_paths(&self) -> impl ExactSizeIterator<Item = &[u64]> {
+        self.inner.visited.iter().map(Vec::as_slice)
+    }
+}
+
+impl CompetitiveSelectionHard {
+    /// Borrow candidate scores by candidate index.
+    pub fn scores(&self) -> &[u64] {
+        self.inner.scores.as_slice()
+    }
+}
+
+impl CompetitiveSelectionHardExclusive {
+    /// Whether no seats are configured.
+    pub fn is_empty(&self) -> bool {
+        self.seat_count() == 0
+    }
+
+    /// Borrow current seat allocations.
+    pub fn allocations(&self) -> &[Option<u64>] {
+        self.inner.allocation.as_slice()
+    }
+
+    /// Borrow one seat's candidate scores.
+    pub fn scores(&self, seat: usize) -> Option<&[u64]> {
+        self.inner.scores.get(seat).map(Vec::as_slice)
+    }
+}
+
+impl CompetitiveSelectionSoft {
+    /// Borrow candidate scores by candidate index.
+    pub fn scores(&self) -> &[u64] {
+        self.inner.scores.as_slice()
+    }
+
+    /// Iterate over current candidate weights.
+    pub fn weights(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
+        self.inner.extra.iter().map(|extra| extra + 1)
+    }
+}
+
+impl CompetitiveSelectionRanked {
+    /// Borrow candidate scores by candidate index.
+    pub fn scores(&self) -> &[u64] {
+        self.inner.scores.as_slice()
+    }
+
+    /// Borrow current selection markers by candidate index.
+    pub fn selections(&self) -> &[bool] {
+        self.inner.selected.as_slice()
+    }
+
+    /// Number of currently selected candidates.
+    pub fn selected_len(&self) -> usize {
+        self.inner
+            .selected
+            .iter()
+            .filter(|selected| **selected)
+            .count()
+    }
+}
+
+impl ConvergenceGovernor {
+    /// Borrow retained deltas from oldest to newest.
+    pub fn history_values(&self) -> &[u64] {
+        self.inner.delta_history.as_slice()
+    }
+}
+
 impl Default for ResourceRegistry {
     fn default() -> Self {
         Self::new()
     }
-}
-
-macro_rules! impl_observational_debug {
-    ($type:ty, $name:literal, $($field:literal => $method:ident),+ $(,)?) => {
-        impl core::fmt::Debug for $type {
-            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                let mut state = formatter.debug_struct($name);
-                $(state.field($field, &self.$method());)+
-                state.finish()
-            }
-        }
-    };
 }
 
 impl_observational_debug!(Budget, "Budget",
@@ -1868,157 +2347,77 @@ impl_observational_debug!(ConvergenceGovernor, "ConvergenceGovernor",
     "history_len" => history_len,
 );
 
-impl core::fmt::Display for BudgetError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::AmountExceedsReservation => "amount exceeds the held reservation",
-            Self::AmountExceedsAllocation => "amount exceeds the committed allocation",
-            Self::AmountExceedsPendingEviction => "amount exceeds pending eviction",
-        })
-    }
-}
-
-impl std::error::Error for BudgetError {}
-
-impl core::fmt::Display for CursorError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::Regression => "cursor movement would regress the retained position",
-        })
-    }
-}
-
-impl std::error::Error for CursorError {}
-
-impl core::fmt::Display for PropagationBuildError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::InitialValueOutOfRange => "an initial value exceeds the declared value ceiling",
-            Self::EdgeEndpointOutOfRange => "an edge endpoint is outside the admitted node set",
-        })
-    }
-}
-
-impl std::error::Error for PropagationBuildError {}
-
-impl core::fmt::Display for PropagationError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::NodeOutOfRange => "node is outside the admitted graph",
-            Self::RoundAlreadyRunning => "a propagation round is already running",
-            Self::RoundNotRunning => "no propagation round is running",
-            Self::NodeAlreadyUpdated => "node already committed an update in this round",
-            Self::RoundIncomplete => "not every node committed an update",
-            Self::PassTerminated => "propagation pass is settled or exhausted",
-            Self::PassStillRunning => "propagation pass has not reached a terminal state",
-        })
-    }
-}
-
-impl std::error::Error for PropagationError {}
-
-impl core::fmt::Display for ActuationError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::SeatOutOfRange => "seat is outside the admitted seat set",
-            Self::PassComplete => "actuation pass is already complete",
-            Self::SeatAlreadyAllocated => "seat already holds a resource",
-            Self::SeatUnallocated => "seat holds no resource",
-            Self::SeatAlreadyActuated => "seat already committed its effect",
-            Self::PassIncomplete => "an allocated seat has not committed its effect",
-        })
-    }
-}
-
-impl std::error::Error for ActuationError {}
-
-impl core::fmt::Display for QualityHierarchyError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::NodeOutOfRange => "node is outside the admitted hierarchy",
-            Self::ParentOutOfRange => "parent is outside the admitted hierarchy",
-            Self::ChildOutOfRange => "child is outside the admitted hierarchy",
-            Self::LevelOutOfRange => "level exceeds the hierarchy ceiling",
-            Self::CostOutOfRange => "cost exceeds the hierarchy ceiling",
-            Self::NodeNotIsolated => "node properties may change only while the node is isolated",
-            Self::SelfEdge => "a hierarchy node cannot be its own child",
-            Self::EdgeAlreadyExists => "the parent-child edge already exists",
-            Self::ChildAlreadyParented => "the child already has a parent",
-            Self::LevelOrderViolation => "parent level must strictly exceed child level",
-            Self::CostOrderViolation => "parent cost must not exceed child cost",
-        })
-    }
-}
-
-impl std::error::Error for QualityHierarchyError {}
-
-impl core::fmt::Display for BacktrackingBuildError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::InitialAuxOutOfRange => {
-                "initial auxiliary value is outside the modulo-three domain"
-            }
-        })
-    }
-}
-
-impl std::error::Error for BacktrackingBuildError {}
-
-impl core::fmt::Display for BacktrackingError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::AtLeaf => "descent is disabled at a leaf",
-            Self::ChoiceOutOfRange => "branch choice is outside the admitted branch set",
-            Self::DeltaOutOfRange => "mutation delta must be one or two",
-            Self::NotLeaf => "visit requires a full-depth leaf",
-            Self::AlreadyVisited => "the current leaf was already visited",
-            Self::AtRoot => "ascent is disabled at the root",
-        })
-    }
-}
-
-impl std::error::Error for BacktrackingError {}
-
-impl core::fmt::Display for CompetitiveSelectionError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::NoCandidates => "at least one candidate is required",
-            Self::CandidateOutOfRange => "candidate is outside the admitted candidate set",
-            Self::SeatOutOfRange => "seat is outside the admitted seat set",
-            Self::SeatAlreadyAllocated => "seat already holds an allocation",
-            Self::NoCandidateAvailable => "no candidate is available for the seat",
-            Self::ScoreOutOfRange => "score is outside the admitted score domain",
-            Self::ScoreCountMismatch => "replacement scores have a different candidate count",
-            Self::WeightTotalBelowReservedFloor => {
-                "weight total is smaller than the reserved candidate floor"
-            }
-            Self::WeightTotalOutOfRange => "weight total exceeds the verified arithmetic ceiling",
-            Self::MaxScoreOutOfRange => "maximum score exceeds the verified arithmetic ceiling",
-            Self::AllocationComplete => "all soft-selection weight has been assigned",
-        })
-    }
-}
-
-impl std::error::Error for CompetitiveSelectionError {}
-
-impl core::fmt::Display for ConvergenceBuildError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::ThresholdOutOfRange => "convergence threshold cannot be doubled safely",
-            Self::EmptyWindow => "convergence history window must be nonempty",
-            Self::WindowSumOutOfRange => "maximum convergence window sum exceeds u64",
-        })
-    }
-}
-
-impl std::error::Error for ConvergenceBuildError {}
-
-impl core::fmt::Display for ConvergenceError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::DeltaOutOfRange => "delta exceeds the configured maximum",
-        })
-    }
-}
-
-impl std::error::Error for ConvergenceError {}
+impl_public_error!(BudgetError, {
+    Self::AmountExceedsReservation => "amount exceeds the held reservation",
+    Self::AmountExceedsAllocation => "amount exceeds the committed allocation",
+    Self::AmountExceedsPendingEviction => "amount exceeds pending eviction",
+});
+impl_public_error!(CursorError, {
+    Self::Regression => "cursor movement would regress the retained position",
+});
+impl_public_error!(PropagationBuildError, {
+    Self::InitialValueOutOfRange => "an initial value exceeds the declared value ceiling",
+    Self::EdgeEndpointOutOfRange => "an edge endpoint is outside the admitted node set",
+});
+impl_public_error!(PropagationError, {
+    Self::NodeOutOfRange => "node is outside the admitted graph",
+    Self::RoundAlreadyRunning => "a propagation round is already running",
+    Self::RoundNotRunning => "no propagation round is running",
+    Self::NodeAlreadyUpdated => "node already committed an update in this round",
+    Self::RoundIncomplete => "not every node committed an update",
+    Self::PassTerminated => "propagation pass is settled or exhausted",
+    Self::PassStillRunning => "propagation pass has not reached a terminal state",
+});
+impl_public_error!(ActuationError, {
+    Self::SeatOutOfRange => "seat is outside the admitted seat set",
+    Self::PassComplete => "actuation pass is already complete",
+    Self::SeatAlreadyAllocated => "seat already holds a resource",
+    Self::SeatUnallocated => "seat holds no resource",
+    Self::SeatAlreadyActuated => "seat already committed its effect",
+    Self::PassIncomplete => "an allocated seat has not committed its effect",
+});
+impl_public_error!(QualityHierarchyError, {
+    Self::NodeOutOfRange => "node is outside the admitted hierarchy",
+    Self::ParentOutOfRange => "parent is outside the admitted hierarchy",
+    Self::ChildOutOfRange => "child is outside the admitted hierarchy",
+    Self::LevelOutOfRange => "level exceeds the hierarchy ceiling",
+    Self::CostOutOfRange => "cost exceeds the hierarchy ceiling",
+    Self::NodeNotIsolated => "node properties may change only while the node is isolated",
+    Self::SelfEdge => "a hierarchy node cannot be its own child",
+    Self::EdgeAlreadyExists => "the parent-child edge already exists",
+    Self::ChildAlreadyParented => "the child already has a parent",
+    Self::LevelOrderViolation => "parent level must strictly exceed child level",
+    Self::CostOrderViolation => "parent cost must not exceed child cost",
+});
+impl_public_error!(BacktrackingBuildError, {
+    Self::InitialAuxOutOfRange => "initial auxiliary value is outside the modulo-three domain",
+});
+impl_public_error!(BacktrackingError, {
+    Self::AtLeaf => "descent is disabled at a leaf",
+    Self::ChoiceOutOfRange => "branch choice is outside the admitted branch set",
+    Self::DeltaOutOfRange => "mutation delta must be one or two",
+    Self::NotLeaf => "visit requires a full-depth leaf",
+    Self::AlreadyVisited => "the current leaf was already visited",
+    Self::AtRoot => "ascent is disabled at the root",
+});
+impl_public_error!(CompetitiveSelectionError, {
+    Self::NoCandidates => "at least one candidate is required",
+    Self::CandidateOutOfRange => "candidate is outside the admitted candidate set",
+    Self::SeatOutOfRange => "seat is outside the admitted seat set",
+    Self::SeatAlreadyAllocated => "seat already holds an allocation",
+    Self::NoCandidateAvailable => "no candidate is available for the seat",
+    Self::ScoreOutOfRange => "score is outside the admitted score domain",
+    Self::ScoreCountMismatch => "replacement scores have a different candidate count",
+    Self::WeightTotalBelowReservedFloor => "weight total is smaller than the reserved candidate floor",
+    Self::WeightTotalOutOfRange => "weight total exceeds the verified arithmetic ceiling",
+    Self::MaxScoreOutOfRange => "maximum score exceeds the verified arithmetic ceiling",
+    Self::AllocationComplete => "all soft-selection weight has been assigned",
+});
+impl_public_error!(ConvergenceBuildError, {
+    Self::ThresholdOutOfRange => "convergence threshold cannot be doubled safely",
+    Self::EmptyWindow => "convergence history window must be nonempty",
+    Self::WindowSumOutOfRange => "maximum convergence window sum exceeds u64",
+});
+impl_public_error!(ConvergenceError, {
+    Self::DeltaOutOfRange => "delta exceeds the configured maximum",
+});

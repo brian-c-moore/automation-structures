@@ -13,8 +13,9 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
 }
 
 fn conserved(s: &StreamGraphFanout) -> bool {
-    s.ingested == s.left_queue.len() + s.left_emitted
-        && s.ingested == s.right_queue.len() + s.right_emitted
+    s.ingested.value() as usize == s.left_queue.len() + s.left_emitted.value() as usize
+        && s.ingested.value() as usize
+            == s.right_queue.len() + s.right_emitted.value() as usize
 }
 
 fn main() {
@@ -39,7 +40,7 @@ fn main() {
     ok &= check("first broadcast", s.source_ingest(3), true);
     ok &= check(
         "copies match",
-        (s.left_queue.clone(), s.right_queue.clone()),
+        (s.left_queue.values.clone(), s.right_queue.values.clone()),
         (vec![3], vec![3]),
     );
     ok &= check("left drains independently", s.consume_left(), true);
@@ -53,7 +54,11 @@ fn main() {
     while s.consume_right() {}
     ok &= check("drained conservation", conserved(&s), true);
     ok &= check("terminal", s.terminal(), true);
-    ok &= check("branch totals", (s.left_emitted, s.right_emitted), (3, 3));
+    ok &= check(
+        "branch totals",
+        (s.left_emitted.value(), s.right_emitted.value()),
+        (3, 3),
+    );
 
     if ok {
         println!("KAT_RESULT: SUCCESS (StreamGraph fan-out modality)");

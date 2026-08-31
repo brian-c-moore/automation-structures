@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # vstd and the checksum-pinned Verus bundle form one verified toolchain.
+      # Update them together through a manually verified release change.
+      - dependency-name: vstd
   - package-ecosystem: github-actions
     directory: /
     schedule:

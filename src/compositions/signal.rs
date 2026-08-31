@@ -1,301 +1,333 @@
-// Executable Signal composition corresponding to the TLA+ carrier.
+// AuditSink-backed Signal named composition.
 //
-// The TLA+ spec at formal/structures/Signal/Signal.tla models a change-detecting
-// notification channel as current_value, a change_observed provenance bit, and the
-// pending/notified listener sets. Init has epoch zero and empty delivery state;
-// the two actions are:
+// This is the executable construction recorded by
+// SignalFromAuditSink.tla:
 //
-//   SetValue(v)       — guard v /= current_value (the change-detection
-//                       filter); on fire:
-//                       current_value' = v, pending' = Listeners (all),
-//                       notified' = {}, change_observed' = true
-//                       in ONE step.
-//   NotifyListener(l) — guard l ∈ pending_notifications; moves l from
-//                       pending to notified in ONE step.
+//   current_value = last AuditSink operation, or initial_value
+//   pending(l)    = cursor(l) < audit length
+//   notified(l)   = audit length > 0 && cursor(l) == audit length
 //
-// Its .cfg checks three invariants, all discharged here as proof
-// obligations under the full dynamics (Init ⇒ Inv, Inv ∧ Action ⇒ Inv'):
-//
-//   TypeInvariant           == current_value ∈ Values
-//                              /\ pending ⊆ Listeners /\ notified ⊆ Listeners
-//   PendingNotifiedDisjointness == pending_notifications ∩ notified = {}
-//   NotificationProvenance == before any change there is no delivery state;
-//                              afterwards pending ∪ notified = Listeners.
-//
-// Representation:
-//   - Values is the index universe 0..num_values-1; current_value < num_values
-//     is TypeInvariant's first conjunct.
-//   - pending/notified ⊆ Listeners are listener-indexed bitvecs Vec<bool>
-//     over 0..num_listeners-1.
-//   - SetValue is realised in the Budget TryAllocate idiom (the action is
-//     IF-shaped on its guard): set_value(v) returns exactly the TLA+ guard
-//     condition v /= current_value; when false the state is UNCHANGED. The
-//     change-detection filter is fused with the act inside the one method, so
-//     the channel fires exactly once per actual change and the filter is not
-//     delegated to callers.
-//   - NotifyListener's guard (l ∈ pending) is a `requires`, so the action is
-//     callable exactly when the TLA+ action is enabled; the pending-to-notified
-//     move is one method.
-//
-// Evidence boundary: this is a sequential witness. Each merged TLA+ action is
-// one &mut self method and Rust's exclusive mutable borrow is the atomic
-// boundary. A concurrent realization must supply equivalent exclusion.
+// AuditSink owns append capacity and chain state. CF-002 Cursor owns each
+// retained listener position. Signal adds only change detection and the fused
+// listener catch-up transition. It stores no parallel pending or notified set.
 
+use crate::connectives::cursor::Cursor;
+use crate::primitives::audit_sink::AuditSink;
 use vstd::prelude::*;
 
 verus! {
 
-/// A change-detecting notification channel over a value universe
-/// `0..num_values` and a listener universe `0..num_listeners`.
-pub struct Signal {
-    /// |Values|: the value universe is the index range `0..num_values`.
-    pub num_values: u64,
-    /// current_value ∈ Values.
+/// Erased one-listener logical view used by fused Signal realizations.
+pub ghost struct SignalModel {
+    /// Current signal value.
     pub current_value: u64,
-    /// TLA+ change_observed. It becomes true only on a guarded actual change.
+    /// Whether any actual change has been retained.
     pub change_observed: bool,
-    /// |Listeners|: the listener universe is the index range `0..num_listeners`.
+    /// Whether the selected listener trails the current change head.
+    pub pending: bool,
+    /// Whether the selected listener has observed the current change head.
+    pub notified: bool,
+}
+
+/// The one-listener projection preserves Signal's delivery-state invariants.
+pub open spec fn model_valid(model: SignalModel) -> bool {
+    &&& !(model.pending && model.notified)
+    &&& (!model.change_observed ==> !model.pending && !model.notified)
+    &&& (model.change_observed ==> model.pending || model.notified)
+}
+
+/// Initial Signal projection before an observed value change.
+pub open spec fn model_initial(model: SignalModel, initial_value: u64) -> bool {
+    &&& model_valid(model)
+    &&& model.current_value == initial_value
+    &&& !model.change_observed
+    &&& !model.pending
+    &&& !model.notified
+}
+
+/// One real value change creates exactly one pending notification.
+pub open spec fn model_set_value(
+    pre: SignalModel,
+    post: SignalModel,
+    value: u64,
+) -> bool {
+    &&& model_valid(pre)
+    &&& model_valid(post)
+    &&& value != pre.current_value
+    &&& post.current_value == value
+    &&& post.change_observed
+    &&& post.pending
+    &&& !post.notified
+}
+
+/// Delivery moves the one listener from pending to notified.
+pub open spec fn model_notify(pre: SignalModel, post: SignalModel) -> bool {
+    &&& model_valid(pre)
+    &&& model_valid(post)
+    &&& pre.pending
+    &&& post.current_value == pre.current_value
+    &&& post.change_observed == pre.change_observed
+    &&& !post.pending
+    &&& post.notified
+}
+
+/// A fused physical wake may perform Signal's change and delivery actions atomically.
+pub open spec fn fused_delivery(value: u64) -> bool {
+    value != 0
+}
+
+/// Every admitted fused wake has a witness through the two Signal actions.
+pub proof fn fused_delivery_has_action_witness(value: u64)
+    requires fused_delivery(value),
+    ensures exists|initial: SignalModel, pending: SignalModel, notified: SignalModel|
+        model_initial(initial, 0)
+            && model_set_value(initial, pending, value)
+            && model_notify(pending, notified),
+{
+    let initial = SignalModel {
+        current_value: 0,
+        change_observed: false,
+        pending: false,
+        notified: false,
+    };
+    let pending = SignalModel {
+        current_value: value,
+        change_observed: true,
+        pending: true,
+        notified: false,
+    };
+    let notified = SignalModel {
+        current_value: value,
+        change_observed: true,
+        pending: false,
+        notified: true,
+    };
+    assert(model_initial(initial, 0));
+    assert(model_set_value(initial, pending, value));
+    assert(model_notify(pending, notified));
+}
+
+/// A change-detecting Signal composed from AuditSink and per-listener Cursor.
+pub struct Signal {
+    /// Value used before the first retained change.
+    pub initial_value: u64,
+    /// Exclusive upper bound of the value domain.
+    pub num_values: u64,
+    /// Number of listener cursors.
     pub num_listeners: usize,
-    /// pending_notifications ⊆ Listeners as a listener-indexed bitvec.
-    pub pending: Vec<bool>,
-    /// notified ⊆ Listeners as a listener-indexed bitvec.
-    pub notified: Vec<bool>,
+    /// Owner of retained value changes.
+    pub audit: AuditSink,
+    /// Per-listener progress owners.
+    pub cursors: Vec<Cursor>,
 }
 
 impl Signal {
-    // ── Specifications ──────────────────────────────────────────────────
-
-    /// TLA+ TypeInvariant: current_value ∈ Values, and both listener sets
-    /// span the listener universe (the per-listener membership is carried by
-    /// the bitvec representation).
-    pub open spec fn type_invariant(&self) -> bool {
-        &&& self.current_value < self.num_values
-        &&& self.pending.len() == self.num_listeners
-        &&& self.notified.len() == self.num_listeners
+    /// The current value projected from the audit head or the initial value.
+    pub open spec fn current_value_spec(&self) -> u64 {
+        if self.audit.log@.len() == 0 {
+            self.initial_value
+        } else {
+            self.audit.log@[self.audit.log@.len() - 1].operation
+        }
     }
 
-    /// TLA+ `PendingNotifiedDisjointness`:
-    /// no listener is simultaneously pending and notified.
-    pub open spec fn pending_notified_disjointness(&self) -> bool {
-        forall|i: int|
-            0 <= i < self.pending.len()
-                ==> !(#[trigger] self.pending@[i] && self.notified@[i])
+    /// Whether one listener trails the current audit head.
+    pub open spec fn pending_spec(&self, listener: int) -> bool {
+        0 <= listener < self.cursors@.len()
+            && self.cursors@[listener].position < self.audit.log@.len()
     }
 
-    /// TLA+ `NotificationProvenance`: no delivery state exists before the
-    /// first actual change; for a positive epoch every listener is pending or
-    /// notified for the latest change.
-    pub open spec fn notification_provenance(&self) -> bool {
-        &&& !self.change_observed ==> forall|i: int|
-            0 <= i < self.pending.len()
-                ==> !#[trigger] self.pending@[i] && !self.notified@[i]
-        &&& self.change_observed ==> forall|i: int|
-            0 <= i < self.pending.len()
-                ==> #[trigger] self.pending@[i] || self.notified@[i]
+    /// Whether one listener has caught up to a nonempty audit head.
+    pub open spec fn notified_spec(&self, listener: int) -> bool {
+        &&& 0 <= listener < self.cursors@.len()
+        &&& self.audit.log@.len() > 0
+        &&& self.cursors@[listener].position == self.audit.log@.len()
     }
 
-    // ── Init (TLA+ Init) ────────────────────────────────────────────────
+    /// Maintained construction invariant.
+    pub open spec fn inv(&self) -> bool {
+        &&& self.num_values > 0
+        &&& self.initial_value < self.num_values
+        &&& self.num_listeners == self.cursors@.len()
+        &&& self.audit.inv()
+        &&& forall|i: int| 0 <= i < self.audit.log@.len()
+            ==> #[trigger] self.audit.log@[i].operation < self.num_values
+        &&& forall|i: int| 0 <= i < self.cursors@.len()
+            ==> #[trigger] self.cursors@[i].position <= self.audit.log@.len()
+    }
 
-    /// Construct the initial state: some value from the universe, nothing
-    /// pending, nothing notified. Realises the TLA+ `Init` predicate and
-    /// establishes both invariants (disjointness holds vacuously
-    /// since both sets are empty).
-    pub fn new(initial_value: u64, num_values: u64, num_listeners: usize) -> (s: Signal)
+    /// Construct an empty change log and one zero cursor per listener.
+    #[expect(clippy::arithmetic_side_effects, reason = "the loop invariant and guard prove the listener index increment remains in range")]
+    pub fn new(
+        initial_value: u64,
+        num_values: u64,
+        num_listeners: usize,
+        max_changes: usize,
+    ) -> (signal: Self)
         requires
+            num_values > 0,
             initial_value < num_values,
         ensures
-            s.num_values == num_values,
-            s.num_listeners == num_listeners,
-            s.current_value == initial_value,
-            !s.change_observed,
-            s.pending.len() == num_listeners,
-            s.notified.len() == num_listeners,
-            forall|i: int| 0 <= i < num_listeners ==> !s.pending@[i],
-            forall|i: int| 0 <= i < num_listeners ==> !s.notified@[i],
-            s.type_invariant(),
-            s.pending_notified_disjointness(),
-            s.notification_provenance(),
+            signal.inv(),
+            signal.initial_value == initial_value,
+            signal.num_values == num_values,
+            signal.num_listeners == num_listeners,
+            signal.audit.max_log_len == max_changes,
+            signal.audit.log@.len() == 0,
+            signal.current_value_spec() == initial_value,
+            forall|i: int| 0 <= i < signal.cursors@.len()
+                ==> #[trigger] signal.cursors@[i].position == 0,
     {
-        let mut pending: Vec<bool> = Vec::new();
-        let mut notified: Vec<bool> = Vec::new();
-        let mut i: usize = 0;
-        while i < num_listeners
+        let audit = AuditSink::new(max_changes);
+        let mut cursors: Vec<Cursor> = Vec::new();
+        let mut index: usize = 0;
+        while index < num_listeners
             invariant
-                i <= num_listeners,
-                pending.len() == i,
-                notified.len() == i,
-                forall|k: int| 0 <= k < i ==> !pending@[k],
-                forall|k: int| 0 <= k < i ==> !notified@[k],
-            decreases num_listeners - i,
+                index <= num_listeners,
+                cursors@.len() == index,
+                forall|i: int| 0 <= i < cursors@.len()
+                    ==> #[trigger] cursors@[i].position == 0,
+            decreases num_listeners - index,
         {
-            pending.push(false);
-            notified.push(false);
-            i = i + 1;
+            cursors.push(Cursor::new(0));
+            index += 1;
         }
-        Signal {
+        Self {
+            initial_value,
             num_values,
-            current_value: initial_value,
-            change_observed: false,
             num_listeners,
-            pending,
-            notified,
+            audit,
+            cursors,
         }
     }
 
-    // ── Membership (executable) ─────────────────────────────────────────
-
-    /// Executable test of the `l ∈ pending_notifications` guard.
-    pub fn is_pending(&self, l: usize) -> (b: bool)
-        requires
-            l < self.pending.len(),
+    /// Read the current value projection.
+    #[expect(clippy::indexing_slicing, reason = "the nonempty branch proves the audit index is in bounds")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the nonempty branch proves the audit length can be decremented")]
+    pub fn current_value(&self) -> (value: u64)
+        requires self.inv(),
         ensures
-            b == self.pending@[l as int],
+            value == self.current_value_spec(),
+            value < self.num_values,
     {
-        self.pending[l]
+        if self.audit.log.is_empty() {
+            self.initial_value
+        } else {
+            self.audit.log[self.audit.log.len() - 1].operation
+        }
     }
 
-    /// Executable test of `l ∈ notified`.
-    pub fn is_notified(&self, l: usize) -> (b: bool)
-        requires
-            l < self.notified.len(),
-        ensures
-            b == self.notified@[l as int],
+    /// Report whether at least one value change has been recorded.
+    pub fn has_changes(&self) -> (changed: bool)
+        requires self.inv(),
+        ensures changed == (self.audit.log@.len() > 0),
     {
-        self.notified[l]
+        !self.audit.log.is_empty()
     }
 
-    // ── SetValue (TLA+ SetValue) ────────────────────────────────────────
+    /// Report whether `set_value` is enabled for the supplied value.
+    pub fn can_set_value(&self, value: u64) -> (enabled: bool)
+        requires self.inv(),
+        ensures enabled == (value < self.num_values
+            && value != self.current_value_spec()
+            && self.audit.log@.len() < self.audit.max_log_len),
+    {
+        value < self.num_values
+            && value != self.current_value()
+            && self.audit.log.len() < self.audit.max_log_len
+    }
 
-    /// Set the value, with the change-detection filter fused in: the returned
-    /// bool is exactly the TLA+ guard `v /= current_value`. On a change,
-    /// in the same step: current_value' = v, pending' = Listeners (every
-    /// listener), notified' = {} (reset). On a non-change the state is
-    /// UNCHANGED, so no notification is raised without a value change.
-    pub fn set_value(&mut self, v: u64) -> (changed: bool)
+    /// Read whether one listener is pending.
+    #[expect(clippy::indexing_slicing, reason = "the caller supplies an in-range listener")]
+    pub fn is_pending(&self, listener: usize) -> (pending: bool)
         requires
-            old(self).type_invariant(),
-            old(self).pending_notified_disjointness(),
-            old(self).notification_provenance(),
-            v < old(self).num_values,
+            self.inv(),
+            listener < self.cursors.len(),
+        ensures pending == self.pending_spec(listener as int),
+    {
+        self.cursors[listener].position < self.audit.log.len()
+    }
+
+    /// Read whether one listener has caught up to a nonempty head.
+    #[expect(clippy::indexing_slicing, reason = "the caller supplies an in-range listener")]
+    pub fn is_notified(&self, listener: usize) -> (notified: bool)
+        requires
+            self.inv(),
+            listener < self.cursors.len(),
+        ensures notified == self.notified_spec(listener as int),
+    {
+        !self.audit.log.is_empty()
+            && self.cursors[listener].position == self.audit.log.len()
+    }
+
+    /// Append one real value change through the AuditSink owner.
+    pub fn set_value(&mut self, value: u64)
+        requires
+            old(self).inv(),
+            value < old(self).num_values,
+            value != old(self).current_value_spec(),
+            old(self).audit.log@.len() < old(self).audit.max_log_len,
         ensures
+            final(self).inv(),
+            final(self).initial_value == old(self).initial_value,
             final(self).num_values == old(self).num_values,
             final(self).num_listeners == old(self).num_listeners,
-            changed == (v != old(self).current_value),
-            changed ==> final(self).current_value == v,
-            changed ==> final(self).change_observed,
-            changed ==> forall|i: int| 0 <= i < final(self).pending.len() ==> final(self).pending@[i],
-            changed ==> forall|i: int| 0 <= i < final(self).notified.len() ==> !final(self).notified@[i],
-            !changed ==> final(self).current_value == old(self).current_value,
-            !changed ==> final(self).change_observed == old(self).change_observed,
-            !changed ==> final(self).pending@ == old(self).pending@,
-            !changed ==> final(self).notified@ == old(self).notified@,
-            final(self).type_invariant(),
-            final(self).pending_notified_disjointness(),
-            final(self).notification_provenance(),
+            final(self).audit.log@.len() == old(self).audit.log@.len() + 1,
+            final(self).current_value_spec() == value,
+            final(self).cursors@ == old(self).cursors@,
     {
-        if v == self.current_value {
-            // Guard false: the TLA+ action is not enabled; UNCHANGED.
-            return false;
-        }
-        // Guard true: fire. pending' = Listeners, notified' = {} — walked in
-        // one pass; the whole method is the one atomic step (exclusive borrow).
-        let mut i: usize = 0;
-        while i < self.pending.len()
-            invariant
-                self.num_values == old(self).num_values,
-                self.num_listeners == old(self).num_listeners,
-                self.current_value == old(self).current_value,
-                self.pending.len() == old(self).pending.len(),
-                self.notified.len() == old(self).notified.len(),
-                old(self).type_invariant(),
-                i <= self.pending.len(),
-                forall|k: int| 0 <= k < i ==> self.pending@[k],
-                forall|k: int| 0 <= k < i ==> !self.notified@[k],
-            decreases self.pending.len() - i,
-        {
-            // notified.len() == pending.len() by TypeInvariant, so the index
-            // is in range for both.
-            assert(i < self.notified.len());
-            self.pending.set(i, true);
-            self.notified.set(i, false);
-            i = i + 1;
-        }
-        self.current_value = v;
-        self.change_observed = true;
-        // Re-establish disjointness: notified is now all-false, so
-        // the intersection is empty regardless of pending.
-        assert(self.pending_notified_disjointness()) by {
-            assert forall|j: int| 0 <= j < self.pending.len()
-                implies !(self.pending@[j] && self.notified@[j]) by {
-                assert(!self.notified@[j]);
+        let ghost prior_log = self.audit.log@;
+        let ghost prior_cursors = self.cursors@;
+        let _accepted = self.audit.record(value);
+        assert(_accepted);
+        assert(self.audit.log@.len() == prior_log.len() + 1);
+        assert(self.audit.log@[prior_log.len() as int].operation == value);
+        assert(self.current_value_spec() == value);
+        assert(self.cursors@ == prior_cursors);
+        assert forall|i: int| 0 <= i < self.audit.log@.len()
+            implies #[trigger] self.audit.log@[i].operation < self.num_values by {
+            if i < prior_log.len() {
+                assert(self.audit.log@[i] == prior_log[i]);
+            } else {
+                assert(i == prior_log.len());
             }
         }
-        assert(self.notification_provenance()) by {
-            assert forall|j: int| 0 <= j < self.pending.len()
-                implies self.pending@[j] || self.notified@[j] by {
-                assert(self.pending@[j]);
-            }
+        assert forall|i: int| 0 <= i < self.cursors@.len()
+            implies #[trigger] self.cursors@[i].position <= self.audit.log@.len() by {
+            assert(self.cursors@[i].position <= prior_log.len());
         }
-        true
     }
 
-    // ── NotifyListener (TLA+ NotifyListener) ────────────────────────────
-
-    /// Notify listener `l`. Realises the TLA+ `NotifyListener(l)` action: the
-    /// guard (l ∈ pending_notifications) is a `requires`, and the move from
-    /// pending to notified happens in this one step — a listener is never
-    /// observable in both views; the decomposition witness splits this move
-    /// and exposes the overlap.
-    pub fn notify_listener(&mut self, l: usize)
+    /// Advance one pending listener exactly to the current audit head.
+    #[expect(clippy::indexing_slicing, reason = "the caller and invariant prove the listener index is in bounds")]
+    pub fn notify_listener(&mut self, listener: usize)
         requires
-            old(self).type_invariant(),
-            old(self).pending_notified_disjointness(),
-            old(self).notification_provenance(),
-            l < old(self).pending.len(),
-            old(self).pending@[l as int],   // l ∈ pending_notifications
+            old(self).inv(),
+            listener < old(self).cursors.len(),
+            old(self).cursors@[listener as int].position < old(self).audit.log@.len(),
         ensures
+            final(self).inv(),
+            final(self).initial_value == old(self).initial_value,
             final(self).num_values == old(self).num_values,
             final(self).num_listeners == old(self).num_listeners,
-            final(self).current_value == old(self).current_value,   // UNCHANGED
-            final(self).change_observed == old(self).change_observed,
-            final(self).pending@ == old(self).pending@.update(l as int, false),
-            final(self).notified@ == old(self).notified@.update(l as int, true),
-            final(self).type_invariant(),
-            final(self).pending_notified_disjointness(),
-            final(self).notification_provenance(),
+            final(self).audit.log@ == old(self).audit.log@,
+            final(self).audit.last_hash == old(self).audit.last_hash,
+            final(self).cursors@[listener as int].position == old(self).audit.log@.len(),
+            forall|i: int| 0 <= i < final(self).cursors@.len() && i != listener
+                ==> final(self).cursors@[i].position == old(self).cursors@[i].position,
     {
-        assert(self.change_observed) by {
-            if !self.change_observed {
-                assert(!self.pending@[l as int]);
-            }
-        }
-        // notified.len() == pending.len() by TypeInvariant.
-        assert(l < self.notified.len());
-        self.pending.set(l, false);
-        self.notified.set(l, true);
-        // Re-establish disjointness: at l the pending side is now
-        // false; every other listener is unchanged, so the old invariant
-        // carries over pointwise.
-        assert(self.pending_notified_disjointness()) by {
-            assert forall|i: int| 0 <= i < self.pending.len()
-                implies !(self.pending@[i] && self.notified@[i]) by {
-                if i == l as int {
-                    assert(!self.pending@[i]);
-                } else {
-                    assert(self.pending@[i] == old(self).pending@[i]);
-                    assert(self.notified@[i] == old(self).notified@[i]);
-                }
-            }
-        }
-        assert(self.notification_provenance()) by {
-            assert forall|i: int| 0 <= i < self.pending.len()
-                implies self.pending@[i] || self.notified@[i] by {
-                if i == l as int {
-                    assert(self.notified@[i]);
-                } else {
-                    assert(self.pending@[i] == old(self).pending@[i]);
-                    assert(self.notified@[i] == old(self).notified@[i]);
-                }
+        let head = self.audit.log.len();
+        let ghost prior_cursors = self.cursors@;
+        let mut advanced = Cursor::new(self.cursors[listener].position);
+        advanced.advance_to(head);
+        self.cursors.set(listener, advanced);
+        assert(self.cursors@ == prior_cursors.update(listener as int, self.cursors@[listener as int]));
+        assert forall|i: int| 0 <= i < self.cursors@.len()
+            implies #[trigger] self.cursors@[i].position <= self.audit.log@.len() by {
+            if i == listener as int {
+                assert(self.cursors@[i].position == self.audit.log@.len());
+            } else {
+                assert(self.cursors@[i] == prior_cursors[i]);
             }
         }
     }

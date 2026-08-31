@@ -1,4 +1,4 @@
-//! Canonical Accumulator connective relations for partial results carried between steps.
+//! Accumulator connective relations for partial results carried between steps.
 
 use vstd::prelude::*;
 
@@ -117,4 +117,146 @@ pub proof fn skip_pending_head_with_suffix<T>(source: Seq<T>, suffix: Seq<T>)
     assert(source.add(suffix).skip(1) =~= source.skip(1).add(suffix));
 }
 
+/// An ordered partial result paired with its pending suffix.
+pub struct Accumulator<T: Copy> {
+    /// Ghost reconstruction of the complete ordered value sequence.
+    pub original: Ghost<Seq<T>>,
+    /// Values already incorporated into the partial result.
+    pub accumulated: Vec<T>,
+    /// Values not yet incorporated into the partial result.
+    pub pending: Vec<T>,
+}
+
+impl<T: Copy> Accumulator<T> {
+    /// The accumulated prefix and pending suffix reconstruct the complete sequence.
+    pub closed spec fn well_formed(&self) -> bool {
+        carries(self.original@, self.accumulated@, self.pending@)
+    }
+
+    /// Construct an accumulator with an empty consumed prefix.
+    pub fn new(values: Vec<T>) -> (accumulator: Self)
+        ensures accumulator.well_formed(),
+    {
+        let ghost original = values@;
+        Self { original: Ghost(original), accumulated: Vec::new(), pending: values }
+    }
+
+    /// Construct an accumulator whose supplied prefix is already incorporated.
+    pub fn from_accumulated(values: Vec<T>) -> (accumulator: Self)
+        ensures
+            accumulator.well_formed(),
+            accumulator.accumulated@ == values@,
+            accumulator.pending@.len() == 0,
+    {
+        let ghost original = values@;
+        Self { original: Ghost(original), accumulated: values, pending: Vec::new() }
+    }
+
+    /// Number of values already accumulated.
+    pub fn accumulated_len(&self) -> (length: usize)
+        ensures length == self.accumulated@.len(),
+    {
+        self.accumulated.len()
+    }
+
+    /// Number of values in the accumulated prefix.
+    pub fn len(&self) -> (length: usize)
+        ensures length == self.accumulated@.len(),
+    {
+        self.accumulated.len()
+    }
+
+    /// Whether the accumulated prefix is empty.
+    pub fn is_empty(&self) -> (empty: bool)
+        ensures empty == (self.accumulated@.len() == 0),
+    {
+        self.accumulated.is_empty()
+    }
+
+    /// Number of values still pending.
+    pub fn pending_len(&self) -> (length: usize)
+        ensures length == self.pending@.len(),
+    {
+        self.pending.len()
+    }
+
+    /// Whether no values remain pending.
+    pub fn is_complete(&self) -> (complete: bool)
+        ensures complete == (self.pending@.len() == 0),
+    {
+        self.pending.is_empty()
+    }
+
+    /// Read one accumulated value by original order.
+    #[expect(clippy::indexing_slicing, reason = "the branch proves the accumulated index is in bounds")]
+    pub fn accumulated(&self, index: usize) -> Option<T> {
+        if index < self.accumulated.len() { Some(self.accumulated[index]) } else { None }
+    }
+
+    /// Read one value from the accumulated prefix by order.
+    pub fn value(&self, index: usize) -> Option<T> {
+        self.accumulated(index)
+    }
+
+    /// Read one pending value by original order.
+    #[expect(clippy::indexing_slicing, reason = "the branch proves the pending index is in bounds")]
+    pub fn pending(&self, index: usize) -> Option<T> {
+        if index < self.pending.len() { Some(self.pending[index]) } else { None }
+    }
+
+    /// Move the next pending value into the accumulated prefix.
+    #[expect(clippy::indexing_slicing, reason = "the nonempty guard proves the pending head exists")]
+    pub fn advance(&mut self) -> (value: Option<T>)
+        requires old(self).well_formed(),
+        ensures final(self).well_formed(),
+    {
+        if self.pending.is_empty() { return None; }
+        let ghost old_accumulated = self.accumulated@;
+        let ghost old_pending = self.pending@;
+        let value = self.pending[0];
+        self.pending.remove(0);
+        self.accumulated.push(value);
+        proof {
+            consume_pending_head(old_accumulated, old_pending);
+            assert(self.accumulated@ =~= old_accumulated.push(old_pending[0]));
+            assert(self.pending@ =~= old_pending.skip(1));
+        }
+        Some(value)
+    }
+
+    /// Append one value after a completed accumulated prefix.
+    pub fn append(&mut self, value: T)
+        requires
+            old(self).well_formed(),
+            old(self).pending@.len() == 0,
+        ensures
+            final(self).well_formed(),
+            final(self).accumulated@ == old(self).accumulated@.push(value),
+            final(self).pending@ == old(self).pending@,
+    {
+        let ghost old_original = self.original@;
+        let ghost old_accumulated = self.accumulated@;
+        let ghost old_pending = self.pending@;
+        self.accumulated.push(value);
+        self.original = Ghost(old_original.push(value));
+        proof {
+            assert(old_pending =~= Seq::<T>::empty());
+            assert(old_original == old_accumulated.add(old_pending));
+            assert(old_original =~= old_accumulated);
+            assert(self.pending@ =~= Seq::<T>::empty());
+            assert(self.original@ == self.accumulated@.add(self.pending@));
+        }
+    }
+}
+
+}
+
+impl<T: Copy + core::fmt::Debug> core::fmt::Debug for Accumulator<T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Accumulator")
+            .field("accumulated", &self.accumulated)
+            .field("pending", &self.pending)
+            .finish()
+    }
 }

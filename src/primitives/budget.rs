@@ -49,10 +49,15 @@ pub open spec fn budget_safety(
 /// A budget: a `capacity` ceiling against three claimants — `allocated`
 /// (committed), `reserved` (held but not committed), and `pending_eviction`
 /// (being reclaimed).
+#[derive(Clone, Copy)]
 pub struct Budget {
+    /// Fixed capacity ceiling.
     pub capacity: u64,
+    /// Capacity committed to live allocation.
     pub allocated: u64,
+    /// Capacity held for later commitment.
     pub reserved: u64,
+    /// Allocated capacity marked for eviction completion.
     pub pending_eviction: u64,
 }
 

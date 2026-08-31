@@ -41,9 +41,13 @@ verus! {
 /// A refinement forest: per-node level and cost, a parent map (with a NULL
 /// sentinel), and the parent->child edge relation.
 pub struct QualityHierarchy {
+    /// Number of hierarchy nodes.
     pub num_nodes: usize,
+    /// Inclusive ceiling of node levels and costs.
     pub max_level: u64,
+    /// Node levels by node index.
     pub level: Vec<u64>,
+    /// Node costs by node index.
     pub cost: Vec<u64>,
     /// `parent[n]` is a node id below `num_nodes`, or `num_nodes` for NULL (no parent).
     pub parent: Vec<usize>,
@@ -233,7 +237,7 @@ impl QualityHierarchy {
     }
 
     /// Whether the exact quantified TLA+ `SetNodeProperties(n, l, c)` guard is
-    /// enabled. The canonical model bounds both written values by MaxLevel.
+    /// enabled. The formal model bounds both written values by MaxLevel.
     pub fn can_set_node_properties(&self, n: usize, l: u64, c: u64) -> (b: bool)
         requires
             self.type_invariant(),
@@ -250,10 +254,12 @@ impl QualityHierarchy {
             && c <= self.max_level
     }
 
+    /// Whether node `n` has at least one retained child edge.
     pub open spec fn has_children_spec(&self, n: usize) -> bool {
         exists|e: int| 0 <= e < self.edges.len() && #[trigger] self.edges@[e].0 == n
     }
 
+    /// Whether the exact parent-child edge is present.
     pub fn has_edge(&self, p: usize, c: usize) -> (b: bool)
         ensures b == self.edge_exists(p, c),
     {

@@ -1,275 +1,286 @@
-// Executable carrier for Sampler.tla.
-//
-// Sampler selects a bounded number of items from a distribution. The TLA+ spec
-// has two state variables — distribution (Items -> 0..MaxProb) and selected
-// (⊆ Items) — and checks:
-//
-//   TypeInvariant      == distribution ∈ [Items -> 0..MaxProb] /\ selected ⊆ Items
-//   BoundedSample      == Cardinality(selected) <= SampleSize
-//   SupportConsistency == ∀ s ∈ selected : distribution[s] > 0
-//
-// with the atomic Sample action and the live Zero(i) writer, which may remove
-// only an item not already owned by the selected set.
-//
-// Contract ceiling: selected items remain in the live support and their count
-// is bounded. The carrier does not specify or verify a frequency law; that
-// requires probabilistic or empirical evidence for the external draw rule.
-//
-// Representation:
-//   - Items is the index universe 0..num_items; distribution is a Vec<u64>.
-//   - selected ⊆ Items is a duplicate-free Vec<usize>, so the i ∉ selected
-//     freshness of adding a new draw is an enforced precondition.
+//! Sampler assembled from the ActuationPass and Budget primitives.
+//!
+//! ActuationPass owns the live support and selected-effect projection. Budget owns the sample
+//! ceiling. Sampler adds only the atomic coupling between an actuation and one Budget allocation,
+//! plus caller-supplied proposal admission rules.
 
+use crate::primitives::actuation_pass::ActuationPass;
+use crate::primitives::budget::Budget;
 use vstd::prelude::*;
 
 verus! {
 
-/// A bounded sampler over a per-item distribution.
+/// Integer indicator for an occupied ActuationPass slot.
+pub open spec fn present<T>(value: Option<T>) -> int {
+    if value is Some { 1 } else { 0 }
+}
+
+/// Number of present effects in the first `n` ActuationPass seats.
+pub open spec fn selected_count<T>(effects: Seq<Option<T>>, n: int) -> int
+    decreases n,
+{
+    if n <= 0 || n > effects.len() {
+        0
+    } else {
+        present(effects[n - 1]) + selected_count(effects, n - 1)
+    }
+}
+
+proof fn selected_count_none<T>(effects: Seq<Option<T>>, n: int)
+    requires
+        0 <= n <= effects.len(),
+        forall|i: int| 0 <= i < effects.len() ==> #[trigger] effects[i] is None,
+    ensures selected_count(effects, n) == 0,
+    decreases n,
+{
+    if n > 0 {
+        selected_count_none(effects, n - 1);
+    }
+}
+
+proof fn selected_count_update_unaffected<T>(
+    effects: Seq<Option<T>>,
+    index: int,
+    replacement: Option<T>,
+    n: int,
+)
+    requires 0 <= n <= index < effects.len(),
+    ensures selected_count(effects.update(index, replacement), n)
+        == selected_count(effects, n),
+    decreases n,
+{
+    if n > 0 {
+        selected_count_update_unaffected(effects, index, replacement, n - 1);
+        assert(effects.update(index, replacement)[n - 1] == effects[n - 1]);
+    }
+}
+
+proof fn selected_count_update<T>(
+    effects: Seq<Option<T>>,
+    index: int,
+    replacement: Option<T>,
+    n: int,
+)
+    requires 0 <= index < n <= effects.len(),
+    ensures selected_count(effects.update(index, replacement), n)
+        == selected_count(effects, n) - present(effects[index]) + present(replacement),
+    decreases n,
+{
+    if n == index + 1 {
+        selected_count_update_unaffected(effects, index, replacement, index);
+        assert(effects.update(index, replacement)[index] == replacement);
+    } else {
+        selected_count_update(effects, index, replacement, n - 1);
+        assert(effects.update(index, replacement)[n - 1] == effects[n - 1]);
+    }
+}
+
+/// A bounded without-replacement sampler composed from ActuationPass and Budget.
 pub struct Sampler {
-    /// |Items|: the item universe is the index range `0..num_items`.
-    pub num_items: usize,
-    /// SampleSize: the cardinality bound on `selected`.
-    pub sample_size: usize,
-    /// distribution ∈ [Items -> 0..MaxProb] (per-item probability weight).
-    pub distribution: Vec<u64>,
-    /// selected ⊆ Items, a duplicate-free Vec of item indices.
-    pub selected: Vec<usize>,
+    /// Owner of support, selection, and applied effects.
+    pub actuation: ActuationPass,
+    /// Owner of the sample-size ceiling.
+    pub budget: Budget,
 }
 
 impl Sampler {
-    // ── Specifications ──────────────────────────────────────────────────
-
-    /// Every id in `s` is a valid item index (`s ⊆ Items`).
-    pub open spec fn all_valid(s: Seq<usize>, num_items: usize) -> bool {
-        forall|i: int| 0 <= i < s.len() ==> #[trigger] s[i] < num_items
+    /// Whether one item is selected in the ActuationPass effect projection.
+    pub open spec fn contains(&self, item: usize) -> bool {
+        item < self.actuation.effects.len() && self.actuation.effects@[item as int] is Some
     }
 
-    /// `s` is a set: no duplicate ids.
-    pub open spec fn all_distinct(s: Seq<usize>) -> bool {
-        forall|i: int, j: int|
-            0 <= i < s.len() && 0 <= j < s.len() && i != j ==> s[i] != s[j]
+    /// Every live ActuationPass allocation has positive support weight.
+    pub open spec fn support_domain(&self) -> bool {
+        forall|i: int| 0 <= i < self.actuation.allocation.len()
+            && #[trigger] self.actuation.allocation@[i] is Some
+            ==> self.actuation.allocation@[i]->Some_0 > 0
     }
 
-    /// `n ∈ selected`.
-    pub open spec fn contains(&self, n: usize) -> bool {
-        exists|i: int| 0 <= i < self.selected.len() && self.selected@[i] == n
-    }
-
-    /// TLA+ `TypeInvariant`: distribution spans the item universe; selected is a
-    /// set of valid item ids.
+    /// The two primitive states and their coupling are well formed.
     pub open spec fn type_invariant(&self) -> bool {
-        &&& self.distribution.len() == self.num_items
-        &&& Self::all_valid(self.selected@, self.num_items)
-        &&& Self::all_distinct(self.selected@)
+        &&& self.actuation.invariant()
+        &&& !self.actuation.complete
+        &&& self.support_domain()
+        &&& self.budget.safety_invariant()
+        &&& self.budget.reserved == 0
+        &&& self.budget.pending_eviction == 0
+        &&& self.budget.allocated as int
+            == selected_count(self.actuation.effects@, self.actuation.effects.len() as int)
     }
 
-    /// TLA+ `BoundedSample == Cardinality(selected) <= SampleSize`.
+    /// Selected cardinality is owned by the Budget.
     pub open spec fn bounded_sample(&self) -> bool {
-        self.selected.len() <= self.sample_size
+        self.budget.allocated <= self.budget.capacity
     }
 
-    /// TLA+ `SupportConsistency == ∀ s ∈ selected : distribution[s] > 0`.
+    /// Every selected effect is tied to a positive live ActuationPass allocation.
     pub open spec fn support_consistency(&self) -> bool {
-        forall|i: int|
-            0 <= i < self.selected.len()
-                ==> #[trigger] self.distribution@[self.selected@[i] as int] > 0
+        forall|i: int| 0 <= i < self.actuation.effects.len()
+            && #[trigger] self.actuation.effects@[i] is Some
+            ==> self.actuation.allocation@[i] is Some
+                && self.actuation.allocation@[i]->Some_0 > 0
     }
 
-    /// Full maintained invariant.
+    /// Full composition invariant.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant() && self.bounded_sample() && self.support_consistency()
     }
 
-    // ── Init (TLA+ Init) ────────────────────────────────────────────────
-
-    /// Construct from a distribution with nothing selected yet. Realises the
-    /// TLA+ `Init` predicate (selected = {}); BoundedSample and
-    /// SupportConsistency hold vacuously.
-    pub fn new(distribution: Vec<u64>, sample_size: usize) -> (s: Sampler)
+    /// Build the ActuationPass support projection and an empty sample Budget.
+    pub fn new(distribution: Vec<u64>, sample_size: usize) -> (sampler: Self)
         ensures
-            s.num_items == distribution@.len(),
-            s.sample_size == sample_size,
-            s.distribution@ == distribution@,
-            s.selected@.len() == 0,
-            s.inv(),
+            sampler.actuation.num_seats == distribution@.len(),
+            sampler.budget.capacity == sample_size as u64,
+            sampler.budget.allocated == 0,
+            sampler.inv(),
+            forall|i: int| 0 <= i < distribution@.len() ==> {
+                let allocation = #[trigger] sampler.actuation.allocation@[i];
+                if distribution@[i] == 0 {
+                    allocation is None
+                } else {
+                    allocation == Some(distribution@[i])
+                }
+            },
     {
-        let num_items = distribution.len();
-        Sampler { num_items, sample_size, distribution, selected: Vec::new() }
-    }
-
-    // ── Membership (executable) ─────────────────────────────────────────
-
-    /// Executable `n ∈ selected` test (discharges the freshness guard).
-    pub fn contains_exec(&self, n: usize) -> (b: bool)
-        ensures b == self.contains(n),
-    {
-        let len = self.selected.len();
-        let mut i: usize = 0;
-        while i < len
+        let length = distribution.len();
+        let mut allocation: Vec<Option<u64>> = Vec::new();
+        let mut index: usize = 0;
+        while index < length
             invariant
-                i <= len,
-                len == self.selected.len(),
-                forall|k: int| 0 <= k < i ==> self.selected@[k] != n,
-            decreases len - i,
+                index <= length,
+                length == distribution@.len(),
+                allocation.len() == index,
+                forall|i: int| 0 <= i < index ==> {
+                    let value = #[trigger] allocation@[i];
+                    if distribution@[i] == 0 {
+                        value is None
+                    } else {
+                        value == Some(distribution@[i])
+                    }
+                },
+            decreases length - index,
         {
-            if self.selected[i] == n {
-                assert(self.selected@[i as int] == n);
-                return true;
+            let weight = distribution[index];
+            if weight == 0 {
+                allocation.push(None);
+            } else {
+                allocation.push(Some(weight));
             }
-            i = i + 1;
+            index += 1;
         }
-        assert(!self.contains(n));
-        false
+        let actuation = ActuationPass::new(allocation, length);
+        let budget = Budget::new(sample_size as u64);
+        proof { selected_count_none(actuation.effects@, actuation.effects.len() as int); }
+        Self { actuation, budget }
     }
 
-    // ── Sample (TLA+ Sample) ────────────────────────────────────────────
+    /// Read one support weight, mapping ActuationPass's absent allocation to zero.
+    pub fn weight(&self, item: usize) -> (weight: u64)
+        requires self.inv(), item < self.actuation.num_seats,
+        ensures
+            weight == if self.actuation.allocation@[item as int] is Some {
+                self.actuation.allocation@[item as int]->Some_0
+            } else { 0 },
+    {
+        self.actuation.allocation[item].unwrap_or(0)
+    }
 
-    /// Draw item `i`. Realises the TLA+ `Sample` action: guards (room remains,
-    /// i is a valid item with positive probability, i not already selected) are
-    /// `requires`; selected gains i and both safety invariants are re-established
-    /// as `ensures` (the inductive preservation step).
-    pub fn sample(&mut self, i: usize)
+    /// Executable selected-membership projection.
+    pub fn contains_exec(&self, item: usize) -> (selected: bool)
+        requires self.inv(),
+        ensures selected == self.contains(item),
+    {
+        if item >= self.actuation.effects.len() {
+            false
+        } else {
+            self.actuation.is_actuated(item)
+        }
+    }
+
+    /// Couple ActuationPass.Actuate with Budget.TryAllocate(1).
+    pub fn sample(&mut self, item: usize)
         requires
             old(self).inv(),
-            old(self).selected.len() < old(self).sample_size,   // |selected| < SampleSize
-            i < old(self).num_items,                            // i ∈ Items
-            old(self).distribution@[i as int] > 0,              // i in the support
-            !old(self).contains(i),                             // i ∉ selected
+            item < old(self).actuation.num_seats,
+            old(self).budget.allocated < old(self).budget.capacity,
+            old(self).actuation.allocation@[item as int] is Some,
+            old(self).actuation.effects@[item as int] is None,
         ensures
-            final(self).num_items == old(self).num_items,
-            final(self).sample_size == old(self).sample_size,
-            final(self).distribution@ == old(self).distribution@,
-            final(self).selected@ == old(self).selected@.push(i),
             final(self).inv(),
+            final(self).budget.capacity == old(self).budget.capacity,
+            final(self).budget.allocated == old(self).budget.allocated + 1,
+            final(self).actuation.allocation@ == old(self).actuation.allocation@,
+            final(self).actuation.effects@
+                == old(self).actuation.effects@.update(
+                    item as int,
+                    old(self).actuation.allocation@[item as int],
+                ),
     {
-        let ghost os = self.selected@;
-        self.selected.push(i);
-        assert(self.selected@ == os.push(i));
-
-        // selected' is still a valid set.
-        assert(Self::all_valid(self.selected@, self.num_items));
-        assert(Self::all_distinct(self.selected@)) by {
-            assert forall|a: int, b: int|
-                0 <= a < self.selected@.len() && 0 <= b < self.selected@.len() && a != b
-                implies self.selected@[a] != self.selected@[b] by {
-                if a < os.len() && b < os.len() {
-                    // old distinctness
-                } else if a == os.len() && b < os.len() {
-                    assert(self.selected@[b] == os[b]);
-                    assert(os[b] != i);   // i ∉ os
-                } else if b == os.len() && a < os.len() {
-                    assert(self.selected@[a] == os[a]);
-                    assert(os[a] != i);
-                }
-            }
-        };
-
-        // SupportConsistency': old members keep positive probability; i is in the
-        // support by the precondition.
-        assert(self.support_consistency()) by {
-            assert forall|a: int| 0 <= a < self.selected@.len()
-                implies #[trigger] self.distribution@[self.selected@[a] as int] > 0 by {
-                if a < os.len() {
-                    assert(self.selected@[a] == os[a]);   // old invariant at a
-                } else {
-                    assert(self.selected@[a] == i);       // the pushed draw
-                }
-            }
-        };
+        let ghost prior_effects = self.actuation.effects@;
+        let _accepted = self.budget.try_allocate(1);
+        assert(_accepted);
+        self.actuation.actuate(item);
+        proof {
+            selected_count_update(
+                prior_effects,
+                item as int,
+                self.actuation.effects@[item as int],
+                prior_effects.len() as int,
+            );
+        }
     }
 
-    // ── Zero (Sampler environment action) ──────────────────────────
-
-    /// Remove an unselected item from the live support. This is the exact
-    /// `Zero(i)` writer: selected items are
-    /// owned by the completed draw and cannot be zeroed afterward.
-    pub fn zero(&mut self, i: usize) -> (ok: bool)
+    /// Withdraw an unselected support item through ActuationPass.Deallocate.
+    pub fn zero(&mut self, item: usize) -> (accepted: bool)
         requires old(self).inv(),
         ensures
             final(self).inv(),
-            final(self).num_items == old(self).num_items,
-            final(self).sample_size == old(self).sample_size,
-            ok == (i < old(self).num_items && !old(self).contains(i)),
-            ok ==> final(self).distribution@ == old(self).distribution@.update(i as int, 0),
-            !ok ==> final(self).distribution@ == old(self).distribution@,
-            final(self).selected@ == old(self).selected@,
+            accepted == (item < old(self).actuation.num_seats && !old(self).contains(item)),
+            final(self).budget == old(self).budget,
+            final(self).actuation.effects@ == old(self).actuation.effects@,
+            accepted && old(self).actuation.allocation@[item as int] is Some
+                ==> final(self).actuation.allocation@
+                    == old(self).actuation.allocation@.update(item as int, None),
+            !accepted ==> final(self).actuation.allocation@ == old(self).actuation.allocation@,
     {
-        if i >= self.num_items || self.contains_exec(i) {
-            false
-        } else {
-            self.distribution.set(i, 0);
-            true
+        if item >= self.actuation.num_seats || self.contains_exec(item) {
+            return false;
         }
-    }
-
-    // ── Draw rules and empirical distribution boundary ─────────────────
-    //
-    // `sample` is an acceptor: the caller chooses the item and `sample`
-    // checks that the choice landed in the support and inside the bound. That
-    // is a faithful realization of the TLA+ `Sample` action, which is also an
-    // acceptor (it picks `i` under a guard). A separate generator is required
-    // before a statistical harness can measure a distribution.
-    //
-    // Both draw rules preserve BoundedSample and SupportConsistency. Their
-    // different proposal-admission rules are outside those state predicates,
-    // so no frequency result transfers from `self.inv()` alone.
-
-    /// Weighted draw by rejection sampling. `i` is an externally proposed item
-    /// index and `r` is uniform entropy in `0..max_prob`; the proposal is
-    /// accepted with probability `distribution[i] / max_prob`, so over uniform
-    /// `(i, r)` the accepted items occur with frequency proportional to their
-    /// weight. Uniformity of those inputs is an external rely and the frequency
-    /// result is not part of this function's postconditions.
-    pub fn draw_weighted(&mut self, i: usize, r: u64) -> (accepted: bool)
-        requires
-            old(self).inv(),
-            i < old(self).num_items,
-        ensures
-            final(self).inv(),
-            final(self).num_items == old(self).num_items,
-            final(self).sample_size == old(self).sample_size,
-            final(self).distribution@ == old(self).distribution@,
-            accepted ==> final(self).selected@ == old(self).selected@.push(i),
-            !accepted ==> final(self).selected@ == old(self).selected@,
-    {
-        if self.selected.len() >= self.sample_size {
-            return false;                       // the bound is exhausted
+        if self.actuation.is_allocated(item) {
+            self.actuation.deallocate(item);
         }
-        if r >= self.distribution[i] {
-            return false;                       // REJECTED: this is the weighting
-        }
-        if self.contains_exec(i) {
-            return false;                       // already drawn (without replacement)
-        }
-        self.sample(i);
         true
     }
 
-    /// Uniform-support draw: accept any externally proposed supported item,
-    /// ignoring its weight magnitude. This re-establishes the same state
-    /// invariant as `draw_weighted` but supplies no weighted-frequency result.
-    pub fn draw_uniform(&mut self, i: usize) -> (accepted: bool)
-        requires
-            old(self).inv(),
-            i < old(self).num_items,
-        ensures
-            final(self).inv(),
-            final(self).num_items == old(self).num_items,
-            final(self).sample_size == old(self).sample_size,
-            final(self).distribution@ == old(self).distribution@,
-            accepted ==> final(self).selected@ == old(self).selected@.push(i),
-            !accepted ==> final(self).selected@ == old(self).selected@,
+    /// Weighted rejection over caller-supplied proposal and entropy.
+    pub fn draw_weighted(&mut self, item: usize, entropy: u64) -> (accepted: bool)
+        requires old(self).inv(), item < old(self).actuation.num_seats,
+        ensures final(self).inv(),
     {
-        if self.selected.len() >= self.sample_size {
+        if self.budget.allocated >= self.budget.capacity {
             return false;
         }
-        if self.distribution[i] == 0 {
-            return false;                       // outside the support
-        }
-        if self.contains_exec(i) {
+        let weight = self.weight(item);
+        if entropy >= weight || self.contains_exec(item) {
             return false;
         }
-        self.sample(i);
+        self.sample(item);
+        true
+    }
+
+    /// Uniform-support admission over a caller-supplied proposal.
+    pub fn draw_uniform(&mut self, item: usize) -> (accepted: bool)
+        requires old(self).inv(), item < old(self).actuation.num_seats,
+        ensures final(self).inv(),
+    {
+        if self.budget.allocated >= self.budget.capacity {
+            return false;
+        }
+        let weight = self.weight(item);
+        if weight == 0 || self.contains_exec(item) {
+            return false;
+        }
+        self.sample(item);
         true
     }
 }

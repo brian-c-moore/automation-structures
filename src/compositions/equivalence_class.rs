@@ -1,622 +1,399 @@
-// EquivalenceClass executable correspondence boundary.
+// EquivalenceClass assembled from two ResourceRegistry owners and Budget.
 //
-// EquivalenceClass is a union-find structure with union-by-rank. The TLA+ spec
-// at formal/structures/EquivalenceClass/EquivalenceClass.tla has state parent (Elements -> Elements),
-// rnk (Elements -> Nat), ops_done, with Rep(e) the root of e under parent, and
-// states six safety formulas:
-//
-//   TypeInvariant     — parent : Elements->Elements, rnk : Elements->Nat
-//   RepresentativeIdempotence — Rep(e) = Rep(Rep(e))
-//   Symmetry          — Rep(a)=Rep(b) => Rep(b)=Rep(a)
-//   Transitivity      — Rep(a)=Rep(b) /\ Rep(b)=Rep(c) => Rep(a)=Rep(c)
-//   RankMonotonicity  — parent[e] /= e => rnk[e] <= rnk[parent[e]]
-//   RepresentativeRootedness  — parent[Rep(e)] = Rep(e)
-//
-// The TLC configuration checks type safety and the three structural formulas.
-// Symmetry and Transitivity are properties of `=` and hold for any Rep.
-// RepresentativeIdempotence and RepresentativeRootedness need Rep(e) to be a root; RankMonotonicity is
-// the local rank constraint. `rep` (the root finder) terminates: the
-// recursion measure is `max_rank - rank[e]`, justified by the union-by-rank
-// strengthening rank[e] < rank[parent[e]] for non-roots (STRICT — the .cfg's
-// RankMonotonicity is the non-strict weakening). All six follow from a single
-// maintained invariant `inv`; the equality properties require no executable
-// state preservation beyond a well-defined representative.
-//
-// To keep the rank counter overflow-free, this module carries the standard
-// union-by-rank size bound: subtree sizes with `2^rank[e] <= size[e]` and a
-// partition invariant `sum of root sizes == n`. Together they give `2^rank <= n`,
-// so every rank is <= 63 for any usize-sized element set, and the equal-rank
-// increment never overflows (and the doubling `2^(r+1) <= size[ra]+size[rb]`
-// re-establishes the size bound).
-//
-// Elements is the index universe 0..n; Rep follows TLA+ semantics (no path
-// compression in the spec).
+// The parent registry stores non-identity links, the rank registry stores nonzero ranks, and
+// Budget owns the successful-union count and ceiling. Missing parent bindings mean identity;
+// missing rank bindings mean zero. These are the defaulted views proved by the TLA+ reduction.
 
 use vstd::prelude::*;
 
+use crate::primitives::budget::Budget;
+use crate::primitives::resource_registry::ResourceRegistry;
+
 verus! {
 
-// ── pow2 and the rank bound ─────────────────────────────────────────────
-
-/// 2^k, lifted to int.
-pub open spec fn pow2(k: u64) -> int
-    decreases k,
-{
-    if k == 0 { 1 } else { 2 * pow2((k - 1) as u64) }
-}
-
-/// pow2 is monotone non-decreasing.
-pub proof fn lemma_pow2_mono(a: u64, b: u64)
-    requires a <= b,
-    ensures pow2(a) <= pow2(b),
-    decreases b,
-{
-    if a < b {
-        lemma_pow2_mono(a, (b - 1) as u64);
-        lemma_pow2_pos((b - 1) as u64);
-    }
-}
-
-/// pow2 is positive.
-pub proof fn lemma_pow2_pos(k: u64)
-    ensures pow2(k) >= 1,
-    decreases k,
-{
-    if k > 0 {
-        lemma_pow2_pos((k - 1) as u64);
-    }
-}
-
-/// 2^64 exceeds u64::MAX, which is what bounds ranks below 64.
-pub proof fn lemma_pow2_64_huge()
-    ensures pow2(64) > u64::MAX as int,
-{
-    assert(pow2(64) == 0x1_0000_0000_0000_0000) by (compute_only);
-}
-
-/// If 2^rank <= n <= u64::MAX, then rank <= 63.
-pub proof fn lemma_rank_le_63(rank: u64, n: int)
-    requires
-        pow2(rank) <= n,
-        n <= u64::MAX as int,
-    ensures rank <= 63,
-{
-    lemma_pow2_64_huge();
-    if rank >= 64 {
-        lemma_pow2_mono(64, rank);
-    }
-}
-
-// ── Rep: the root finder (TLA+ Rep) ─────────────────────────────────────
-
-/// The representative (root) of `e` under `parent`. Terminates because each
-/// hop to `parent[e]` strictly raises the rank (toward `mr`), so `mr - rank[e]`
-/// strictly decreases. Defensive outside the valid/strict region.
-pub open spec fn rep(parent: Seq<usize>, rank: Seq<u64>, mr: u64, e: int) -> int
-    decreases mr - rank[e],
-{
-    if !(0 <= e < parent.len()) {
-        e
-    } else if parent[e] == e {
-        e
-    } else if rank[e] < rank[parent[e] as int] && rank[parent[e] as int] <= mr {
-        rep(parent, rank, mr, parent[e] as int)
+/// Default an absent parent binding to the element itself.
+pub open spec fn parent_view(
+    registry: &ResourceRegistry<usize, usize>,
+    element: usize,
+) -> usize {
+    if registry.contains_key(element) {
+        choose|parent: usize| registry.maps_to(element, parent)
     } else {
-        e
+        element
     }
 }
 
-/// Under the structural invariant, `rep(e)` is a valid root: in range and a
-/// fixed point of `parent`.
-pub proof fn lemma_rep_root(parent: Seq<usize>, rank: Seq<u64>, mr: u64, e: int)
-    requires
-        rank.len() == parent.len(),
-        0 <= e < parent.len(),
-        forall|x: int| 0 <= x < parent.len() ==> #[trigger] parent[x] < parent.len(),
-        forall|x: int| 0 <= x < parent.len() ==> rank[x] <= mr,
-        forall|x: int|
-            0 <= x < parent.len() && parent[x] != x ==> #[trigger] rank[x] < rank[parent[x] as int],
-    ensures
-        0 <= rep(parent, rank, mr, e) < parent.len(),
-        parent[rep(parent, rank, mr, e) as int] == rep(parent, rank, mr, e),
-    decreases mr - rank[e],
-{
-    if parent[e] == e {
+/// Default an absent rank binding to zero.
+pub open spec fn rank_view(
+    registry: &ResourceRegistry<usize, u64>,
+    element: usize,
+) -> u64 {
+    if registry.contains_key(element) {
+        choose|rank: u64| registry.maps_to(element, rank)
     } else {
-        lemma_rep_root(parent, rank, mr, parent[e] as int);
-    }
-}
-
-/// Under the structural invariant, following one parent pointer preserves the
-/// representative: rep(e) = rep(parent[e]). Used by the iterative `find`.
-pub proof fn lemma_rep_step(parent: Seq<usize>, rank: Seq<u64>, mr: u64, e: int)
-    requires
-        rank.len() == parent.len(),
-        0 <= e < parent.len(),
-        parent[e] != e,
-        forall|x: int| 0 <= x < parent.len() ==> #[trigger] parent[x] < parent.len(),
-        forall|x: int| 0 <= x < parent.len() ==> rank[x] <= mr,
-        forall|x: int|
-            0 <= x < parent.len() && parent[x] != x ==> #[trigger] rank[x] < rank[parent[x] as int],
-    ensures
-        rep(parent, rank, mr, e) == rep(parent, rank, mr, parent[e] as int),
-{
-}
-
-// ── root_sum: partition of the n elements over the trees ────────────────
-
-/// Sum of `size[e]` over the roots among indices 0..k.
-pub open spec fn root_sum(parent: Seq<usize>, size: Seq<u64>, k: int) -> int
-    decreases k,
-{
-    if k <= 0 {
         0
-    } else if k > parent.len() || k > size.len() {
-        0
-    } else {
-        (if parent[k - 1] == (k - 1) as usize { size[k - 1] as int } else { 0 })
-            + root_sum(parent, size, k - 1)
     }
 }
 
-/// The partition sum is at least the sizes of any two distinct roots.
-pub proof fn lemma_root_sum_ge_two(parent: Seq<usize>, size: Seq<u64>, lo: int, hi: int, k: int)
+/// Equal presence and mappings produce the same defaulted rank view.
+pub proof fn rank_view_frame(
+    before: &ResourceRegistry<usize, u64>,
+    after: &ResourceRegistry<usize, u64>,
+    element: usize,
+)
     requires
-        parent.len() == size.len(),
-        0 <= lo < k <= parent.len(),
-        0 <= hi < k,
-        lo != hi,
-        parent[lo] == lo,
-        parent[hi] == hi,
-    ensures
-        root_sum(parent, size, k) >= size[lo] as int + size[hi] as int,
-    decreases k,
+        before.unique_mapping(),
+        after.unique_mapping(),
+        before.contains_key(element) == after.contains_key(element),
+        forall|rank: u64|
+            #[trigger] before.maps_to(element, rank) == after.maps_to(element, rank),
+    ensures rank_view(before, element) == rank_view(after, element),
 {
-    if k - 1 == lo {
-        lemma_root_sum_ge_one(parent, size, hi, k - 1);
-        lemma_root_sum_nonneg(parent, size, k - 1);
-    } else if k - 1 == hi {
-        lemma_root_sum_ge_one(parent, size, lo, k - 1);
-        lemma_root_sum_nonneg(parent, size, k - 1);
-    } else {
-        lemma_root_sum_ge_two(parent, size, lo, hi, k - 1);
+    if before.contains_key(element) {
+        before.contains_has_value(element);
+        let rank = choose|rank: u64| before.maps_to(element, rank);
+        assert(after.maps_to(element, rank));
+        let before_choice = choose|value: u64| before.maps_to(element, value);
+        let after_choice = choose|value: u64| after.maps_to(element, value);
+        before.unique_value(element, before_choice, rank);
+        after.unique_value(element, after_choice, rank);
     }
 }
 
-/// The partition sum is at least the size of any single root.
-pub proof fn lemma_root_sum_ge_one(parent: Seq<usize>, size: Seq<u64>, j: int, k: int)
-    requires
-        parent.len() == size.len(),
-        0 <= j < k <= parent.len(),
-        parent[j] == j,
-    ensures
-        root_sum(parent, size, k) >= size[j] as int,
-    decreases k,
-{
-    if k - 1 == j {
-        lemma_root_sum_nonneg(parent, size, k - 1);
-    } else {
-        lemma_root_sum_ge_one(parent, size, j, k - 1);
-    }
-}
-
-/// The partition sum is non-negative.
-pub proof fn lemma_root_sum_nonneg(parent: Seq<usize>, size: Seq<u64>, k: int)
-    requires parent.len() == size.len(),
-    ensures root_sum(parent, size, k) >= 0,
-    decreases k,
-{
-    if 0 < k <= parent.len() {
-        lemma_root_sum_nonneg(parent, size, k - 1);
-    }
-}
-
-/// Merging root `lo` under root `hi` (parent[lo]:=hi) and adding lo's size to
-/// hi's preserves the partition sum.
-pub proof fn lemma_root_sum_merge(parent: Seq<usize>, size: Seq<u64>, lo: int, hi: int, k: int)
-    requires
-        parent.len() == size.len(),
-        0 <= lo < parent.len(),
-        0 <= hi < parent.len(),
-        lo != hi,
-        parent[lo] == lo,
-        parent[hi] == hi,
-        size[hi] as int + size[lo] as int <= u64::MAX as int,
-        0 <= k <= parent.len(),
-    ensures
-        root_sum(parent.update(lo, hi as usize), size.update(hi, (size[hi] + size[lo]) as u64), k)
-            == root_sum(parent, size, k)
-                + (if lo < k { -(size[lo] as int) } else { 0 })
-                + (if hi < k { size[lo] as int } else { 0 }),
-    decreases k,
-{
-    if 0 < k <= parent.len() {
-        lemma_root_sum_merge(parent, size, lo, hi, k - 1);
-        let np = parent.update(lo, hi as usize);
-        let ns = size.update(hi, (size[hi] + size[lo]) as u64);
-        assert(np[k - 1] == if (k - 1) == lo { hi as usize } else { parent[k - 1] });
-        assert(ns[k - 1] == if (k - 1) == hi { (size[hi] + size[lo]) as u64 } else { size[k - 1] });
-    }
-}
-
-/// A union-find structure with union-by-rank.
+/// A union-by-rank partition whose mutable state is owned by reusable structures.
 pub struct EquivalenceClass {
+    /// Number of elements in the fixed universe.
     pub n: usize,
-    pub parent: Vec<usize>,
-    pub rank: Vec<u64>,
-    pub size: Vec<u64>,
-    pub ops_done: u64,
-    pub max_ops: u64,
-    /// An upper bound on all ranks (the recursion measure ceiling for `rep`).
-    pub max_rank: u64,
+    /// Registry that owns parent links.
+    pub parents: ResourceRegistry<usize, usize>,
+    /// Registry that owns union-by-rank values.
+    pub ranks: ResourceRegistry<usize, u64>,
+    /// Budget that bounds successful unions.
+    pub budget: Budget,
 }
 
 impl EquivalenceClass {
-    // ── Specifications ──────────────────────────────────────────────────
-
-    /// TLA+ `TypeInvariant`: parent and rank are functions over Elements and
-    /// parent stays within Elements.
-    pub open spec fn type_invariant(&self) -> bool {
-        &&& self.parent.len() == self.n
-        &&& self.rank.len() == self.n
-        &&& self.size.len() == self.n
-        &&& (forall|x: int| 0 <= x < self.n ==> #[trigger] self.parent@[x] < self.n)
+    /// Return the registered parent of `element` in the partition model.
+    pub open spec fn parent_of(&self, element: usize) -> usize {
+        parent_view(&self.parents, element)
     }
 
-    /// Every rank is bounded by max_rank (keeps `rep`'s measure non-negative).
-    pub open spec fn rank_bound(&self) -> bool {
-        forall|x: int| 0 <= x < self.n ==> #[trigger] self.rank@[x] <= self.max_rank
+    /// Return the registered union-by-rank value for `element`.
+    pub open spec fn rank_of(&self, element: usize) -> u64 {
+        rank_view(&self.ranks, element)
     }
 
-    /// Canonical operation/rank strengthening used by the TLAPS carrier.
-    pub open spec fn operation_bound(&self) -> bool {
-        self.ops_done <= self.max_ops && self.max_rank <= self.ops_done
-    }
-
-    /// A non-root has strictly smaller rank than its parent.
-    pub open spec fn strict_rank(&self) -> bool {
-        forall|x: int|
-            0 <= x < self.n && self.parent@[x] != x
-                ==> #[trigger] self.rank@[x] < self.rank@[self.parent@[x] as int]
-    }
-
-    /// Union-by-rank size bound: a node of rank r heads a subtree of >= 2^r
-    /// nodes; the root sizes partition the n elements. Together: 2^rank <= n.
-    pub open spec fn size_bound(&self) -> bool {
-        &&& (forall|x: int| 0 <= x < self.n ==> #[trigger] pow2(self.rank@[x]) <= self.size@[x])
-        &&& root_sum(self.parent@, self.size@, self.n as int) == self.n as int
-    }
-
-    /// Full maintained invariant for the executable union-find state.
+    /// Component invariants plus the rank certificate that makes parent traversal finite.
     pub open spec fn inv(&self) -> bool {
-        self.type_invariant() && self.rank_bound() && self.strict_rank()
-            && self.size_bound() && self.operation_bound()
-    }
-
-    /// rep(e) over this structure.
-    pub open spec fn rep_of(&self, e: int) -> int {
-        rep(self.parent@, self.rank@, self.max_rank, e)
-    }
-
-    // ── Structural obligations derived from inv ─────────────────────────
-
-    pub open spec fn rank_monotonicity(&self) -> bool {
-        forall|e: int|
-            0 <= e < self.n && self.parent@[e] != e
-                ==> #[trigger] self.rank@[e] <= self.rank@[self.parent@[e] as int]
-    }
-
-    pub open spec fn representative_rootedness(&self) -> bool {
-        forall|e: int| 0 <= e < self.n ==> #[trigger] self.parent@[self.rep_of(e) as int] == self.rep_of(e)
-    }
-
-    pub open spec fn representative_idempotence(&self) -> bool {
-        forall|e: int| 0 <= e < self.n ==> #[trigger] self.rep_of(self.rep_of(e)) == self.rep_of(e)
-    }
-
-    /// Proof that the rep-based checked invariants hold whenever `inv` holds.
-    pub proof fn lemma_inv_implies_structural_obligations(&self)
-        requires self.inv(),
-        ensures
-            self.rank_monotonicity(),
-            self.representative_rootedness(),
-            self.representative_idempotence(),
-    {
-        assert forall|e: int| 0 <= e < self.n implies
-            (#[trigger] self.parent@[self.rep_of(e) as int] == self.rep_of(e)
-                && self.rep_of(self.rep_of(e)) == self.rep_of(e)) by {
-            lemma_rep_root(self.parent@, self.rank@, self.max_rank, e);
-            lemma_rep_root(self.parent@, self.rank@, self.max_rank, self.rep_of(e));
-        }
-    }
-
-    // ── Init (TLA+ Init) ────────────────────────────────────────────────
-
-    /// Each element its own root, rank 0, size 1. Realises the TLA+ `Init`.
-    pub fn new(n: usize, max_ops: u64) -> (uf: EquivalenceClass)
-        ensures
-            uf.n == n,
-            uf.max_ops == max_ops,
-            uf.ops_done == 0,
-            uf.inv(),
-            forall|e: int| 0 <= e < n ==> #[trigger] uf.parent@[e] == e,
-    {
-        let mut parent: Vec<usize> = Vec::new();
-        let mut rank: Vec<u64> = Vec::new();
-        let mut size: Vec<u64> = Vec::new();
-        let mut i: usize = 0;
-        while i < n
-            invariant
-                i <= n,
-                parent.len() == i,
-                rank.len() == i,
-                size.len() == i,
-                forall|k: int| 0 <= k < i ==> #[trigger] parent@[k] == k,
-                forall|k: int| 0 <= k < i ==> rank@[k] == 0,
-                forall|k: int| 0 <= k < i ==> size@[k] == 1,
-                root_sum(parent@, size@, i as int) == i as int,
-            decreases n - i,
-        {
-            proof {
-                lemma_root_sum_push_root(parent@, size@, i as int);
+        &&& self.parents.unique_mapping()
+        &&& self.ranks.unique_mapping()
+        &&& self.budget.safety_invariant()
+        &&& self.budget.reserved == 0
+        &&& self.budget.pending_eviction == 0
+        &&& forall|child: usize, parent: usize|
+            #[trigger] self.parents.maps_to(child, parent) ==> {
+                &&& child < self.n
+                &&& parent < self.n
+                &&& child != parent
             }
-            parent.push(i);
-            rank.push(0);
-            size.push(1);
-            i = i + 1;
-        }
-        let uf = EquivalenceClass { n, parent, rank, size, ops_done: 0, max_ops, max_rank: 0 };
-        assert(uf.size_bound()) by {
-            assert forall|x: int| 0 <= x < uf.n implies #[trigger] pow2(uf.rank@[x]) <= uf.size@[x] by {
+        &&& forall|element: usize, rank: u64|
+            #[trigger] self.ranks.maps_to(element, rank) ==> {
+                &&& element < self.n
+                &&& 0 < rank
+                &&& rank <= self.budget.allocated
             }
-        }
-        uf
+        &&& forall|child: usize, parent: usize|
+            #[trigger] self.parents.maps_to(child, parent) ==>
+                self.rank_of(child) < self.rank_of(parent)
     }
 
-    // ── find: representative (iterative, TLA+ Rep) ──────────────────────
-
-    /// Find the representative of `e` by following parent pointers to the root.
-    /// Returns rep(e); no path compression (matching the TLA+ Rep semantics).
-    pub fn find(&self, e: usize) -> (r: usize)
-        requires self.inv(), e < self.n,
-        ensures
-            r == self.rep_of(e as int),
-            r < self.n,
-            self.parent@[r as int] == r,
+    /// A stored parent binding determines the defaulted parent view.
+    pub proof fn parent_mapping_determines_view(&self, element: usize, parent: usize)
+        requires
+            self.parents.unique_mapping(),
+            self.parents.maps_to(element, parent),
+        ensures self.parent_of(element) == parent,
     {
-        let mut x = e;
-        proof { lemma_rep_root(self.parent@, self.rank@, self.max_rank, e as int); }
-        while self.parent[x] != x
+        self.parents.maps_to_implies_contains(element, parent);
+        let chosen = choose|value: usize| self.parents.maps_to(element, value);
+        self.parents.unique_value(element, chosen, parent);
+    }
+
+    /// A stored rank binding determines the defaulted rank view.
+    pub proof fn rank_mapping_determines_view(&self, element: usize, rank: u64)
+        requires
+            self.ranks.unique_mapping(),
+            self.ranks.maps_to(element, rank),
+        ensures self.rank_of(element) == rank,
+    {
+        self.ranks.maps_to_implies_contains(element, rank);
+        let chosen = choose|value: u64| self.ranks.maps_to(element, value);
+        self.ranks.unique_value(element, chosen, rank);
+    }
+
+    /// Every derived rank is bounded by Budget's successful-union count.
+    pub proof fn rank_bounded(&self, element: usize)
+        requires self.inv(), element < self.n,
+        ensures self.rank_of(element) <= self.budget.allocated,
+    {
+        if self.ranks.contains_key(element) {
+            self.ranks.contains_has_value(element);
+            let rank = choose|rank: u64| self.ranks.maps_to(element, rank);
+            assert(self.ranks.maps_to(element, rank));
+            self.rank_mapping_determines_view(element, rank);
+        }
+    }
+
+    /// A defaulted root has no stored non-identity parent binding.
+    pub proof fn root_has_no_parent(&self, element: usize)
+        requires self.inv(), element < self.n, self.parent_of(element) == element,
+        ensures !self.parents.contains_key(element),
+    {
+        if self.parents.contains_key(element) {
+            self.parents.contains_has_value(element);
+            let parent = choose|parent: usize| self.parents.maps_to(element, parent);
+            assert(self.parents.maps_to(element, parent));
+            self.parent_mapping_determines_view(element, parent);
+            assert(element != parent);
+        }
+    }
+
+    /// Construct singleton classes from empty registries and an empty Budget allocation.
+    pub fn new(n: usize, max_unions: u64) -> (classes: EquivalenceClass)
+        ensures
+            classes.n == n,
+            classes.parents.entries@.len() == 0,
+            classes.ranks.entries@.len() == 0,
+            classes.budget.capacity == max_unions,
+            classes.budget.allocated == 0,
+            classes.inv(),
+    {
+        let parents = ResourceRegistry::new();
+        let ranks = ResourceRegistry::new();
+        let budget = Budget::new(max_unions);
+        EquivalenceClass { n, parents, ranks, budget }
+    }
+
+    /// Read the defaulted parent view through ResourceRegistry.
+    pub fn parent_value(&self, element: usize) -> (parent: usize)
+        requires self.inv(), element < self.n,
+        ensures
+            parent == self.parent_of(element),
+            parent < self.n,
+            parent != element ==> self.parents.maps_to(element, parent),
+    {
+        match self.parents.lookup(element) {
+            Some(parent) => {
+                proof { self.parent_mapping_determines_view(element, parent); }
+                parent
+            }
+            None => element,
+        }
+    }
+
+    /// Read the defaulted rank view through ResourceRegistry.
+    pub fn rank_value(&self, element: usize) -> (rank: u64)
+        requires self.inv(), element < self.n,
+        ensures
+            rank == self.rank_of(element),
+            rank <= self.budget.allocated,
+    {
+        match self.ranks.lookup(element) {
+            Some(rank) => {
+                proof { self.rank_mapping_determines_view(element, rank); }
+                rank
+            }
+            None => 0,
+        }
+    }
+
+    /// Follow strictly increasing rank certificates to a root.
+    pub fn find(&self, element: usize) -> (root: usize)
+        requires self.inv(), element < self.n,
+        ensures root < self.n, self.parent_of(root) == root,
+    {
+        let mut current = element;
+        let mut parent = self.parent_value(current);
+        while parent != current
             invariant
                 self.inv(),
-                x < self.n,
-                self.rep_of(x as int) == self.rep_of(e as int),
-            decreases self.max_rank - self.rank@[x as int],
+                current < self.n,
+                parent < self.n,
+                parent == self.parent_of(current),
+                parent != current ==> self.parents.maps_to(current, parent),
+            decreases self.budget.allocated - self.rank_of(current),
         {
-            proof { lemma_rep_step(self.parent@, self.rank@, self.max_rank, x as int); }
-            x = self.parent[x];
+            proof {
+                self.rank_bounded(current);
+                self.rank_bounded(parent);
+                assert(self.rank_of(current) < self.rank_of(parent));
+            }
+            current = parent;
+            parent = self.parent_value(current);
         }
-        x
+        current
     }
 
-    // ── Union (TLA+ Union) ──────────────────────────────────────────────
-
-    /// Merge the classes of `a` and `b` by rank. Returns false if they were
-    /// already in the same class. Preserves `inv` (hence all six invariants).
-    pub fn union(&mut self, a: usize, b: usize) -> (merged: bool)
+    /// Attach one lower-rank root to one higher-rank root through ResourceRegistry.Register.
+    fn attach_lower(&mut self, lower: usize, higher: usize)
         requires
             old(self).inv(),
-            a < old(self).n,
-            b < old(self).n,
+            lower < old(self).n,
+            higher < old(self).n,
+            lower != higher,
+            old(self).parent_of(lower) == lower,
+            old(self).parent_of(higher) == higher,
+            old(self).rank_of(lower) < old(self).rank_of(higher),
         ensures
             final(self).inv(),
             final(self).n == old(self).n,
-            final(self).max_ops == old(self).max_ops,
-            merged == (old(self).ops_done < old(self).max_ops
-                && old(self).rep_of(a as int) != old(self).rep_of(b as int)),
-            !merged ==> {
-                &&& final(self).parent@ == old(self).parent@
-                &&& final(self).rank@ == old(self).rank@
-                &&& final(self).size@ == old(self).size@
-                &&& final(self).ops_done == old(self).ops_done
-                &&& final(self).max_rank == old(self).max_rank
-            },
-            merged ==> final(self).ops_done == old(self).ops_done + 1,
-            merged && old(self).rank@[old(self).rep_of(a as int)]
-                    < old(self).rank@[old(self).rep_of(b as int)] ==> {
-                &&& final(self).parent@ == old(self).parent@.update(
-                    old(self).rep_of(a as int), old(self).rep_of(b as int) as usize)
-                &&& final(self).rank@ == old(self).rank@
-                &&& final(self).size@ == old(self).size@.update(
-                    old(self).rep_of(b as int),
-                    (old(self).size@[old(self).rep_of(b as int)]
-                        + old(self).size@[old(self).rep_of(a as int)]) as u64)
-                &&& final(self).max_rank == old(self).max_rank
-            },
-            merged && old(self).rank@[old(self).rep_of(a as int)]
-                    > old(self).rank@[old(self).rep_of(b as int)] ==> {
-                &&& final(self).parent@ == old(self).parent@.update(
-                    old(self).rep_of(b as int), old(self).rep_of(a as int) as usize)
-                &&& final(self).rank@ == old(self).rank@
-                &&& final(self).size@ == old(self).size@.update(
-                    old(self).rep_of(a as int),
-                    (old(self).size@[old(self).rep_of(a as int)]
-                        + old(self).size@[old(self).rep_of(b as int)]) as u64)
-                &&& final(self).max_rank == old(self).max_rank
-            },
-            merged && old(self).rank@[old(self).rep_of(a as int)]
-                    == old(self).rank@[old(self).rep_of(b as int)] ==> {
-                &&& final(self).parent@ == old(self).parent@.update(
-                    old(self).rep_of(b as int), old(self).rep_of(a as int) as usize)
-                &&& final(self).rank@ == old(self).rank@.update(
-                    old(self).rep_of(a as int),
-                    (old(self).rank@[old(self).rep_of(a as int)] + 1) as u64)
-                &&& final(self).size@ == old(self).size@.update(
-                    old(self).rep_of(a as int),
-                    (old(self).size@[old(self).rep_of(a as int)]
-                        + old(self).size@[old(self).rep_of(b as int)]) as u64)
-                &&& final(self).max_rank == if (old(self).rank@[old(self).rep_of(a as int)] + 1) as u64
-                        > old(self).max_rank
-                    { (old(self).rank@[old(self).rep_of(a as int)] + 1) as u64 }
-                    else { old(self).max_rank }
-            },
+            final(self).budget == old(self).budget,
+            final(self).ranks.entries@ == old(self).ranks.entries@,
     {
-        if self.ops_done >= self.max_ops {
+        proof { self.root_has_no_parent(lower); }
+        self.parents.register(lower, higher);
+        assert forall|child: usize, parent: usize|
+            #[trigger] self.parents.maps_to(child, parent) implies {
+                &&& child < self.n
+                &&& parent < self.n
+                &&& child != parent
+            } by {
+            if child == lower {
+                self.parents.unique_value(child, parent, higher);
+            } else {
+                assert(old(self).parents.maps_to(child, parent));
+            }
+        }
+        assert forall|child: usize, parent: usize|
+            #[trigger] self.parents.maps_to(child, parent) implies
+                self.rank_of(child) < self.rank_of(parent) by {
+            if child == lower {
+                self.parents.unique_value(child, parent, higher);
+            } else {
+                assert(old(self).parents.maps_to(child, parent));
+            }
+        }
+    }
+
+    /// Attach equal-rank roots and raise the surviving root's rank.
+    fn attach_equal(&mut self, lower: usize, higher: usize, rank: u64)
+        requires
+            old(self).inv(),
+            lower < old(self).n,
+            higher < old(self).n,
+            lower != higher,
+            old(self).parent_of(lower) == lower,
+            old(self).parent_of(higher) == higher,
+            rank == old(self).rank_of(lower),
+            rank == old(self).rank_of(higher),
+            rank < old(self).budget.allocated,
+        ensures
+            final(self).inv(),
+            final(self).n == old(self).n,
+            final(self).budget == old(self).budget,
+    {
+        proof {
+            self.root_has_no_parent(lower);
+            self.root_has_no_parent(higher);
+        }
+        self.parents.register(lower, higher);
+        self.ranks.register(higher, rank + 1);
+        assert(self.rank_of(higher) == (rank + 1) as u64) by {
+            self.rank_mapping_determines_view(higher, (rank + 1) as u64);
+        }
+        assert forall|element: usize| element != higher implies
+            self.rank_of(element) == old(self).rank_of(element) by {
+            rank_view_frame(&old(self).ranks, &self.ranks, element);
+        }
+        assert forall|child: usize, parent: usize|
+            #[trigger] self.parents.maps_to(child, parent) implies {
+                &&& child < self.n
+                &&& parent < self.n
+                &&& child != parent
+            } by {
+            if child == lower {
+                self.parents.unique_value(child, parent, higher);
+            } else {
+                assert(old(self).parents.maps_to(child, parent));
+            }
+        }
+        assert forall|element: usize, value: u64|
+            #[trigger] self.ranks.maps_to(element, value) implies {
+                &&& element < self.n
+                &&& 0 < value
+                &&& value <= self.budget.allocated
+            } by {
+            if element == higher {
+                self.ranks.unique_value(element, value, (rank + 1) as u64);
+            } else {
+                assert(old(self).ranks.maps_to(element, value));
+            }
+        }
+        assert forall|child: usize, parent: usize|
+            #[trigger] self.parents.maps_to(child, parent) implies
+                self.rank_of(child) < self.rank_of(parent) by {
+            if child == lower {
+                self.parents.unique_value(child, parent, higher);
+                assert(self.rank_of(lower) == rank);
+            } else {
+                assert(old(self).parents.maps_to(child, parent));
+                assert(child != higher);
+                if parent == higher {
+                    assert(self.rank_of(child) == old(self).rank_of(child));
+                } else {
+                    assert(self.rank_of(child) == old(self).rank_of(child));
+                    assert(self.rank_of(parent) == old(self).rank_of(parent));
+                }
+            }
+        }
+    }
+
+    /// Union two representatives using the registry and Budget actions from the reduction.
+    pub fn union(&mut self, left: usize, right: usize) -> (merged: bool)
+        requires old(self).inv(), left < old(self).n, right < old(self).n,
+        ensures
+            final(self).inv(),
+            final(self).n == old(self).n,
+            final(self).budget.capacity == old(self).budget.capacity,
+            merged ==> final(self).budget.allocated == old(self).budget.allocated + 1,
+            !merged ==> final(self).budget.allocated == old(self).budget.allocated,
+    {
+        if self.budget.allocated >= self.budget.capacity {
             return false;
         }
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra == rb {
+        let left_root = self.find(left);
+        let right_root = self.find(right);
+        if left_root == right_root {
             return false;
         }
-        // ra, rb are distinct roots: parent[ra]=ra, parent[rb]=rb.
-        self.ops_done = self.ops_done + 1;
-        if self.rank[ra] < self.rank[rb] {
-            self.merge(ra, rb);
-        } else if self.rank[ra] > self.rank[rb] {
-            self.merge(rb, ra);
+        let left_rank = self.rank_value(left_root);
+        let right_rank = self.rank_value(right_root);
+        let ghost prior_allocation = self.budget.allocated;
+        let _accepted = self.budget.try_allocate(1);
+        assert(_accepted);
+        assert(self.inv()) by {
+            assert forall|element: usize, rank: u64|
+                #[trigger] self.ranks.maps_to(element, rank) implies
+                    rank <= self.budget.allocated by {
+                assert(rank <= prior_allocation);
+            }
+        }
+        if left_rank < right_rank {
+            self.attach_lower(left_root, right_root);
+        } else if left_rank > right_rank {
+            self.attach_lower(right_root, left_root);
         } else {
-            // TLA+ equal case: attach rb under ra, bump ra's rank.
-            self.merge_equal(rb, ra);
+            assert(left_rank < self.budget.allocated);
+            self.attach_equal(right_root, left_root, left_rank);
         }
         true
     }
 
-    /// Attach root `lo` under root `hi` where rank[lo] < rank[hi]. Sizes add;
-    /// ranks unchanged.
-    fn merge(&mut self, lo: usize, hi: usize)
-        requires
-            old(self).inv(),
-            lo < old(self).n,
-            hi < old(self).n,
-            lo != hi,
-            old(self).parent@[lo as int] == lo,
-            old(self).parent@[hi as int] == hi,
-            old(self).rank@[lo as int] < old(self).rank@[hi as int],
-        ensures
-            final(self).inv(),
-            final(self).n == old(self).n,
-            final(self).max_ops == old(self).max_ops,
-            final(self).max_rank == old(self).max_rank,
-            final(self).ops_done == old(self).ops_done,
-            final(self).parent@ == old(self).parent@.update(lo as int, hi),
-            final(self).rank@ == old(self).rank@,
-            final(self).size@ == old(self).size@.update(
-                hi as int, (old(self).size@[hi as int] + old(self).size@[lo as int]) as u64),
+    /// Whether two elements resolve to the same root.
+    pub fn same(&self, left: usize, right: usize) -> (equivalent: bool)
+        requires self.inv(), left < self.n, right < self.n,
     {
-        proof {
-            lemma_root_sum_ge_two(self.parent@, self.size@, lo as int, hi as int, self.n as int);
-            lemma_root_sum_merge(self.parent@, self.size@, lo as int, hi as int, self.n as int);
-        }
-        let new_size = self.size[hi] + self.size[lo];
-        self.parent.set(lo, hi);
-        self.size.set(hi, new_size);
-    }
-
-    /// Attach root `lo` (rank r) under root `hi` (rank r) and bump hi's rank to
-    /// r+1. Sizes add; the doubling re-establishes 2^(r+1) <= size[hi].
-    fn merge_equal(&mut self, lo: usize, hi: usize)
-        requires
-            old(self).inv(),
-            lo < old(self).n,
-            hi < old(self).n,
-            lo != hi,
-            old(self).parent@[lo as int] == lo,
-            old(self).parent@[hi as int] == hi,
-            old(self).rank@[lo as int] == old(self).rank@[hi as int],
-            old(self).max_rank < old(self).ops_done,
-        ensures
-            final(self).inv(),
-            final(self).n == old(self).n,
-            final(self).max_ops == old(self).max_ops,
-            final(self).ops_done == old(self).ops_done,
-            final(self).parent@ == old(self).parent@.update(lo as int, hi),
-            final(self).rank@ == old(self).rank@.update(
-                hi as int, (old(self).rank@[hi as int] + 1) as u64),
-            final(self).size@ == old(self).size@.update(
-                hi as int, (old(self).size@[hi as int] + old(self).size@[lo as int]) as u64),
-            final(self).max_rank == if (old(self).rank@[hi as int] + 1) as u64 > old(self).max_rank
-                { (old(self).rank@[hi as int] + 1) as u64 } else { old(self).max_rank },
-    {
-        proof {
-            lemma_root_sum_ge_two(self.parent@, self.size@, lo as int, hi as int, self.n as int);
-            lemma_root_sum_merge(self.parent@, self.size@, lo as int, hi as int, self.n as int);
-            // rank[hi] <= 63, so the increment does not overflow.
-            lemma_rank_le_63(self.rank@[hi as int], self.n as int);
-            lemma_root_sum_ge_one(self.parent@, self.size@, hi as int, self.n as int);
-        }
-        let new_size = self.size[hi] + self.size[lo];
-        let new_rank = self.rank[hi] + 1;
-        self.parent.set(lo, hi);
-        self.size.set(hi, new_size);
-        self.rank.set(hi, new_rank);
-        if new_rank > self.max_rank {
-            self.max_rank = new_rank;
-        }
-        proof {
-            // strict_rank: lo now points to hi (rank[lo] < rank[hi]+1); hi's old
-            // children e keep rank[e] < rank[hi] < rank[hi]+1; all else unchanged.
-            assert forall|x: int| 0 <= x < self.n && self.parent@[x] != x
-                implies #[trigger] self.rank@[x] < self.rank@[self.parent@[x] as int] by {
-                if x == lo as int {
-                } else if old(self).parent@[x] == hi as int {
-                    assert(old(self).rank@[x] < old(self).rank@[hi as int]);
-                } else {
-                    assert(old(self).parent@[x] != x);
-                    assert(old(self).rank@[x] < old(self).rank@[old(self).parent@[x] as int]);
-                }
-            }
-            // pow_size: at hi, 2^(r+1) = 2*2^r <= size[hi] + size[lo] (both >= 2^r
-            // since rank[lo] = rank[hi] = r); elsewhere unchanged.
-            assert forall|x: int| 0 <= x < self.n
-                implies #[trigger] pow2(self.rank@[x]) <= self.size@[x] by {
-                if x == hi as int {
-                    assert(self.rank@[hi as int] == old(self).rank@[hi as int] + 1);
-                    assert(pow2(self.rank@[hi as int]) == 2 * pow2(old(self).rank@[hi as int]));
-                    assert(pow2(old(self).rank@[hi as int]) <= old(self).size@[hi as int]);
-                    assert(pow2(old(self).rank@[lo as int]) <= old(self).size@[lo as int]);
-                } else {
-                    assert(pow2(old(self).rank@[x]) <= old(self).size@[x]);
-                }
-            }
-        }
-    }
-
-    /// Whether a and b are in the same class.
-    pub fn same(&self, a: usize, b: usize) -> (yes: bool)
-        requires self.inv(), a < self.n, b < self.n,
-        ensures yes == (self.rep_of(a as int) == self.rep_of(b as int)),
-    {
-        self.find(a) == self.find(b)
-    }
-}
-
-/// Pushing a fresh root with size 1 at index k extends the partition sum by 1.
-pub proof fn lemma_root_sum_push_root(parent: Seq<usize>, size: Seq<u64>, k: int)
-    requires
-        parent.len() == k,
-        size.len() == k,
-        0 <= k,
-    ensures
-        root_sum(parent.push(k as usize), size.push(1), k + 1) == root_sum(parent, size, k) + 1,
-{
-    assert(root_sum(parent.push(k as usize), size.push(1), k)
-        == root_sum(parent, size, k)) by {
-        lemma_root_sum_prefix(parent, size, k as usize, 1, k);
-    }
-}
-
-/// Pushing onto parent/size does not change the partition sum over the prefix.
-pub proof fn lemma_root_sum_prefix(parent: Seq<usize>, size: Seq<u64>, pv: usize, sv: u64, k: int)
-    requires
-        0 <= k <= parent.len(),
-        k <= size.len(),
-    ensures
-        root_sum(parent.push(pv), size.push(sv), k) == root_sum(parent, size, k),
-    decreases k,
-{
-    if 0 < k {
-        lemma_root_sum_prefix(parent, size, pv, sv, k - 1);
+        self.find(left) == self.find(right)
     }
 }
 

@@ -138,6 +138,7 @@ pub proof fn lemma_sum_zero(s: Seq<u64>, n: int)
 
 /// Hard competitive selection over one seat's candidate scores.
 pub struct CompetitiveSelectionHard {
+    /// Candidate scores by candidate index.
     pub scores: Vec<u64>,
     /// The winner's index, or None for NULL (no allocation).
     pub allocation: Option<usize>,
@@ -163,7 +164,7 @@ impl CompetitiveSelectionHard {
     /// TLA+ `WinnerTieBreak`: among candidates tied with the winner on score,
     /// the winner has the lowest index.
     ///
-    /// The canonical `Evaluate` chooses the lowest-index argmax. Winner
+    /// `Evaluate` chooses the lowest-index argmax. Winner
     /// optimality alone permits any argmax, so this separate contract carries
     /// deterministic tie correspondence for all inputs.
     pub open spec fn winner_tie_break(&self) -> bool {
@@ -173,6 +174,7 @@ impl CompetitiveSelectionHard {
                         (#[trigger] self.scores@[c] == self.scores@[w as int] ==> w <= c))
     }
 
+    /// Whether allocation typing, optimality, and deterministic tie-breaking hold.
     pub open spec fn inv(&self) -> bool {
         self.allocation_typing() && self.winner_optimality() && self.winner_tie_break()
     }
@@ -254,14 +256,20 @@ impl CompetitiveSelectionHard {
 /// during argmax selection and globally invalidates the coupled assignment on
 /// a score update.
 pub struct CompetitiveSelectionHardExclusive {
+    /// Number of independently allocated seats.
     pub num_seats: usize,
+    /// Number of candidates shared by every seat.
     pub num_candidates: usize,
+    /// Inclusive score ceiling.
     pub max_score: u64,
+    /// Selected candidate by seat, encoded as `u64`.
     pub allocation: Vec<Option<u64>>,
+    /// Candidate scores indexed by seat and candidate.
     pub scores: Vec<Vec<u64>>,
 }
 
 impl CompetitiveSelectionHardExclusive {
+    /// Whether seat allocations and score rows have valid shape and bounds.
     pub open spec fn type_invariant(&self) -> bool {
         &&& self.num_candidates >= 1
         &&& self.allocation.len() == self.num_seats
@@ -286,6 +294,7 @@ impl CompetitiveSelectionHardExclusive {
                 #[trigger] self.allocation@[t] != Some(c as u64)
     }
 
+    /// Whether two seats never hold the same candidate.
     pub open spec fn mutual_exclusion(&self) -> bool {
         forall|s: int, t: int|
             #![trigger self.allocation@[s], self.allocation@[t]]
@@ -294,6 +303,7 @@ impl CompetitiveSelectionHardExclusive {
                     self.allocation@[s] != self.allocation@[t]
     }
 
+    /// Whether every retained winner has maximal available score for its seat.
     pub open spec fn winner_optimality(&self) -> bool {
         forall|s: int|
             #![trigger self.allocation@[s]]
@@ -302,6 +312,7 @@ impl CompetitiveSelectionHardExclusive {
                     #[trigger] self.scores@[s]@[c] <= self.scores@[s]@[w as int])
     }
 
+    /// Whether equal-score winners use the lowest available candidate index.
     pub open spec fn winner_tie_break(&self) -> bool {
         forall|s: int|
             #![trigger self.allocation@[s]]
@@ -311,11 +322,13 @@ impl CompetitiveSelectionHardExclusive {
                         ==> (w as int) <= c)
     }
 
+    /// Whether all hard-exclusive selection obligations hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant() && self.mutual_exclusion()
             && self.winner_optimality() && self.winner_tie_break()
     }
 
+    /// Construct empty allocations and zero scores for every seat.
     pub fn new(
         num_seats: usize,
         num_candidates: usize,
@@ -377,6 +390,7 @@ impl CompetitiveSelectionHardExclusive {
         }
     }
 
+    /// Read one in-range seat-candidate score.
     pub fn score_at(&self, s: usize, c: usize) -> (v: u64)
         requires
             s < self.scores.len(),
@@ -741,6 +755,7 @@ pub open spec fn priority_gt(scores: Seq<u64>, extra: Seq<u64>, a: int, b: int) 
     scores[a] as int * (2 * extra[b] as int + 1) > scores[b] as int * (2 * extra[a] as int + 1)
 }
 
+/// Whether two candidates have equal cross-multiplied priority.
 pub open spec fn priority_equal(scores: Seq<u64>, extra: Seq<u64>, a: int, b: int) -> bool {
     scores[a] as int * (2 * extra[b] as int + 1) == scores[b] as int * (2 * extra[a] as int + 1)
 }
@@ -872,10 +887,13 @@ pub proof fn lemma_priority_lhs_monotone(s: int, e: int, f: int)
 /// Soft competitive selection: weights derived from an evolving `extra` via
 /// the reserved-floor sequential Webster award process, not chosen freely.
 pub struct CompetitiveSelectionSoft {
+    /// Extra Webster awards by candidate index.
     pub extra: Vec<u64>,
+    /// Candidate scores by candidate index.
     pub scores: Vec<u64>,
+    /// Total weight available for assignment.
     pub weight_total: u64,
-    /// Canonical MaxScore for this refinement profile.
+    /// MaxScore for this refinement profile.
     pub max_score: u64,
 }
 
@@ -979,6 +997,7 @@ impl CompetitiveSelectionSoft {
                         >= self.scores@[j] as int * (2 * self.extra@[i] as int - 1)
     }
 
+    /// Whether mutable-score safety and terminal normalization hold.
     pub open spec fn inv(&self) -> bool {
         self.mutable_score_inv() && self.normalization()
     }
@@ -1640,10 +1659,13 @@ pub proof fn lemma_count_upper(s: Seq<bool>, n: int)
 
 /// Ranked competitive selection: pick the top-K candidates by score.
 pub struct CompetitiveSelectionRanked {
+    /// Candidate scores by candidate index.
     pub scores: Vec<u64>,
+    /// Current selected membership by candidate index.
     pub selected: Vec<bool>,
+    /// Maximum selected cardinality.
     pub k: usize,
-    /// Canonical MaxScore for this refinement profile.
+    /// MaxScore for this refinement profile.
     pub max_score: u64,
 }
 
@@ -1672,7 +1694,7 @@ impl CompetitiveSelectionRanked {
     /// TLA+ `RankedTieBreak`: every selected candidate is strictly better
     /// than every unselected candidate under score-then-lowest-index order.
     /// The vector index is the executable realization of the fixed WEnum/Pos
-    /// order used by the canonical model.
+    /// order used by the formal model.
     pub open spec fn ranked_tie_break(&self) -> bool {
         forall|s: int, c: int|
             #![trigger self.selected@[s], self.selected@[c]]
@@ -1682,6 +1704,7 @@ impl CompetitiveSelectionRanked {
                     || (self.scores@[s] == self.scores@[c] && s < c))
     }
 
+    /// Whether all ranked-selection obligations hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant() && self.bounded_multiplicity()
             && self.threshold_optimality() && self.ranked_tie_break()

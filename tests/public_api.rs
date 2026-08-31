@@ -8,9 +8,9 @@ use automation_structures::{
     FederatedBudget, ForkJoin, ForkJoinPhase, Marker, PropagationBuildError, PropagationError,
     PropagationPass, QualityHierarchy, QualityHierarchyError, RateLimit, RateLimitError, Reduction,
     ReductionError, RelationshipGraph, RelationshipGraphError, ResourceRegistry, Sampler,
-    SamplerError, Sequential, Signal, SignalError, StepGraph, StepGraphBuildError, StepState,
-    StreamGraph, TraversalEngine, TraversalError, WorkerState, projection_consistent,
-    strictly_before,
+    SamplerError, SelectThenActuate, SelectThenActuateBuildError, SelectThenActuateError,
+    Sequential, Signal, SignalError, StepGraph, StepGraphBuildError, StepState, StreamGraph,
+    TraversalEngine, TraversalError, WorkerState, projection_consistent, strictly_before,
 };
 
 #[test]
@@ -62,6 +62,17 @@ fn checked_registry_returns_prior_values() {
     assert_eq!(registry.remove(4), Some(20));
     assert_eq!(registry.remove(4), None);
     assert_eq!(registry.len(), 0);
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn proof_registry_instantiates_with_typed_composition_keys() {
+    use automation_structures::primitives::resource_registry::ResourceRegistry as ProofRegistry;
+
+    let mut registry: ProofRegistry<(usize, usize, u64), ()> = ProofRegistry::new();
+    registry.register((1, 2, 3), ());
+    assert_eq!(registry.lookup((1, 2, 3)), Some(()));
+    assert_eq!(registry.lookup((1, 2, 4)), None);
 }
 
 #[test]
@@ -414,6 +425,8 @@ fn checked_equivalence_class_bounds_indices_and_union_work() {
     assert_eq!(classes.equivalent(0, 1), Ok(true));
     assert_eq!(classes.union(0, 1), Ok(false));
     assert_eq!(classes.union(1, 2), Ok(true));
+    assert_eq!(classes.unions_performed(), 2);
+    assert_eq!(classes.max_unions(), 2);
     assert_eq!(classes.union(0, 2), Ok(false));
     assert_eq!(
         classes.representative(3),
@@ -458,6 +471,9 @@ fn checked_relationship_graph_keeps_adjacency_in_sync() {
     let mut graph = RelationshipGraph::new(3, 10);
     assert_eq!(graph.add_edge(0, 1, 4), Ok(true));
     assert_eq!(graph.add_edge(0, 1, 4), Ok(false));
+    assert_eq!(graph.add_edge(0, 1, 7), Ok(true));
+    assert_eq!(graph.add_edge(1, 2, 6), Ok(true));
+    assert_eq!(graph.edge_count(), 3);
     assert_eq!(
         graph.add_edge(0, 0, 1),
         Err(RelationshipGraphError::SelfLoop)
@@ -473,6 +489,9 @@ fn checked_relationship_graph_keeps_adjacency_in_sync() {
     assert!(graph.contains(0, 1));
     graph.remove_edges(0, 1);
     assert!(!graph.contains(0, 1));
+    assert!(graph.contains(1, 2));
+    assert_eq!(graph.edge_count(), 1);
+    assert_eq!(graph.edge(0), Some((1, 2, 6)));
 }
 
 #[test]
@@ -484,6 +503,29 @@ fn checked_sampler_keeps_selection_bounded_and_supported() {
     assert_eq!(sampler.draw_weighted(2, 3), Ok(true));
     assert_eq!(sampler.sample(1), Err(SamplerError::SampleFull));
     assert!(!sampler.zero(0));
+}
+
+#[test]
+fn checked_select_then_actuate_uses_one_selection_and_actuation_lifecycle() {
+    let composition = SelectThenActuate::new(1, 2);
+    assert!(composition.is_ok());
+    if let Ok(mut composition) = composition {
+        assert_eq!(composition.update_score(0, 0, 2), Ok(()));
+        assert_eq!(composition.update_score(0, 1, 5), Ok(()));
+        assert_eq!(composition.evaluate(0), Ok(1));
+        assert_eq!(
+            composition.evaluate(0),
+            Err(SelectThenActuateError::SeatAlreadyAllocated)
+        );
+        assert_eq!(composition.actuate(0), Ok(()));
+        assert_eq!(composition.is_actuated(0), Some(true));
+        assert_eq!(
+            composition.update_score(0, 1, 6),
+            Err(SelectThenActuateError::EffectAlreadyApplied)
+        );
+        assert_eq!(composition.finish(), Ok(()));
+        assert!(composition.is_complete());
+    }
 }
 
 #[test]
@@ -604,16 +646,28 @@ fn checked_stream_graph_preserves_fifo_and_backpressure() {
 }
 
 #[test]
-fn connective_accumulator_moves_one_ordered_prefix() {
-    let mut accumulator = Accumulator::new(vec![4u64, 5, 6]);
-    assert_eq!(accumulator.pending_len(), 3);
-    assert_eq!(accumulator.advance(), Some(4));
-    assert_eq!(accumulator.advance(), Some(5));
-    assert_eq!(accumulator.accumulated(0), Some(4));
-    assert_eq!(accumulator.pending(0), Some(6));
-    assert_eq!(accumulator.advance(), Some(6));
-    assert_eq!(accumulator.advance(), None);
-    assert!(accumulator.is_complete());
+fn connective_accumulator_carries_one_partial_result() {
+    let mut input = Accumulator::new(vec![4u64, 5]);
+    assert_eq!(input.accumulated_len(), 0);
+    assert_eq!(input.pending_len(), 2);
+    assert_eq!(input.checked_len(), Some(2));
+    assert!(!input.is_complete());
+    assert_eq!(input.pending(0), Some(4));
+    assert_eq!(input.pending(1), Some(5));
+    assert_eq!(input.advance(), Some(4));
+    assert_eq!(input.accumulated(0), Some(4));
+    assert_eq!(input.advance(), Some(5));
+    assert!(input.is_complete());
+    assert_eq!(input.advance(), None);
+
+    let mut output = Accumulator::from_accumulated(Vec::<u64>::new());
+    assert_eq!(output.try_append(4), Ok(()));
+    assert_eq!(output.try_append(5), Ok(()));
+    assert_eq!(output.try_append(6), Ok(()));
+    assert_eq!(output.accumulated_len(), 3);
+    assert_eq!(output.checked_len(), Some(3));
+    assert_eq!(output.accumulated(0), Some(4));
+    assert_eq!(output.accumulated(2), Some(6));
 }
 
 #[test]
@@ -626,10 +680,17 @@ fn connective_buffer_is_bounded_fifo() {
     assert_eq!(buffer.pop(), Some(1));
     assert_eq!(buffer.pop(), Some(2));
     assert_eq!(buffer.pop(), None);
+
+    let mut distinct = Buffer::<u64>::new(2);
+    assert!(distinct.push_unique(7));
+    assert!(!distinct.push_unique(7));
+    assert!(distinct.contains(7));
+    assert!(distinct.remove(7));
+    assert!(!distinct.contains(7));
 }
 
 #[test]
-fn connective_counter_marker_projection_and_order_are_canonical() {
+fn connective_counter_marker_projection_and_order_are_reusable() {
     let mut counter = Counter::new(0);
     assert!(!counter.try_decrement());
     assert!(counter.try_increment());
@@ -673,6 +734,7 @@ fn public_types_support_standard_debugging_and_thread_transfer() {
     assert_common::<Reduction>();
     assert_common::<RelationshipGraph>();
     assert_common::<Sampler>();
+    assert_common::<SelectThenActuate>();
     assert_common::<Signal>();
     assert_common::<TraversalEngine>();
     assert_common::<Sequential>();
@@ -711,6 +773,8 @@ fn public_types_support_standard_debugging_and_thread_transfer() {
     assert_error::<ReductionError>();
     assert_error::<RelationshipGraphError>();
     assert_error::<SamplerError>();
+    assert_error::<SelectThenActuateBuildError>();
+    assert_error::<SelectThenActuateError>();
     assert_error::<automation_structures::SignalBuildError>();
     assert_error::<SignalError>();
     assert_error::<automation_structures::TraversalBuildError>();
@@ -742,6 +806,10 @@ fn checked_constructors_reject_invalid_configurations() {
     assert!(matches!(
         Signal::new(1, 1, 0),
         Err(automation_structures::SignalBuildError::InitialValueOutOfRange)
+    ));
+    assert!(matches!(
+        SelectThenActuate::new(1, 0),
+        Err(SelectThenActuateBuildError::NoCandidates)
     ));
     assert!(matches!(
         TraversalEngine::new(0, 0, 0),

@@ -31,19 +31,21 @@ fn main() {
     let mut r = Reducer::new(vec![3, 1, 2]);
     all_ok &= check("stream begins undrained", r.done(), false);
     r.process();
-    all_ok &= check("consume first updates result", r.result, 3);
-    all_ok &= check("consume first exact prefix", r.processed.clone(), vec![3]);
+    all_ok &= check("consume first updates result", r.result(), 3);
+    let consumed: Vec<u64> = r.audit.log.iter().map(|entry| entry.operation).collect();
+    all_ok &= check("consume first exact prefix", consumed, vec![3]);
     all_ok &= check(
         "consume first exact suffix",
-        r.remaining.clone(),
+        r.source[r.position()..].to_vec(),
         vec![1, 2],
     );
     r.process();
-    all_ok &= check("consume second updates fold", r.result, 4);
+    all_ok &= check("consume second updates fold", r.result(), 4);
     r.process();
-    all_ok &= check("drained aggregate", r.result, 6);
-    all_ok &= check("drained exact prefix", r.processed.clone(), vec![3, 1, 2]);
-    all_ok &= check("drained suffix empty", r.remaining.len(), 0);
+    all_ok &= check("drained aggregate", r.result(), 6);
+    let consumed: Vec<u64> = r.audit.log.iter().map(|entry| entry.operation).collect();
+    all_ok &= check("drained exact prefix", consumed, vec![3, 1, 2]);
+    all_ok &= check("drained suffix empty", r.remaining_len(), 0);
     all_ok &= check("drain boundary reports done", r.done(), true);
 
     if all_ok {

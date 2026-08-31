@@ -48,7 +48,7 @@ fn main() {
         && direct.sequential.pc == 3
         && retry_admitted
         && first_failed
-        && retry.attempts == 2
+        && retry.attempt_budget.allocated == 2
         && retry.phase == CommitPhase::Committed
         && retry.audit.log.len() == 1
         && partial_admitted
@@ -63,7 +63,8 @@ fn main() {
         && rejected_for_capacity
         && exhausted_admitted
         && terminal_failure
-        && retry_exhaustion.attempts == retry_exhaustion.max_attempts
+        && retry_exhaustion.attempt_budget.allocated
+            == retry_exhaustion.attempt_budget.capacity
         && retry_exhaustion.phase == CommitPhase::Rejected
         && !retry_exhaustion.effect_applied;
 
