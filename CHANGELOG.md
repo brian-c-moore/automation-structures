@@ -2,6 +2,9 @@
 
 All notable changes to this crate are documented here.
 
+## 0.1.1 - Prepublication Release
+- Dependabot dependency updates 
+
 ## 0.1.0 - Unreleased
 
 - Introduces the initial Automation Structure primitives, connective roles, named compositions,
