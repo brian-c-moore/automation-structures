@@ -255,6 +255,30 @@ pub proof fn lemma_push_has_pair<K, V>(entries: Seq<(K, V)>, a: K, b: V, kk: K, 
     }
 }
 
+/// Deterministic order-preserving removal of `key` from the first `n` entries.
+pub open spec fn without_key_to<K, V>(entries: Seq<(K, V)>, key: K, n: int)
+    -> Seq<(K, V)>
+    decreases n,
+{
+    if n <= 0 || n > entries.len() {
+        Seq::empty()
+    } else {
+        let prefix = without_key_to(entries, key, n - 1);
+        if entries[n - 1].0 == key {
+            prefix
+        } else {
+            prefix.push(entries[n - 1])
+        }
+    }
+}
+
+/// Deterministic order-preserving removal of every binding for `key`.
+pub open spec fn without_key_sequence<K, V>(entries: Seq<(K, V)>, key: K)
+    -> Seq<(K, V)>
+{
+    without_key_to(entries, key, entries.len() as int)
+}
+
 /// A unique-key registry: a set of (key, value) pairs with no repeated key.
 pub struct ResourceRegistry<K, V> {
     /// Unique-key entries in deterministic storage order.
@@ -347,6 +371,7 @@ impl<K: RegistryKey + Copy, V: Copy> ResourceRegistry<K, V> {
                 (0 <= i < entries@.len() && 0 <= j < entries@.len() && i != j)
                     ==> #[trigger] entries@[i].0 != #[trigger] entries@[j].0,
         ensures
+            out@ == without_key_sequence(entries@, k),
             // no key k remains
             forall|i: int| 0 <= i < out@.len() ==> out@[i].0 != k,
             // unique keys preserved
@@ -371,6 +396,7 @@ impl<K: RegistryKey + Copy, V: Copy> ResourceRegistry<K, V> {
         while i < entries.len()
             invariant
                 i <= entries.len(),
+                out@ == without_key_to(entries@, k, i as int),
                 forall|a: int, b: int|
                     (0 <= a < entries@.len() && 0 <= b < entries@.len() && a != b)
                         ==> #[trigger] entries@[a].0 != #[trigger] entries@[b].0,
@@ -419,6 +445,7 @@ impl<K: RegistryKey + Copy, V: Copy> ResourceRegistry<K, V> {
                     }
                 }
             }
+            assert(out@ == without_key_to(entries@, k, i as int + 1));
             // projection update for every kk /= k
             assert forall|kk: K| kk != k implies
                 (#[trigger] has_key(out@, out@.len() as int, kk)
@@ -499,6 +526,8 @@ impl<K: RegistryKey + Copy, V: Copy> ResourceRegistry<K, V> {
         ensures
             final(self).unique_mapping(),
             final(self).maps_to(k, v),
+            final(self).entries@
+                == without_key_sequence(old(self).entries@, k).push((k, v)),
             // every other key's presence is unchanged
             forall|kk: K|
                 kk != k ==>
@@ -612,6 +641,7 @@ impl<K: RegistryKey + Copy, V: Copy> ResourceRegistry<K, V> {
         ensures
             final(self).unique_mapping(),
             !final(self).contains_key(k),
+            final(self).entries@ == without_key_sequence(old(self).entries@, k),
             // every other key's presence is unchanged
             forall|kk: K|
                 kk != k ==>

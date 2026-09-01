@@ -13,6 +13,11 @@
 
 use crate::connectives::cursor::Cursor;
 use crate::primitives::audit_sink::AuditSink;
+#[expect(
+    unused_imports,
+    reason = "ChainOperation is used by ghost specifications erased by rustc"
+)]
+use crate::primitives::audit_sink::ChainOperation;
 use vstd::prelude::*;
 
 verus! {
@@ -272,7 +277,16 @@ impl Signal {
             final(self).initial_value == old(self).initial_value,
             final(self).num_values == old(self).num_values,
             final(self).num_listeners == old(self).num_listeners,
+            final(self).audit.operator == old(self).audit.operator,
+            final(self).audit.max_log_len == old(self).audit.max_log_len,
             final(self).audit.log@.len() == old(self).audit.log@.len() + 1,
+            final(self).audit.last_hash
+                == old(self).audit.operator.combine_spec(old(self).audit.last_hash, value),
+            final(self).audit.log@[old(self).audit.log@.len() as int].operation == value,
+            final(self).audit.log@[old(self).audit.log@.len() as int].prev_hash
+                == old(self).audit.last_hash,
+            forall|index: int| 0 <= index < old(self).audit.log@.len() ==>
+                #[trigger] final(self).audit.log@[index] == old(self).audit.log@[index],
             final(self).current_value_spec() == value,
             final(self).cursors@ == old(self).cursors@,
     {
@@ -310,11 +324,12 @@ impl Signal {
             final(self).initial_value == old(self).initial_value,
             final(self).num_values == old(self).num_values,
             final(self).num_listeners == old(self).num_listeners,
-            final(self).audit.log@ == old(self).audit.log@,
-            final(self).audit.last_hash == old(self).audit.last_hash,
-            final(self).cursors@[listener as int].position == old(self).audit.log@.len(),
-            forall|i: int| 0 <= i < final(self).cursors@.len() && i != listener
-                ==> final(self).cursors@[i].position == old(self).cursors@[i].position,
+            final(self).audit == old(self).audit,
+            final(self).cursors@
+                == old(self).cursors@.update(
+                    listener as int,
+                    Cursor { position: old(self).audit.log@.len() as usize },
+                ),
     {
         let head = self.audit.log.len();
         let ghost prior_cursors = self.cursors@;

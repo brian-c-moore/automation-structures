@@ -799,6 +799,23 @@ pub open spec fn priority_winner(scores: Seq<u64>, extra: Seq<u64>, w: int) -> b
             ==> w <= c)
 }
 
+/// Exact state reached by `steps` lowest-index priority awards from the reserved floor.
+pub open spec fn award_trace(scores: Seq<u64>, extra: Seq<u64>, steps: nat) -> bool
+    decreases steps,
+{
+    if steps == 0 {
+        scores.len() == extra.len()
+            && forall|index: int| 0 <= index < extra.len() ==>
+                #[trigger] extra[index] == 0
+    } else {
+        exists|before: Seq<u64>, winner: int| {
+            &&& award_trace(scores, before, (steps - 1) as nat)
+            &&& priority_winner(scores, before, winner)
+            &&& extra == before.update(winner, (before[winner] + 1) as u64)
+        }
+    }
+}
+
 /// Sainte-Lague's catch-up property: if a's priority dominates b's and a's
 /// score is strictly lower, a's extra must already be strictly lower too.
 /// This is what keeps a strictly-lower-scored candidate from ever catching
@@ -1066,6 +1083,7 @@ impl CompetitiveSelectionSoft {
             s.max_score == max_score,
             s.extra@.len() == scores@.len(),
             forall|i: int| 0 <= i < s.extra.len() ==> s.extra@[i] == 0,
+            award_trace(scores@, s.extra@, 0),
             s.mutable_score_inv(),
     {
         let n = scores.len();
@@ -1117,6 +1135,11 @@ impl CompetitiveSelectionSoft {
             s.mutable_score_inv(),
             s.inv(),
             s.webster_allocation(),
+            award_trace(
+                scores@,
+                s.extra@,
+                (weight_total - scores@.len() as u64) as nat,
+            ),
     {
         let n = scores.len();
         let pool: u64 = weight_total - (n as u64);
@@ -1139,6 +1162,7 @@ impl CompetitiveSelectionSoft {
             i = i + 1;
         }
 
+        assert(award_trace(scores@, extra@, 0));
         let mut awarded: u64 = 0;
         while awarded < pool
             invariant
@@ -1167,6 +1191,7 @@ impl CompetitiveSelectionSoft {
                     0 <= c < n && 0 <= d < n && extra@[c] >= 1
                         ==> scores@[c] as int * (2 * extra@[d] as int + 1)
                                 >= scores@[d] as int * (2 * extra@[c] as int - 1),
+                award_trace(scores@, extra@, awarded as nat),
             decreases pool - awarded,
         {
             let mut best: usize = 0;
@@ -1183,6 +1208,9 @@ impl CompetitiveSelectionSoft {
                     forall|k: int| 0 <= k < n ==> #[trigger] scores@[k] <= 1_000_000_000,
                     forall|k: int| 0 <= k < n ==> #[trigger] extra@[k] <= awarded,
                     forall|c: int| 0 <= c < j ==> priority_ge(scores@, extra@, best as int, c),
+                    forall|c: int| 0 <= c < j
+                        && priority_equal(scores@, extra@, best as int, c)
+                        ==> best as int <= c,
                 decreases n - j,
             {
                 proof {
@@ -1210,6 +1238,7 @@ impl CompetitiveSelectionSoft {
                     best = j;
                     proof {
                         assert(priority_ge(scores@, extra@, old_j as int, old_best as int));
+                        assert(priority_gt(scores@, extra@, old_j as int, old_best as int));
                         assert forall|c: int| 0 <= c < old_j as int + 1
                             implies priority_ge(scores@, extra@, best as int, c)
                         by {
@@ -1219,6 +1248,21 @@ impl CompetitiveSelectionSoft {
                                 lemma_priority_ge_trans(scores@, extra@, old_j as int, old_best as int, c);
                             } else {
                                 // c == old_j as int == best as int, reflexive
+                            }
+                        }
+                        assert forall|c: int| 0 <= c < old_j as int + 1
+                            && priority_equal(scores@, extra@, best as int, c)
+                            implies best as int <= c
+                        by {
+                            if c < old_j as int {
+                                lemma_priority_gt_ge_not_equal(
+                                    scores@,
+                                    extra@,
+                                    old_j as int,
+                                    old_best as int,
+                                    c,
+                                );
+                                assert(false);
                             }
                         }
                     }
@@ -1232,6 +1276,14 @@ impl CompetitiveSelectionSoft {
                                 assert(priority_ge(scores@, extra@, old_best as int, old_j as int));
                             } else {
                                 // c < old_j: unchanged from the pre-iteration invariant
+                            }
+                        }
+                        assert forall|c: int| 0 <= c < old_j as int + 1
+                            && priority_equal(scores@, extra@, best as int, c)
+                            implies best as int <= c
+                        by {
+                            if c == old_j as int {
+                                assert(best < old_j);
                             }
                         }
                     }
@@ -1258,9 +1310,27 @@ impl CompetitiveSelectionSoft {
                 assert forall|c: int| 0 <= c < n
                     implies priority_ge(scores@, extra_old, best_g, c)
                 by {}
+                assert(priority_winner(scores@, extra_old, best_g));
             }
             extra.set(best, extra[best] + 1);
             proof {
+                assert(award_trace(scores@, extra@, awarded as nat + 1)) by {
+                    assert(exists|before: Seq<u64>, winner: int| {
+                        &&& award_trace(scores@, before, awarded as nat)
+                        &&& priority_winner(scores@, before, winner)
+                        &&& extra@ == before.update(
+                            winner,
+                            (before[winner] + 1) as u64,
+                        )
+                    }) by {
+                        assert(award_trace(scores@, extra_old, awarded as nat));
+                        assert(priority_winner(scores@, extra_old, best_g));
+                        assert(extra@ == extra_old.update(
+                            best_g,
+                            (extra_old[best_g] + 1) as u64,
+                        ));
+                    }
+                }
                 assert forall|c: int, d: int| 0 <= c < n && 0 <= d < n && scores@[c] < scores@[d]
                     implies 1 + extra@[c] as int <= 1 + extra@[d] as int
                 by {
@@ -1353,6 +1423,7 @@ impl CompetitiveSelectionSoft {
                     winner as int,
                     (old(self).extra@[winner as int] + 1) as u64,
                 ),
+            old(self).webster_allocation() ==> final(self).webster_allocation(),
             final(self).mutable_score_inv(),
     {
         let n = self.scores.len();
@@ -1499,6 +1570,43 @@ impl CompetitiveSelectionSoft {
                     assert(1 + extra_old[c] as int <= 1 + extra_old[d] as int + 1);
                 } else {
                     assert(1 + extra_old[c] as int <= 1 + extra_old[d] as int + 1);
+                }
+            }
+            if old(self).webster_allocation() {
+                assert(self.webster_allocation()) by {
+                    assert forall|c: int, d: int|
+                        0 <= c < n && 0 <= d < n && self.extra@[c] >= 1
+                        implies self.scores@[c] as int * (2 * self.extra@[d] as int + 1)
+                            >= self.scores@[d] as int * (2 * self.extra@[c] as int - 1) by {
+                        if c == best_g && d == best_g {
+                            lemma_priority_lhs_monotone(
+                                self.scores@[best_g] as int,
+                                self.extra@[best_g] as int - 1,
+                                self.extra@[best_g] as int,
+                            );
+                        } else if c == best_g {
+                            assert(priority_ge(self.scores@, extra_old, best_g, d));
+                            assert(self.extra@[d] == extra_old[d]);
+                            assert(self.extra@[best_g] as int
+                                == extra_old[best_g] as int + 1);
+                        } else if d == best_g {
+                            assert(self.scores@[c] as int
+                                    * (2 * extra_old[best_g] as int + 1)
+                                >= self.scores@[best_g] as int
+                                    * (2 * extra_old[c] as int - 1));
+                            lemma_priority_lhs_monotone(
+                                self.scores@[c] as int,
+                                extra_old[best_g] as int,
+                                self.extra@[best_g] as int,
+                            );
+                            assert(self.extra@[c] == extra_old[c]);
+                        } else {
+                            assert(self.scores@[c] as int * (2 * extra_old[d] as int + 1)
+                                >= self.scores@[d] as int * (2 * extra_old[c] as int - 1));
+                            assert(self.extra@[c] == extra_old[c]
+                                && self.extra@[d] == extra_old[d]);
+                        }
+                    }
                 }
             }
             let old_sum = sum_to(extra_old, n as int);

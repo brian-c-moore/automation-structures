@@ -135,7 +135,11 @@ impl<T: Copy> Accumulator<T> {
 
     /// Construct an accumulator with an empty consumed prefix.
     pub fn new(values: Vec<T>) -> (accumulator: Self)
-        ensures accumulator.well_formed(),
+        ensures
+            accumulator.well_formed(),
+            accumulator.original@ == values@,
+            accumulator.accumulated@.len() == 0,
+            accumulator.pending@ == values@,
     {
         let ghost original = values@;
         Self { original: Ghost(original), accumulated: Vec::new(), pending: values }
@@ -145,6 +149,7 @@ impl<T: Copy> Accumulator<T> {
     pub fn from_accumulated(values: Vec<T>) -> (accumulator: Self)
         ensures
             accumulator.well_formed(),
+            accumulator.original@ == values@,
             accumulator.accumulated@ == values@,
             accumulator.pending@.len() == 0,
     {
@@ -189,18 +194,36 @@ impl<T: Copy> Accumulator<T> {
 
     /// Read one accumulated value by original order.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the accumulated index is in bounds")]
-    pub fn accumulated(&self, index: usize) -> Option<T> {
+    pub fn accumulated(&self, index: usize) -> (value: Option<T>)
+        ensures value == if index < self.accumulated@.len() {
+            Some(self.accumulated@[index as int])
+        } else {
+            None
+        },
+    {
         if index < self.accumulated.len() { Some(self.accumulated[index]) } else { None }
     }
 
     /// Read one value from the accumulated prefix by order.
-    pub fn value(&self, index: usize) -> Option<T> {
+    pub fn value(&self, index: usize) -> (value: Option<T>)
+        ensures value == if index < self.accumulated@.len() {
+            Some(self.accumulated@[index as int])
+        } else {
+            None
+        },
+    {
         self.accumulated(index)
     }
 
     /// Read one pending value by original order.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the pending index is in bounds")]
-    pub fn pending(&self, index: usize) -> Option<T> {
+    pub fn pending(&self, index: usize) -> (value: Option<T>)
+        ensures value == if index < self.pending@.len() {
+            Some(self.pending@[index as int])
+        } else {
+            None
+        },
+    {
         if index < self.pending.len() { Some(self.pending[index]) } else { None }
     }
 
@@ -208,7 +231,24 @@ impl<T: Copy> Accumulator<T> {
     #[expect(clippy::indexing_slicing, reason = "the nonempty guard proves the pending head exists")]
     pub fn advance(&mut self) -> (value: Option<T>)
         requires old(self).well_formed(),
-        ensures final(self).well_formed(),
+        ensures
+            final(self).well_formed(),
+            final(self).original@ == old(self).original@,
+            value == if old(self).pending@.len() > 0 {
+                Some(old(self).pending@[0])
+            } else {
+                None
+            },
+            final(self).accumulated@ == if old(self).pending@.len() > 0 {
+                old(self).accumulated@.push(old(self).pending@[0])
+            } else {
+                old(self).accumulated@
+            },
+            final(self).pending@ == if old(self).pending@.len() > 0 {
+                old(self).pending@.skip(1)
+            } else {
+                old(self).pending@
+            },
     {
         if self.pending.is_empty() { return None; }
         let ghost old_accumulated = self.accumulated@;
@@ -231,6 +271,7 @@ impl<T: Copy> Accumulator<T> {
             old(self).pending@.len() == 0,
         ensures
             final(self).well_formed(),
+            final(self).original@ == old(self).original@.push(value),
             final(self).accumulated@ == old(self).accumulated@.push(value),
             final(self).pending@ == old(self).pending@,
     {

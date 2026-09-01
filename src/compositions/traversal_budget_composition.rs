@@ -56,6 +56,12 @@ impl TraversalBudgetComposition {
             composition.traversal.root == root,
             composition.traversal.budget.capacity == max_budget,
             composition.traversal.budget.allocated == 0,
+            composition.traversal.queue.values@ == seq![root],
+            composition.traversal.accepted.original@.len() == 0,
+            composition.traversal.accepted.accumulated@.len() == 0,
+            composition.traversal.accepted.pending@.len() == 0,
+            forall|node: int| 0 <= node < composition.traversal.visited@.len() ==>
+                !#[trigger] composition.traversal.visited@[node].marked,
     {
         let traversal = TraversalEngine::new(num_nodes, root, max_budget);
         TraversalBudgetComposition { traversal }
@@ -111,11 +117,41 @@ impl TraversalBudgetComposition {
                 <= old(self).traversal.budget.capacity as int,
         ensures
             final(self).inv(),
+            final(self).traversal.num_nodes == old(self).traversal.num_nodes,
+            final(self).traversal.root == old(self).traversal.root,
+            final(self).traversal.graph == old(self).traversal.graph,
+            final(self).traversal.budget.capacity == old(self).traversal.budget.capacity,
+            final(self).traversal.budget.reserved == old(self).traversal.budget.reserved,
+            final(self).traversal.budget.pending_eviction
+                == old(self).traversal.budget.pending_eviction,
             final(self).traversal.budget.allocated
                 == old(self).traversal.budget.allocated
                     + crate::compositions::traversal_engine::NODE_COST,
+            final(self).traversal.accepted.original@
+                == old(self).traversal.accepted.original@.push(node),
+            final(self).traversal.accepted.accumulated@
+                == old(self).traversal.accepted.accumulated@.push(node),
+            final(self).traversal.accepted.pending@
+                == old(self).traversal.accepted.pending@,
             final(self).traversal.accepted_contains_spec(node),
             final(self).traversal.visited_contains_spec(node),
+            node == old(self).traversal.root ==> {
+                &&& final(self).traversal.queue.values@.len()
+                    == old(self).traversal.num_nodes - 1
+                &&& forall|index: int|
+                    0 <= index < final(self).traversal.queue.values@.len() ==>
+                        #[trigger] final(self).traversal.queue.values@[index]
+                            == if index < old(self).traversal.root as int {
+                                index as usize
+                            } else {
+                                (index + 1) as usize
+                            }
+            },
+            node != old(self).traversal.root ==> exists|index: int|
+                0 <= index < old(self).traversal.queue.values@.len()
+                    && old(self).traversal.queue.values@[index] == node
+                    && final(self).traversal.queue.values@
+                        == old(self).traversal.queue.values@.remove(index),
     {
         self.traversal.visit_node(node);
     }
@@ -132,10 +168,25 @@ impl TraversalBudgetComposition {
                 > old(self).traversal.budget.capacity as int,
         ensures
             final(self).inv(),
+            final(self).traversal.num_nodes == old(self).traversal.num_nodes,
+            final(self).traversal.root == old(self).traversal.root,
+            final(self).traversal.graph == old(self).traversal.graph,
+            final(self).traversal.budget == old(self).traversal.budget,
+            final(self).traversal.accepted.original@
+                == old(self).traversal.accepted.original@,
+            final(self).traversal.accepted.accumulated@
+                == old(self).traversal.accepted.accumulated@,
+            final(self).traversal.accepted.pending@
+                == old(self).traversal.accepted.pending@,
             final(self).traversal.budget.allocated
                 == old(self).traversal.budget.allocated,
             !final(self).traversal.accepted_contains_spec(node),
             final(self).traversal.visited_contains_spec(node),
+            exists|index: int|
+                0 <= index < old(self).traversal.queue.values@.len()
+                    && old(self).traversal.queue.values@[index] == node
+                    && final(self).traversal.queue.values@
+                        == old(self).traversal.queue.values@.remove(index),
     {
         self.traversal.visit_node(node);
     }
@@ -148,11 +199,18 @@ impl TraversalBudgetComposition {
             old(self).traversal.queue_contains_spec(node),
         ensures
             final(self).inv(),
+            final(self).traversal.num_nodes == old(self).traversal.num_nodes,
+            final(self).traversal.root == old(self).traversal.root,
+            final(self).traversal.graph == old(self).traversal.graph,
             !final(self).traversal.queue_contains_spec(node),
             final(self).traversal.budget == old(self).traversal.budget,
             final(self).traversal.visited@ == old(self).traversal.visited@,
-            final(self).traversal.accepted.accumulated@
-                == old(self).traversal.accepted.accumulated@,
+            final(self).traversal.accepted == old(self).traversal.accepted,
+            exists|index: int|
+                0 <= index < old(self).traversal.queue.values@.len()
+                    && old(self).traversal.queue.values@[index] == node
+                    && final(self).traversal.queue.values@
+                        == old(self).traversal.queue.values@.remove(index),
     {
         self.traversal.skip(node);
     }

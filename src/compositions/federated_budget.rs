@@ -151,7 +151,16 @@ impl FederatedBudget {
         ensures
             federated.master.capacity == master_capacity,
             federated.master.allocated == 0,
+            federated.master.reserved == 0,
+            federated.master.pending_eviction == 0,
             federated.sub_pools.len() == num_pools,
+            forall|index: int| 0 <= index < num_pools ==> {
+                let pool = #[trigger] federated.sub_pools@[index];
+                &&& pool.capacity == master_capacity
+                &&& pool.allocated == 0
+                &&& pool.reserved == 0
+                &&& pool.pending_eviction == 0
+            },
             federated.inv(),
     {
         let master = Budget::new(master_capacity);
@@ -201,6 +210,14 @@ impl FederatedBudget {
                     == old(self).sub_pools@[name as int].allocated
                 &&& final(self).sub_pools@[name as int].reserved
                     == old(self).sub_pools@[name as int].reserved + amount
+                &&& final(self).sub_pools@[name as int].capacity
+                    == old(self).sub_pools@[name as int].capacity
+                &&& final(self).sub_pools@[name as int].pending_eviction
+                    == old(self).sub_pools@[name as int].pending_eviction
+                &&& forall|index: int| 0 <= index < old(self).sub_pools.len()
+                    && index != name as int ==>
+                        #[trigger] final(self).sub_pools@[index]
+                            == old(self).sub_pools@[index]
             },
     {
         if name >= self.sub_pools.len() || amount == 0 {
@@ -243,6 +260,14 @@ impl FederatedBudget {
                     == old(self).sub_pools@[name as int].allocated + amount
                 &&& final(self).sub_pools@[name as int].reserved
                     == old(self).sub_pools@[name as int].reserved - amount
+                &&& final(self).sub_pools@[name as int].capacity
+                    == old(self).sub_pools@[name as int].capacity
+                &&& final(self).sub_pools@[name as int].pending_eviction
+                    == old(self).sub_pools@[name as int].pending_eviction
+                &&& forall|index: int| 0 <= index < old(self).sub_pools.len()
+                    && index != name as int ==>
+                        #[trigger] final(self).sub_pools@[index]
+                            == old(self).sub_pools@[index]
             },
     {
         if name >= self.sub_pools.len() || amount == 0 {
@@ -277,6 +302,14 @@ impl FederatedBudget {
                     == old(self).sub_pools@[name as int].allocated - amount
                 &&& final(self).sub_pools@[name as int].reserved
                     == old(self).sub_pools@[name as int].reserved + amount
+                &&& final(self).sub_pools@[name as int].capacity
+                    == old(self).sub_pools@[name as int].capacity
+                &&& final(self).sub_pools@[name as int].pending_eviction
+                    == old(self).sub_pools@[name as int].pending_eviction
+                &&& forall|index: int| 0 <= index < old(self).sub_pools.len()
+                    && index != name as int ==>
+                        #[trigger] final(self).sub_pools@[index]
+                            == old(self).sub_pools@[index]
             },
     {
         if name >= self.sub_pools.len() || amount == 0 {

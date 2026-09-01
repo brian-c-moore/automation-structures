@@ -100,6 +100,13 @@ impl SelectThenActuate {
             !composition.actuation.complete,
             forall|seat: int| 0 <= seat < num_seats ==>
                 composition.selections@[seat].allocation is None,
+            forall|seat: int, candidate: int|
+                0 <= seat < num_seats && 0 <= candidate < num_candidates ==>
+                    #[trigger] composition.selections@[seat].scores@[candidate] == 0,
+            forall|seat: int| 0 <= seat < num_seats ==>
+                #[trigger] composition.actuation.allocation@[seat] is None,
+            forall|seat: int| 0 <= seat < num_seats ==>
+                #[trigger] composition.actuation.effects@[seat] is None,
     {
         let mut selections: Vec<CompetitiveSelectionHard> = Vec::new();
         let mut allocation: Vec<Option<u64>> = Vec::new();
@@ -113,6 +120,8 @@ impl SelectThenActuate {
                 forall|index: int| 0 <= index < selections@.len() ==> {
                     let selection = #[trigger] selections@[index];
                     &&& selection.scores@.len() == num_candidates
+                    &&& forall|candidate: int| 0 <= candidate < num_candidates ==>
+                        #[trigger] selection.scores@[candidate] == 0
                     &&& selection.allocation is None
                     &&& selection.inv()
                 },
@@ -247,6 +256,17 @@ impl SelectThenActuate {
             final(self).selections@[seat as int].allocation is Some,
             final(self).selections@[seat as int].scores@
                 == old(self).selections@[seat as int].scores@,
+            forall|index: int| 0 <= index < old(self).selections@.len()
+                && index != seat as int ==>
+                    #[trigger] final(self).selections@[index]
+                        == old(self).selections@[index],
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
+            final(self).actuation.allocation@[seat as int]
+                == Some(final(self).selections@[seat as int].allocation->Some_0 as u64),
+            forall|index: int| 0 <= index < old(self).actuation.allocation@.len()
+                && index != seat as int ==>
+                    #[trigger] final(self).actuation.allocation@[index]
+                        == old(self).actuation.allocation@[index],
             final(self).actuation.effects@ == old(self).actuation.effects@,
             final(self).actuation.complete == old(self).actuation.complete,
     {
@@ -317,7 +337,13 @@ impl SelectThenActuate {
             final(self).selections@[seat as int].allocation is None,
             final(self).selections@[seat as int].scores@
                 == old(self).selections@[seat as int].scores@.update(candidate as int, value),
-            final(self).actuation.allocation@[seat as int] is None,
+            forall|index: int| 0 <= index < old(self).selections@.len()
+                && index != seat as int ==>
+                    #[trigger] final(self).selections@[index]
+                        == old(self).selections@[index],
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
+            final(self).actuation.allocation@
+                == old(self).actuation.allocation@.update(seat as int, None),
             final(self).actuation.effects@ == old(self).actuation.effects@,
             final(self).actuation.complete == old(self).actuation.complete,
     {
@@ -377,13 +403,16 @@ impl SelectThenActuate {
             old(self).actuation.effects@[seat as int] is None,
         ensures
             final(self).inv(),
+            final(self).num_candidates == old(self).num_candidates,
             final(self).selections@ == old(self).selections@,
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
             final(self).actuation.allocation@ == old(self).actuation.allocation@,
             final(self).actuation.effects@
                 == old(self).actuation.effects@.update(
                     seat as int,
                     old(self).actuation.allocation@[seat as int],
                 ),
+            final(self).actuation.complete == old(self).actuation.complete,
     {
         proof { self.expose(); }
         self.actuation.actuate(seat);
@@ -397,7 +426,9 @@ impl SelectThenActuate {
             old(self).actuation.ready_to_finish(),
         ensures
             final(self).inv(),
+            final(self).num_candidates == old(self).num_candidates,
             final(self).selections@ == old(self).selections@,
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
             final(self).actuation.allocation@ == old(self).actuation.allocation@,
             final(self).actuation.effects@ == old(self).actuation.effects@,
             final(self).actuation.complete,

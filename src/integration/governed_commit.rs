@@ -25,6 +25,11 @@ use vstd::prelude::*;
 use crate::modalities::sequential::Sequential;
 use crate::primitives::actuation_pass::ActuationPass;
 use crate::primitives::audit_sink::AuditSink;
+#[expect(
+    unused_imports,
+    reason = "ChainOperation is used by ghost specifications erased by rustc"
+)]
+use crate::primitives::audit_sink::ChainOperation;
 use crate::primitives::budget::Budget;
 use crate::primitives::propagation_pass::PropagationPass;
 #[expect(
@@ -326,6 +331,25 @@ impl GovernedCommit {
             !s.crashed,
             s.budget.capacity == capacity,
             s.attempt_budget.capacity == max_attempts,
+            s.registry.entries@ == seq![(0u64, resource)],
+            s.registry.maps_to(0, resource),
+            s.budget.allocated == 0,
+            s.budget.reserved == 0,
+            s.budget.pending_eviction == 0,
+            s.attempt_budget.allocated == 0,
+            s.attempt_budget.reserved == 0,
+            s.attempt_budget.pending_eviction == 0,
+            s.propagation.iteration == 0,
+            s.propagation.round == Round::Idle,
+            s.propagation.changed,
+            s.actuation.allocation@ == seq![Some(resource)],
+            s.actuation.effects@ == seq![None],
+            !s.actuation.complete,
+            s.audit.log@.len() == 0,
+            s.audit.last_hash == 0,
+            s.sequential.pc == 0,
+            !s.sequential.active,
+            s.sequential.history@.len() == 0,
     {
         let mut registry = ResourceRegistry::new();
         registry.register(0, resource);
@@ -374,6 +398,7 @@ impl GovernedCommit {
             final(sequential).pc == old(sequential).pc + 1,
             !final(sequential).active,
             final(sequential).value == next_value,
+            final(sequential).history@ == old(sequential).history@.push(next_value),
     {
         let began = sequential.begin_step();
         let _ = began;
@@ -400,9 +425,34 @@ impl GovernedCommit {
             accepted == (old(self).budget.used() + 1 <= old(self).budget.capacity as int),
             accepted ==> final(self).phase == CommitPhase::Admitted,
             !accepted ==> final(self).phase == CommitPhase::Rejected,
-            final(self).attempt_budget.allocated == old(self).attempt_budget.allocated,
+            final(self).registry == old(self).registry,
+            final(self).budget.capacity == old(self).budget.capacity,
+            final(self).budget.allocated == old(self).budget.allocated,
+            final(self).budget.pending_eviction == old(self).budget.pending_eviction,
+            final(self).budget.reserved == if accepted {
+                (old(self).budget.reserved + 1) as u64
+            } else {
+                old(self).budget.reserved
+            },
+            final(self).propagation == old(self).propagation,
+            final(self).actuation == old(self).actuation,
+            final(self).audit == old(self).audit,
+            final(self).attempt_budget == old(self).attempt_budget,
+            accepted ==> {
+                &&& final(self).sequential.steps == old(self).sequential.steps
+                &&& final(self).sequential.value_domain_size
+                    == old(self).sequential.value_domain_size
+                &&& final(self).sequential.pc == old(self).sequential.pc + 1
+                &&& !final(self).sequential.active
+                &&& final(self).sequential.value == 1
+                &&& final(self).sequential.history@
+                    == old(self).sequential.history@.push(1)
+            },
+            !accepted ==> final(self).sequential == old(self).sequential,
             final(self).effect_applied == old(self).effect_applied,
             final(self).evidence_persisted == old(self).evidence_persisted,
+            final(self).recovery_intent == old(self).recovery_intent,
+            final(self).crashed == old(self).crashed,
     {
         let accepted = self.budget.reserve(1);
         if accepted {
@@ -434,6 +484,30 @@ impl GovernedCommit {
             final(self).propagation.iteration == 1,
             final(self).propagation.round == Round::Idle,
             !final(self).propagation.changed,
+            final(self).registry == old(self).registry,
+            final(self).budget == old(self).budget,
+            final(self).attempt_budget == old(self).attempt_budget,
+            final(self).actuation == old(self).actuation,
+            final(self).audit == old(self).audit,
+            final(self).propagation.num_nodes == old(self).propagation.num_nodes,
+            final(self).propagation.max_iterations
+                == old(self).propagation.max_iterations,
+            final(self).propagation.max_value == old(self).propagation.max_value,
+            final(self).propagation.edges@ == old(self).propagation.edges@,
+            final(self).propagation.values@ == old(self).propagation.values@,
+            final(self).propagation.snapshot@ == old(self).propagation.values@,
+            forall|index: int| 0 <= index < final(self).propagation.updated@.len() ==>
+                #[trigger] final(self).propagation.updated@[index],
+            final(self).sequential.steps == old(self).sequential.steps,
+            final(self).sequential.value_domain_size
+                == old(self).sequential.value_domain_size,
+            final(self).sequential.value == 2,
+            !final(self).sequential.active,
+            final(self).sequential.history@ == old(self).sequential.history@.push(2),
+            final(self).effect_applied == old(self).effect_applied,
+            final(self).evidence_persisted == old(self).evidence_persisted,
+            final(self).recovery_intent == old(self).recovery_intent,
+            final(self).crashed == old(self).crashed,
     {
         self.propagation.start_round();
         self.propagation.update_node(0);
@@ -462,9 +536,20 @@ impl GovernedCommit {
             final(self).transferred_guarantee(),
             Self::abstract_failure_step(old(self), final(self)),
             final(self).attempt_budget.allocated == old(self).attempt_budget.allocated + 1,
+            final(self).registry == old(self).registry,
+            final(self).budget == old(self).budget,
+            final(self).propagation == old(self).propagation,
+            final(self).actuation == old(self).actuation,
+            final(self).audit == old(self).audit,
+            final(self).sequential == old(self).sequential,
+            final(self).attempt_budget.capacity == old(self).attempt_budget.capacity,
+            final(self).attempt_budget.reserved == old(self).attempt_budget.reserved,
+            final(self).attempt_budget.pending_eviction
+                == old(self).attempt_budget.pending_eviction,
             final(self).effect_applied == old(self).effect_applied,
             final(self).evidence_persisted == old(self).evidence_persisted,
             final(self).recovery_intent == old(self).recovery_intent,
+            final(self).crashed == old(self).crashed,
             final(self).attempt_budget.allocated < final(self).attempt_budget.capacity ==>
                 !terminal && final(self).phase == CommitPhase::Retryable,
             final(self).attempt_budget.allocated == final(self).attempt_budget.capacity ==>
@@ -506,6 +591,24 @@ impl GovernedCommit {
             final(self).effect_applied,
             !final(self).evidence_persisted,
             final(self).recovery_intent,
+            final(self).registry == old(self).registry,
+            final(self).budget == old(self).budget,
+            final(self).propagation == old(self).propagation,
+            final(self).audit == old(self).audit,
+            final(self).sequential == old(self).sequential,
+            final(self).attempt_budget.capacity == old(self).attempt_budget.capacity,
+            final(self).attempt_budget.reserved == old(self).attempt_budget.reserved,
+            final(self).attempt_budget.pending_eviction
+                == old(self).attempt_budget.pending_eviction,
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
+            final(self).actuation.allocation@ == old(self).actuation.allocation@,
+            final(self).actuation.effects@
+                == old(self).actuation.effects@.update(
+                    0,
+                    old(self).actuation.allocation@[0],
+                ),
+            final(self).actuation.complete == old(self).actuation.complete,
+            final(self).crashed == old(self).crashed,
     {
         let recorded = self.attempt_budget.try_allocate(1);
         let _ = recorded;
@@ -542,6 +645,42 @@ impl GovernedCommit {
             final(self).evidence_persisted,
             !final(self).recovery_intent,
             final(self).sequential.pc == 3,
+            final(self).registry == old(self).registry,
+            final(self).propagation == old(self).propagation,
+            final(self).attempt_budget.capacity == old(self).attempt_budget.capacity,
+            final(self).attempt_budget.allocated == old(self).attempt_budget.allocated + 1,
+            final(self).attempt_budget.reserved == old(self).attempt_budget.reserved,
+            final(self).attempt_budget.pending_eviction
+                == old(self).attempt_budget.pending_eviction,
+            final(self).budget.capacity == old(self).budget.capacity,
+            final(self).budget.allocated == old(self).budget.allocated + 1,
+            final(self).budget.reserved == old(self).budget.reserved - 1,
+            final(self).budget.pending_eviction == old(self).budget.pending_eviction,
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
+            final(self).actuation.allocation@ == old(self).actuation.allocation@,
+            final(self).actuation.effects@
+                == old(self).actuation.effects@.update(
+                    0,
+                    old(self).actuation.allocation@[0],
+                ),
+            final(self).actuation.complete == old(self).actuation.complete,
+            final(self).audit.operator == old(self).audit.operator,
+            final(self).audit.max_log_len == old(self).audit.max_log_len,
+            final(self).audit.log@.len() == old(self).audit.log@.len() + 1,
+            final(self).audit.last_hash
+                == old(self).audit.operator.combine_spec(old(self).audit.last_hash, 0),
+            final(self).audit.log@[old(self).audit.log@.len() as int].operation == 0,
+            final(self).audit.log@[old(self).audit.log@.len() as int].prev_hash
+                == old(self).audit.last_hash,
+            forall|index: int| 0 <= index < old(self).audit.log@.len() ==>
+                #[trigger] final(self).audit.log@[index] == old(self).audit.log@[index],
+            final(self).sequential.steps == old(self).sequential.steps,
+            final(self).sequential.value_domain_size
+                == old(self).sequential.value_domain_size,
+            final(self).sequential.value == 3,
+            !final(self).sequential.active,
+            final(self).sequential.history@ == old(self).sequential.history@.push(3),
+            final(self).crashed == old(self).crashed,
     {
         let recorded = self.attempt_budget.try_allocate(1);
         let _ = recorded;
@@ -575,6 +714,31 @@ impl GovernedCommit {
             final(self).evidence_persisted,
             !final(self).recovery_intent,
             final(self).sequential.pc == 3,
+            final(self).registry == old(self).registry,
+            final(self).propagation == old(self).propagation,
+            final(self).attempt_budget == old(self).attempt_budget,
+            final(self).budget.capacity == old(self).budget.capacity,
+            final(self).budget.allocated == old(self).budget.allocated + 1,
+            final(self).budget.reserved == old(self).budget.reserved - 1,
+            final(self).budget.pending_eviction == old(self).budget.pending_eviction,
+            final(self).actuation == old(self).actuation,
+            final(self).audit.operator == old(self).audit.operator,
+            final(self).audit.max_log_len == old(self).audit.max_log_len,
+            final(self).audit.log@.len() == old(self).audit.log@.len() + 1,
+            final(self).audit.last_hash
+                == old(self).audit.operator.combine_spec(old(self).audit.last_hash, 0),
+            final(self).audit.log@[old(self).audit.log@.len() as int].operation == 0,
+            final(self).audit.log@[old(self).audit.log@.len() as int].prev_hash
+                == old(self).audit.last_hash,
+            forall|index: int| 0 <= index < old(self).audit.log@.len() ==>
+                #[trigger] final(self).audit.log@[index] == old(self).audit.log@[index],
+            final(self).sequential.steps == old(self).sequential.steps,
+            final(self).sequential.value_domain_size
+                == old(self).sequential.value_domain_size,
+            final(self).sequential.value == 3,
+            !final(self).sequential.active,
+            final(self).sequential.history@ == old(self).sequential.history@.push(3),
+            final(self).crashed == old(self).crashed,
     {
         self.budget.commit_reservation(1);
         let recorded = self.audit.record(0);
@@ -599,6 +763,13 @@ impl GovernedCommit {
             final(self).effect_applied == old(self).effect_applied,
             final(self).evidence_persisted == old(self).evidence_persisted,
             final(self).recovery_intent == old(self).recovery_intent,
+            final(self).registry == old(self).registry,
+            final(self).budget == old(self).budget,
+            final(self).propagation == old(self).propagation,
+            final(self).actuation == old(self).actuation,
+            final(self).audit == old(self).audit,
+            final(self).sequential == old(self).sequential,
+            final(self).attempt_budget == old(self).attempt_budget,
     {
         self.crashed = true;
     }
@@ -615,6 +786,13 @@ impl GovernedCommit {
             final(self).effect_applied == old(self).effect_applied,
             final(self).evidence_persisted == old(self).evidence_persisted,
             final(self).recovery_intent == old(self).recovery_intent,
+            final(self).registry == old(self).registry,
+            final(self).budget == old(self).budget,
+            final(self).propagation == old(self).propagation,
+            final(self).actuation == old(self).actuation,
+            final(self).audit == old(self).audit,
+            final(self).sequential == old(self).sequential,
+            final(self).attempt_budget == old(self).attempt_budget,
     {
         self.crashed = false;
     }

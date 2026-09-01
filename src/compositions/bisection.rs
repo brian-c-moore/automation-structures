@@ -144,6 +144,8 @@ impl Bisection {
             b.hi == hi,
             b.threshold == threshold,
             b.budget.allocated == 0,
+            b.budget.reserved == 0,
+            b.budget.pending_eviction == 0,
             b.invariant(),
     {
         proof {
@@ -286,6 +288,8 @@ pub fn bisection_find(sorted: &[u64], target: u64) -> (idx: usize)
     ensures
         idx as int <= sorted@.len() as int,
         idx < sorted@.len() ==> sorted@[idx as int] == target,
+        idx == sorted@.len() ==> forall|index: int|
+            0 <= index < sorted@.len() ==> #[trigger] sorted@[index] != target,
 {
     let n: usize = sorted.len();
     let mut lo: usize = 0;
@@ -296,6 +300,10 @@ pub fn bisection_find(sorted: &[u64], target: u64) -> (idx: usize)
             hi <= n,
             n == sorted@.len(),
             is_sorted(sorted@),
+            forall|index: int| 0 <= index < lo ==>
+                #[trigger] sorted@[index] < target,
+            forall|index: int| hi <= index < n ==>
+                #[trigger] sorted@[index] > target,
         decreases hi - lo,
     {
         let mid = lo + (hi - lo) / 2;
@@ -303,9 +311,26 @@ pub fn bisection_find(sorted: &[u64], target: u64) -> (idx: usize)
         if mid_val == target {
             return mid;
         } else if mid_val < target {
+            assert forall|index: int| lo <= index <= mid implies
+                #[trigger] sorted@[index] < target by {
+                assert(sorted@[index] <= sorted@[mid as int]);
+            }
             lo = mid + 1;
         } else {
+            assert forall|index: int| mid <= index < hi implies
+                #[trigger] sorted@[index] > target by {
+                assert(sorted@[mid as int] <= sorted@[index]);
+            }
             hi = mid;
+        }
+    }
+    assert forall|index: int| 0 <= index < n implies
+        #[trigger] sorted@[index] != target by {
+        if index < lo {
+            assert(sorted@[index] < target);
+        } else {
+            assert(index >= hi);
+            assert(sorted@[index] > target);
         }
     }
     n  // not present
