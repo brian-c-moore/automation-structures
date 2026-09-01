@@ -48,6 +48,8 @@ fn checked_cursor_api_refuses_regression() {
     assert_eq!(cursor.position(), 3);
     assert_eq!(cursor.advance_to(5), Ok(()));
     assert_eq!(cursor.position(), 5);
+    assert_eq!(cursor.advance_to(5), Ok(()));
+    assert_eq!(cursor.position(), 5);
 }
 
 #[test]
@@ -62,6 +64,21 @@ fn checked_registry_returns_prior_values() {
     assert_eq!(registry.remove(4), Some(20));
     assert_eq!(registry.remove(4), None);
     assert_eq!(registry.len(), 0);
+}
+
+#[test]
+fn checked_registry_preserves_deterministic_survivor_order() {
+    let mut registry = ResourceRegistry::new();
+    assert_eq!(registry.insert(1, 10), None);
+    assert_eq!(registry.insert(2, 20), None);
+    assert_eq!(registry.insert(3, 30), None);
+    assert_eq!(registry.insert(2, 21), Some(20));
+    assert_eq!(registry.entry(0), Some((1, 10)));
+    assert_eq!(registry.entry(1), Some((3, 30)));
+    assert_eq!(registry.entry(2), Some((2, 21)));
+    assert_eq!(registry.remove(1), Some(10));
+    assert_eq!(registry.entry(0), Some((3, 30)));
+    assert_eq!(registry.entry(1), Some((2, 21)));
 }
 
 #[cfg(feature = "proof-api")]
@@ -398,11 +415,15 @@ fn checked_federated_budget_preserves_capacity_conservation() {
     assert!(!budget.try_delegate(1, 5));
     assert!(budget.try_delegate(1, 4));
     assert!(budget.try_allocate(0, 5));
+    assert_eq!(budget.pool_allocated(1), Some(0));
     assert!(!budget.try_allocate(0, 2));
+    assert!(budget.try_allocate(1, 2));
+    assert_eq!(budget.pool_allocated(0), Some(5));
     assert!(budget.try_release(0, 3));
     assert_eq!(budget.master_allocated(), 10);
     assert_eq!(budget.pool_capacity(1), Some(4));
     assert_eq!(budget.pool_allocated(0), Some(2));
+    assert_eq!(budget.pool_allocated(1), Some(2));
 }
 
 #[test]
@@ -503,16 +524,36 @@ fn checked_sampler_keeps_selection_bounded_and_supported() {
     assert_eq!(sampler.draw_weighted(2, 3), Ok(true));
     assert_eq!(sampler.sample(1), Err(SamplerError::SampleFull));
     assert!(!sampler.zero(0));
+
+    let mut branches = Sampler::new(vec![2, 0, 4], 3);
+    assert_eq!(branches.draw_uniform(0), Ok(true));
+    assert_eq!(branches.draw_uniform(0), Ok(false));
+    assert!(branches.zero(1));
+    assert_eq!(branches.draw_uniform(1), Ok(false));
+    assert_eq!(branches.draw_weighted(2, 4), Ok(false));
+    assert_eq!(branches.draw_weighted(2, 3), Ok(true));
+    assert_eq!(
+        branches.draw_weighted(3, 0),
+        Err(SamplerError::ItemOutOfRange)
+    );
+    assert!(!branches.zero(3));
 }
 
 #[test]
 fn checked_select_then_actuate_uses_one_selection_and_actuation_lifecycle() {
-    let composition = SelectThenActuate::new(1, 2);
+    let composition = SelectThenActuate::new(2, 2);
     assert!(composition.is_ok());
     if let Ok(mut composition) = composition {
+        assert_eq!(composition.score(0, 0), Some(0));
+        assert_eq!(composition.score(0, 1), Some(0));
+        assert_eq!(composition.score(1, 0), Some(0));
+        assert_eq!(composition.score(1, 1), Some(0));
         assert_eq!(composition.update_score(0, 0, 2), Ok(()));
         assert_eq!(composition.update_score(0, 1, 5), Ok(()));
+        assert_eq!(composition.score(1, 0), Some(0));
+        assert_eq!(composition.score(1, 1), Some(0));
         assert_eq!(composition.evaluate(0), Ok(1));
+        assert_eq!(composition.allocation(1), None);
         assert_eq!(
             composition.evaluate(0),
             Err(SelectThenActuateError::SeatAlreadyAllocated)
@@ -540,7 +581,24 @@ fn checked_signal_delivers_each_actual_change_once() {
         assert_eq!(signal.notify(0), Ok(()));
         assert_eq!(signal.notify(0), Err(SignalError::ListenerNotPending));
         assert_eq!(signal.is_notified(0), Some(true));
+        assert_eq!(signal.set_value(1), Ok(true));
+        assert_eq!(signal.change_count(), 2);
+        assert_eq!(signal.value(), 1);
+        assert_eq!(signal.is_pending(0), Some(true));
+        assert_eq!(signal.notify(0), Ok(()));
         assert_eq!(signal.notify(2), Err(SignalError::ListenerOutOfRange));
+    }
+
+    let bounded = Signal::with_change_capacity(0, 2, 1, 1);
+    assert!(bounded.is_ok());
+    if let Ok(mut bounded) = bounded {
+        assert_eq!(bounded.set_value(1), Ok(true));
+        assert_eq!(
+            bounded.set_value(0),
+            Err(SignalError::ChangeCapacityExhausted)
+        );
+        assert_eq!(bounded.change_count(), 1);
+        assert_eq!(bounded.value(), 1);
     }
 }
 
@@ -559,6 +617,24 @@ fn checked_traversal_engine_tracks_budgeted_acceptance() {
         assert!(traversal.is_visited(2));
         assert!(!traversal.is_accepted(2));
         assert_eq!(traversal.terminate(), Ok(()));
+    }
+}
+
+#[test]
+fn checked_traversal_skip_removes_only_the_named_frontier_node() {
+    let traversal = TraversalEngine::new(4, 0, 8);
+    assert!(traversal.is_ok());
+    if let Ok(mut traversal) = traversal {
+        assert_eq!(traversal.visit(0), Ok(()));
+        assert_eq!(traversal.queued_len(), 3);
+        assert_eq!(traversal.skip(2), Ok(()));
+        assert!(!traversal.is_queued(2));
+        assert!(!traversal.is_visited(2));
+        assert!(!traversal.is_accepted(2));
+        assert!(traversal.is_queued(1));
+        assert!(traversal.is_queued(3));
+        assert_eq!(traversal.skip(2), Err(TraversalError::NodeNotQueued));
+        assert_eq!(traversal.skip(4), Err(TraversalError::NodeOutOfRange));
     }
 }
 
@@ -646,6 +722,27 @@ fn checked_stream_graph_preserves_fifo_and_backpressure() {
 }
 
 #[test]
+fn checked_four_stage_stream_graph_uses_the_second_transfer() {
+    let stream = StreamGraph::new(4, 1, 2, 10);
+    assert!(stream.is_ok());
+    if let Ok(mut stream) = stream {
+        assert!(!stream.advance_second());
+        assert!(stream.ingest(3));
+        assert!(stream.advance_first());
+        assert_eq!(stream.second_queue_len(), 1);
+        assert!(stream.advance_second());
+        assert_eq!(stream.second_queue_len(), 0);
+        assert_eq!(stream.third_queue_len(), 1);
+        assert_eq!(stream.consume(), Some(3));
+        assert!(stream.ingest(5));
+        assert!(stream.advance_first());
+        assert!(stream.advance_second());
+        assert_eq!(stream.consume(), Some(5));
+        assert!(stream.is_done());
+    }
+}
+
+#[test]
 fn connective_accumulator_carries_one_partial_result() {
     let mut input = Accumulator::new(vec![4u64, 5]);
     assert_eq!(input.accumulated_len(), 0);
@@ -687,6 +784,15 @@ fn connective_buffer_is_bounded_fifo() {
     assert!(distinct.contains(7));
     assert!(distinct.remove(7));
     assert!(!distinct.contains(7));
+
+    let mut ordered = Buffer::<u64>::new(4);
+    assert!(ordered.push_unique(1));
+    assert!(ordered.push_unique(2));
+    assert!(ordered.push_unique(3));
+    assert!(ordered.remove(2));
+    assert_eq!(ordered.pop(), Some(1));
+    assert_eq!(ordered.pop(), Some(3));
+    assert_eq!(ordered.pop(), None);
 }
 
 #[test]
@@ -695,11 +801,14 @@ fn connective_counter_marker_projection_and_order_are_reusable() {
     assert!(!counter.try_decrement());
     assert!(counter.try_increment());
     assert_eq!(counter.value(), 1);
+    assert!(counter.try_decrement());
+    assert_eq!(counter.value(), 0);
 
     let mut marker = Marker::new(false);
     assert!(marker.set());
     assert!(!marker.set());
     assert!(marker.clear());
+    assert!(!marker.clear());
 
     assert!(projection_consistent(true, true));
     assert!(!projection_consistent(true, false));

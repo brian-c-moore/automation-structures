@@ -54,6 +54,39 @@ pub proof fn cost_sum_push(entries: Seq<(u64, u64)>, key: u64, cost: u64)
     assert(entries.push((key, cost))[entries.len() as int].1 == cost);
 }
 
+/// Exact accepted-entry sequence after folding the first `n` requests.
+pub open spec fn capture_entries_to(
+    capacity: u64,
+    num_nodes: u64,
+    nodes: Seq<u64>,
+    costs: Seq<u64>,
+    n: int,
+) -> Seq<(u64, u64)>
+    decreases n,
+{
+    if n <= 0 || n > nodes.len() || n > costs.len() {
+        Seq::empty()
+    } else {
+        let before = capture_entries_to(capacity, num_nodes, nodes, costs, n - 1);
+        let node = nodes[n - 1];
+        let cost = costs[n - 1];
+        if node < num_nodes
+            && cost >= 1
+            && !crate::primitives::resource_registry::has_key(
+                before,
+                before.len() as int,
+                node,
+            )
+            && cost_sum_to(before, before.len() as int) + cost as int
+                <= capacity as int
+        {
+            before.push((node, cost))
+        } else {
+            before
+        }
+    }
+}
+
 /// An allocation snapshot: the accepted node set plus the running cost / budget
 /// figures, over a node universe `0..num_nodes` bounded by `capacity`.
 pub struct AllocationSnapshot {
@@ -117,6 +150,8 @@ impl AllocationSnapshot {
             s.registry.entries@.len() == 0,
             s.budget.capacity == capacity,
             s.budget.allocated == 0,
+            s.budget.reserved == 0,
+            s.budget.pending_eviction == 0,
             s.type_invariant(),
             s.budget_consistency(),
     {
@@ -193,6 +228,15 @@ pub fn capture(capacity: u64, num_nodes: u64, nodes: &[u64], costs: &[u64])
     ensures
         s.budget.capacity == capacity,
         s.num_nodes == num_nodes,
+        s.registry.entries@ == capture_entries_to(
+            capacity,
+            num_nodes,
+            nodes@,
+            costs@,
+            nodes@.len() as int,
+        ),
+        s.budget.allocated as int
+            == cost_sum_to(s.registry.entries@, s.registry.entries@.len() as int),
         s.type_invariant(),
         s.budget_consistency(),
 {
@@ -206,6 +250,13 @@ pub fn capture(capacity: u64, num_nodes: u64, nodes: &[u64], costs: &[u64])
             nodes@.len() == costs@.len(),
             s.budget.capacity == capacity,
             s.num_nodes == num_nodes,
+            s.registry.entries@ == capture_entries_to(
+                capacity,
+                num_nodes,
+                nodes@,
+                costs@,
+                i as int,
+            ),
             s.type_invariant(),
             s.budget_consistency(),
         decreases n_reqs - i,
@@ -216,6 +267,13 @@ pub fn capture(capacity: u64, num_nodes: u64, nodes: &[u64], costs: &[u64])
         if n < num_nodes && 1 <= c && c <= available && !s.contains_exec(n) {
             s.accept_node(n, c);
         }
+        assert(s.registry.entries@ == capture_entries_to(
+            capacity,
+            num_nodes,
+            nodes@,
+            costs@,
+            i as int + 1,
+        ));
         i = i + 1;
     }
     s

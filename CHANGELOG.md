@@ -2,6 +2,22 @@
 
 All notable changes to this crate are documented here.
 
+## 0.2.1 - 2026-08-31
+
+- Strengthens proof-facing constructors, observers, transitions, and batch operations from
+  invariant-only results to exact input/state effects, rejection stutter, and untouched-owner
+  frames.
+- Makes `Buffer` removal and `ResourceRegistry` replacement/removal preserve deterministic
+  survivor order and exposes that order in their Verus contracts.
+- Binds allocation capture, absent binary-search results, union results, traversal frontiers,
+  signal history, soft-selection batch construction, and governed-commit recovery steps to their
+  complete executable outcomes.
+- Adds adversarial controls for order corruption, incomplete folds, false success, wrong-owner
+  updates, history replacement, constructor substitution, tie-breaking drift, and crash/restart
+  durable-state mutation.
+- Expands checked-facade tests across sampler admission/rejection, traversal skipping, four-stage
+  streaming, deterministic registry/buffer ordering, constructor origins, and owner frames.
+
 ## 0.2.0 - 2026-08-31
 
 - Replaces the invariant-breaking root `Buffer`, `Counter`, and `Marker` proof carriers with

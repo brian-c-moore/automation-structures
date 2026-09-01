@@ -89,6 +89,33 @@ impl Sampler {
         item < self.actuation.effects.len() && self.actuation.effects@[item as int] is Some
     }
 
+    /// Default the absent ActuationPass allocation to zero support weight.
+    pub open spec fn support_weight(&self, item: usize) -> u64 {
+        if item < self.actuation.allocation.len()
+            && self.actuation.allocation@[item as int] is Some
+        {
+            self.actuation.allocation@[item as int]->Some_0
+        } else {
+            0
+        }
+    }
+
+    /// Exact admission predicate for a caller-proposed weighted draw.
+    pub open spec fn weighted_draw_enabled(&self, item: usize, entropy: u64) -> bool {
+        &&& item < self.actuation.num_seats
+        &&& self.budget.allocated < self.budget.capacity
+        &&& entropy < self.support_weight(item)
+        &&& !self.contains(item)
+    }
+
+    /// Exact admission predicate for a caller-proposed uniform draw.
+    pub open spec fn uniform_draw_enabled(&self, item: usize) -> bool {
+        &&& item < self.actuation.num_seats
+        &&& self.budget.allocated < self.budget.capacity
+        &&& self.support_weight(item) > 0
+        &&& !self.contains(item)
+    }
+
     /// Every live ActuationPass allocation has positive support weight.
     pub open spec fn support_domain(&self) -> bool {
         forall|i: int| 0 <= i < self.actuation.allocation.len()
@@ -132,6 +159,11 @@ impl Sampler {
             sampler.actuation.num_seats == distribution@.len(),
             sampler.budget.capacity == sample_size as u64,
             sampler.budget.allocated == 0,
+            sampler.budget.reserved == 0,
+            sampler.budget.pending_eviction == 0,
+            !sampler.actuation.complete,
+            forall|i: int| 0 <= i < distribution@.len() ==>
+                #[trigger] sampler.actuation.effects@[i] is None,
             sampler.inv(),
             forall|i: int| 0 <= i < distribution@.len() ==> {
                 let allocation = #[trigger] sampler.actuation.allocation@[i];
@@ -177,10 +209,7 @@ impl Sampler {
     /// Read one support weight, mapping ActuationPass's absent allocation to zero.
     pub fn weight(&self, item: usize) -> (weight: u64)
         requires self.inv(), item < self.actuation.num_seats,
-        ensures
-            weight == if self.actuation.allocation@[item as int] is Some {
-                self.actuation.allocation@[item as int]->Some_0
-            } else { 0 },
+        ensures weight == self.support_weight(item),
     {
         self.actuation.allocation[item].unwrap_or(0)
     }
@@ -237,10 +266,15 @@ impl Sampler {
             final(self).inv(),
             accepted == (item < old(self).actuation.num_seats && !old(self).contains(item)),
             final(self).budget == old(self).budget,
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
+            final(self).actuation.complete == old(self).actuation.complete,
             final(self).actuation.effects@ == old(self).actuation.effects@,
-            accepted && old(self).actuation.allocation@[item as int] is Some
-                ==> final(self).actuation.allocation@
-                    == old(self).actuation.allocation@.update(item as int, None),
+            accepted ==> final(self).actuation.allocation@
+                == if old(self).actuation.allocation@[item as int] is Some {
+                    old(self).actuation.allocation@.update(item as int, None)
+                } else {
+                    old(self).actuation.allocation@
+                },
             !accepted ==> final(self).actuation.allocation@ == old(self).actuation.allocation@,
     {
         if item >= self.actuation.num_seats || self.contains_exec(item) {
@@ -255,7 +289,27 @@ impl Sampler {
     /// Weighted rejection over caller-supplied proposal and entropy.
     pub fn draw_weighted(&mut self, item: usize, entropy: u64) -> (accepted: bool)
         requires old(self).inv(), item < old(self).actuation.num_seats,
-        ensures final(self).inv(),
+        ensures
+            final(self).inv(),
+            accepted == old(self).weighted_draw_enabled(item, entropy),
+            final(self).budget.capacity == old(self).budget.capacity,
+            final(self).budget.reserved == old(self).budget.reserved,
+            final(self).budget.pending_eviction == old(self).budget.pending_eviction,
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
+            final(self).actuation.allocation@ == old(self).actuation.allocation@,
+            final(self).actuation.complete == old(self).actuation.complete,
+            accepted ==> {
+                &&& final(self).budget.allocated == old(self).budget.allocated + 1
+                &&& final(self).actuation.effects@
+                    == old(self).actuation.effects@.update(
+                        item as int,
+                        old(self).actuation.allocation@[item as int],
+                    )
+            },
+            !accepted ==> {
+                &&& final(self).budget.allocated == old(self).budget.allocated
+                &&& final(self).actuation.effects@ == old(self).actuation.effects@
+            },
     {
         if self.budget.allocated >= self.budget.capacity {
             return false;
@@ -271,7 +325,27 @@ impl Sampler {
     /// Uniform-support admission over a caller-supplied proposal.
     pub fn draw_uniform(&mut self, item: usize) -> (accepted: bool)
         requires old(self).inv(), item < old(self).actuation.num_seats,
-        ensures final(self).inv(),
+        ensures
+            final(self).inv(),
+            accepted == old(self).uniform_draw_enabled(item),
+            final(self).budget.capacity == old(self).budget.capacity,
+            final(self).budget.reserved == old(self).budget.reserved,
+            final(self).budget.pending_eviction == old(self).budget.pending_eviction,
+            final(self).actuation.num_seats == old(self).actuation.num_seats,
+            final(self).actuation.allocation@ == old(self).actuation.allocation@,
+            final(self).actuation.complete == old(self).actuation.complete,
+            accepted ==> {
+                &&& final(self).budget.allocated == old(self).budget.allocated + 1
+                &&& final(self).actuation.effects@
+                    == old(self).actuation.effects@.update(
+                        item as int,
+                        old(self).actuation.allocation@[item as int],
+                    )
+            },
+            !accepted ==> {
+                &&& final(self).budget.allocated == old(self).budget.allocated
+                &&& final(self).actuation.effects@ == old(self).actuation.effects@
+            },
     {
         if self.budget.allocated >= self.budget.capacity {
             return false;

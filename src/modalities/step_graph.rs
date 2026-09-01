@@ -93,7 +93,7 @@ pub struct StepGraph {
 }
 
 impl StepGraph {
-    /// Whether every dependency edge names two valid, distinct nodes.
+    /// Whether every dependency edge names two valid nodes.
     pub open spec fn edges_valid(edges: Seq<(usize, usize)>, num_nodes: usize) -> bool {
         forall|i: int| 0 <= i < edges.len() ==>
             #[trigger] edges[i].0 < num_nodes && edges[i].1 < num_nodes

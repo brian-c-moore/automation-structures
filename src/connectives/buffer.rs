@@ -91,6 +91,40 @@ pub proof fn indexed_value_contained<T>(values: Seq<T>, index: int)
     assert(0 <= index < values.len() && values[index] == values[index]);
 }
 
+/// Removing one position from a distinct sequence removes exactly that value.
+pub proof fn contains_remove_distinct<T>(values: Seq<T>, removed: int, value: T)
+    requires
+        all_distinct(values),
+        0 <= removed < values.len(),
+    ensures
+        contains_value(values.remove(removed), value)
+            == (contains_value(values, value) && value != values[removed]),
+{
+    values.remove_ensures(removed);
+    let reduced = values.remove(removed);
+    if contains_value(reduced, value) {
+        let index = choose|index: int|
+            0 <= index < reduced.len() && reduced[index] == value;
+        let old_index = if index < removed { index } else { index + 1 };
+        assert(0 <= old_index < values.len());
+        assert(old_index != removed);
+        assert(reduced[index] == values[old_index]);
+        assert(contains_value(values, value));
+        if value == values[removed] {
+            assert(values[old_index] == values[removed]);
+            assert(false);
+        }
+    }
+    if contains_value(values, value) && value != values[removed] {
+        let old_index = choose|index: int|
+            0 <= index < values.len() && values[index] == value;
+        assert(old_index != removed);
+        let index = if old_index < removed { old_index } else { old_index - 1 };
+        assert(0 <= index < reduced.len());
+        assert(reduced[index] == values[old_index]);
+    }
+}
+
 /// A bounded FIFO connective.
 pub struct Buffer<T> {
     /// Maximum number of retained values.
@@ -153,6 +187,8 @@ impl<T> Buffer<T> {
         ensures
             final(self).well_formed(),
             final(self).capacity == old(self).capacity,
+            old(self).values@.len() < old(self).capacity ==> result is Ok,
+            old(self).values@.len() >= old(self).capacity ==> result == Err(value),
             old(self).values@.len() < old(self).capacity ==>
                 final(self).values@ == old(self).values@.push(value),
             old(self).values@.len() >= old(self).capacity ==>
@@ -169,6 +205,8 @@ impl<T> Buffer<T> {
         ensures
             final(self).well_formed(),
             final(self).capacity == old(self).capacity,
+            old(self).values@.len() == 0 ==> value is None,
+            old(self).values@.len() > 0 ==> value == Some(old(self).values@[0]),
             old(self).values@.len() == 0 ==> final(self).values@ == old(self).values@,
             old(self).values@.len() > 0 ==>
                 final(self).values@ == old(self).values@.skip(1),
@@ -205,73 +243,6 @@ impl<T: ValueEq + Copy> Buffer<T> {
         ensures present == contains_value(self.values@, value),
     {
         retained_contains(&self.values, value)
-    }
-
-    fn without_value(values: &Vec<T>, value: T) -> (out: Vec<T>)
-        requires all_distinct(values@),
-        ensures
-            all_distinct(out@),
-            out@.len() <= values@.len(),
-            forall|candidate: T| #[trigger] contains_value(out@, candidate)
-                == (contains_value(values@, candidate) && candidate != value),
-    {
-        let mut out = Vec::new();
-        let mut index: usize = 0;
-        while index < values.len()
-            invariant
-                index <= values.len(),
-                all_distinct(values@),
-                all_distinct(out@),
-                out@.len() <= index,
-                forall|candidate: T| #[trigger] contains_value(out@, candidate)
-                    == (contains_up_to(values@, index as int, candidate)
-                        && candidate != value),
-            decreases values.len() - index,
-        {
-            let current = values[index];
-            let ghost before = out@;
-            if !current.value_eq(&value) {
-                assert(!contains_value(before, current)) by {
-                    if contains_value(before, current) {
-                        assert(contains_up_to(values@, index as int, current));
-                        let prior = choose|prior: int|
-                            0 <= prior < index as int
-                                && prior < values@.len()
-                                && values@[prior] == current;
-                        assert(values@[prior] != values@[index as int]);
-                    }
-                }
-                out.push(current);
-                assert(all_distinct(out@)) by {
-                    assert forall|left: int, right: int|
-                        0 <= left < out@.len()
-                            && 0 <= right < out@.len()
-                            && left != right
-                        implies #[trigger] out@[left] != #[trigger] out@[right] by {
-                        if left < before.len() && right < before.len() {
-                        } else if left == before.len() && right < before.len() {
-                            assert(out@[right] == before[right]);
-                            assert(contains_value(before, before[right]));
-                        } else if right == before.len() && left < before.len() {
-                            assert(out@[left] == before[left]);
-                            assert(contains_value(before, before[left]));
-                        }
-                    }
-                }
-            }
-            assert forall|candidate: T| #[trigger] contains_value(out@, candidate)
-                == (contains_up_to(values@, index as int + 1, candidate)
-                    && candidate != value) by {
-                lemma_contains_extend(values@, index as int, candidate);
-                if current != value {
-                    if out@ != before {
-                        lemma_push_contains(before, current, candidate);
-                    }
-                }
-            }
-            index = index + 1;
-        }
-        out
     }
 
     /// Append a value only when it is absent and capacity remains.
@@ -324,14 +295,88 @@ impl<T: ValueEq + Copy> Buffer<T> {
             all_distinct(final(self).values@),
             final(self).capacity == old(self).capacity,
             removed == contains_value(old(self).values@, value),
+            removed ==> exists|index: int|
+                0 <= index < old(self).values@.len()
+                    && old(self).values@[index] == value
+                    && final(self).values@ == old(self).values@.remove(index),
+            !removed ==> final(self).values@ == old(self).values@,
             forall|candidate: T| #[trigger] contains_value(final(self).values@, candidate)
                 == (contains_value(old(self).values@, candidate) && candidate != value),
     {
-        let removed = self.contains(value);
-        if removed {
-            self.values = Self::without_value(&self.values, value);
+        let ghost before = self.values@;
+        assert(before == old(self).values@);
+        assert(buffer_bounded(before, self.capacity as nat)) by {
+            reveal(Buffer::well_formed);
         }
-        removed
+        let mut index: usize = 0;
+        while index < self.values.len()
+            invariant
+                index <= self.values.len(),
+                self.values@ == before,
+                before == old(self).values@,
+                self.capacity == old(self).capacity,
+                buffer_bounded(before, self.capacity as nat),
+                all_distinct(before),
+                forall|prior: int| 0 <= prior < index ==>
+                    before[prior] != value,
+            decreases self.values.len() - index,
+        {
+            if self.values[index].value_eq(&value) {
+                proof {
+                    assert(before[index as int] == value);
+                    indexed_value_contained(before, index as int);
+                    assert(contains_value(before, value));
+                }
+                let _removed_value = self.values.remove(index);
+                assert(_removed_value == value);
+                proof { before.remove_ensures(index as int); }
+                assert(self.values@ == before.remove(index as int));
+                assert(self.values@.len() < before.len());
+                assert(self.well_formed()) by {
+                    reveal(Buffer::well_formed);
+                    reveal(buffer_bounded);
+                }
+                assert(all_distinct(self.values@)) by {
+                    before.remove_ensures(index as int);
+                    assert forall|left: int, right: int|
+                        0 <= left < self.values@.len()
+                            && 0 <= right < self.values@.len()
+                            && left != right
+                        implies #[trigger] self.values@[left] != #[trigger] self.values@[right] by {
+                        let old_left = if left < index { left } else { left + 1 };
+                        let old_right = if right < index { right } else { right + 1 };
+                        assert(0 <= old_left < before.len());
+                        assert(0 <= old_right < before.len());
+                        assert(old_left != old_right);
+                        assert(self.values@[left] == before[old_left]);
+                        assert(self.values@[right] == before[old_right]);
+                    }
+                }
+                assert forall|candidate: T|
+                    #[trigger] contains_value(self.values@, candidate)
+                        == (contains_value(before, candidate) && candidate != value) by {
+                    contains_remove_distinct(before, index as int, candidate);
+                    assert(before[index as int] == value);
+                }
+                assert(exists|old_index: int|
+                    0 <= old_index < before.len()
+                        && before[old_index] == value
+                        && self.values@ == before.remove(old_index)) by {
+                    assert(0 <= index as int);
+                    assert((index as int) < before.len());
+                }
+                return true;
+            }
+            index = index + 1;
+        }
+        assert(!contains_value(before, value)) by {
+            if contains_value(before, value) {
+                let present = choose|present: int|
+                    0 <= present < before.len() && before[present] == value;
+                assert(false);
+            }
+        }
+        false
     }
 }
 

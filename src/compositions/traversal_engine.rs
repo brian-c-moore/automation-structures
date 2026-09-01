@@ -18,6 +18,18 @@ verus! {
 /// The fixed cost used by the retained TraversalEngine model.
 pub const NODE_COST: u64 = 2;
 
+/// Number of set markers in the retained prefix.
+pub open spec fn marked_count(markers: Seq<Marker>, n: int) -> int
+    recommends 0 <= n <= markers.len(),
+    decreases n,
+{
+    if n <= 0 {
+        0
+    } else {
+        marked_count(markers, n - 1) + if markers[n - 1].marked { 1int } else { 0int }
+    }
+}
+
 /// Budgeted traversal assembled from reusable structures and connective owners.
 pub struct TraversalEngine {
     /// Number of nodes in the fixed universe.
@@ -164,7 +176,9 @@ impl TraversalEngine {
             engine.budget.capacity == max_budget,
             engine.budget.allocated == 0,
             engine.queue.values@ == seq![root],
+            engine.accepted.original@.len() == 0,
             engine.accepted.accumulated@.len() == 0,
+            engine.accepted.pending@.len() == 0,
             forall|node: int| 0 <= node < engine.visited@.len() ==>
                 !#[trigger] engine.visited@[node].marked,
     {
@@ -324,11 +338,16 @@ impl TraversalEngine {
     }
 
     /// Number of set visited markers, derived without a duplicate counter.
-    pub fn visited_count(&self) -> (count: usize) {
+    pub fn visited_count(&self) -> (count: usize)
+        ensures count as int == marked_count(self.visited@, self.visited@.len() as int),
+    {
         let mut count: usize = 0;
         let mut index: usize = 0;
         while index < self.visited.len()
-            invariant index <= self.visited.len(), count <= index,
+            invariant
+                index <= self.visited.len(),
+                count <= index,
+                count as int == marked_count(self.visited@, index as int),
             decreases self.visited.len() - index,
         {
             if self.visited[index].is_marked() {
@@ -359,6 +378,14 @@ impl TraversalEngine {
         ensures
             final(queue).well_formed(),
             final(queue).capacity == old(queue).capacity,
+            final(queue).values@.len() == num_nodes - 1,
+            forall|index: int| 0 <= index < final(queue).values@.len() ==>
+                #[trigger] final(queue).values@[index]
+                    == if index < root as int {
+                        index as usize
+                    } else {
+                        (index + 1) as usize
+                    },
             crate::connectives::buffer::all_distinct(final(queue).values@),
             Self::all_valid(final(queue).values@, num_nodes),
             forall|candidate: usize|
@@ -382,7 +409,15 @@ impl TraversalEngine {
                 queue.capacity == num_nodes,
                 crate::connectives::buffer::all_distinct(queue.values@),
                 Self::all_valid(queue.values@, num_nodes),
-                queue.values@.len() <= target,
+                queue.values@.len()
+                    == target - if root < target { 1usize } else { 0usize },
+                forall|index: int| 0 <= index < queue.values@.len() ==>
+                    #[trigger] queue.values@[index]
+                        == if index < root as int {
+                            index as usize
+                        } else {
+                            (index + 1) as usize
+                        },
                 forall|candidate: usize|
                     #[trigger] crate::connectives::buffer::contains_value(
                         queue.values@,
@@ -408,6 +443,25 @@ impl TraversalEngine {
                             assert(index < before_queue.len());
                             assert(queue.values@[index] == before_queue[index]);
                         }
+                    }
+                }
+            }
+            assert(queue.values@.len()
+                == (target + 1) - if root < target + 1 { 1usize } else { 0usize });
+            assert forall|index: int| 0 <= index < queue.values@.len() implies
+                #[trigger] queue.values@[index]
+                    == if index < root as int {
+                        index as usize
+                    } else {
+                        (index + 1) as usize
+                    } by {
+                if edge && index == before_queue.len() {
+                    assert(queue.values@[index] == target);
+                    if target < root {
+                        assert(index == target as int);
+                    } else {
+                        assert(target > root);
+                        assert(index + 1 == target as int);
                     }
                 }
             }
@@ -448,7 +502,7 @@ impl TraversalEngine {
             final(self).inv(),
             final(self).num_nodes == old(self).num_nodes,
             final(self).root == old(self).root,
-            final(self).graph.registry.entries@ == old(self).graph.registry.entries@,
+            final(self).graph == old(self).graph,
             final(self).budget.capacity == old(self).budget.capacity,
             final(self).budget.reserved == old(self).budget.reserved,
             final(self).budget.pending_eviction == old(self).budget.pending_eviction,
@@ -459,6 +513,19 @@ impl TraversalEngine {
                 } else {
                     old(self).budget.allocated as int
                 },
+            final(self).accepted.original@ == if old(self).budget.allocated as int
+                    + NODE_COST as int <= old(self).budget.capacity as int {
+                old(self).accepted.original@.push(node)
+            } else {
+                old(self).accepted.original@
+            },
+            final(self).accepted.accumulated@ == if old(self).budget.allocated as int
+                    + NODE_COST as int <= old(self).budget.capacity as int {
+                old(self).accepted.accumulated@.push(node)
+            } else {
+                old(self).accepted.accumulated@
+            },
+            final(self).accepted.pending@ == old(self).accepted.pending@,
             forall|candidate: usize|
                 candidate < old(self).num_nodes ==>
                     #[trigger] final(self).visited_contains_spec(candidate)
@@ -480,6 +547,26 @@ impl TraversalEngine {
                     } else {
                         old(self).queue_contains_spec(candidate) && candidate != node
                     },
+            (old(self).budget.allocated as int + NODE_COST as int
+                    <= old(self).budget.capacity as int
+                && node == old(self).root) ==> {
+                &&& final(self).queue.values@.len() == old(self).num_nodes - 1
+                &&& forall|index: int| 0 <= index < final(self).queue.values@.len() ==>
+                    #[trigger] final(self).queue.values@[index]
+                        == if index < old(self).root as int {
+                            index as usize
+                        } else {
+                            (index + 1) as usize
+                        }
+            },
+            (!(old(self).budget.allocated as int + NODE_COST as int
+                    <= old(self).budget.capacity as int
+                && node == old(self).root)) ==> exists|index: int|
+                    0 <= index < old(self).queue.values@.len()
+                        && old(self).queue.values@[index] == node
+                        && final(self).queue.values@
+                            == old(self).queue.values@.remove(index),
+            final(self).queue.capacity == old(self).queue.capacity,
     {
         proof { self.expose(); }
         let num_nodes = self.num_nodes;
@@ -727,10 +814,16 @@ impl TraversalEngine {
             final(self).inv(),
             final(self).num_nodes == old(self).num_nodes,
             final(self).root == old(self).root,
-            final(self).graph.registry.entries@ == old(self).graph.registry.entries@,
+            final(self).graph == old(self).graph,
             final(self).budget == old(self).budget,
             final(self).visited@ == old(self).visited@,
-            final(self).accepted.accumulated@ == old(self).accepted.accumulated@,
+            final(self).accepted == old(self).accepted,
+            final(self).queue.capacity == old(self).queue.capacity,
+            exists|index: int|
+                0 <= index < old(self).queue.values@.len()
+                    && old(self).queue.values@[index] == node
+                    && final(self).queue.values@
+                        == old(self).queue.values@.remove(index),
             forall|candidate: usize| #[trigger] final(self).queue_contains_spec(candidate)
                 == (old(self).queue_contains_spec(candidate) && candidate != node),
     {
