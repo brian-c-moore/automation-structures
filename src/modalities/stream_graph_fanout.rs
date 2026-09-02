@@ -58,7 +58,7 @@ impl StreamGraphFanout {
             == self.right_queue.values@.len() + self.right_emitted.value_spec()
     }
 
-    /// Whether all fan-out stream obligations hold.
+    /// Whether all fan-out stream contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant()
             && self.backpressure_correct()

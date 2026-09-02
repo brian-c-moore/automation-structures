@@ -109,6 +109,12 @@ impl TraversalEngine {
         &&& self.budget.pending_eviction == 0
     }
 
+    /// Whether committed traversal cost exactly accounts for accepted nodes.
+    pub open spec fn accepted_cost_accounting(&self) -> bool {
+        self.budget.allocated as int
+            == self.accepted.accumulated@.len() * NODE_COST as int
+    }
+
     /// Whether every component owner and retained domain value is well formed.
     pub open spec fn type_invariant(&self) -> bool {
         &&& self.root < self.num_nodes
@@ -127,10 +133,11 @@ impl TraversalEngine {
         &&& crate::connectives::buffer::all_distinct(self.accepted.accumulated@)
     }
 
-    /// Whether all component and cross-component traversal obligations hold.
+    /// Whether all component and cross-component traversal contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         &&& self.type_invariant()
         &&& self.budget_invariant()
+        &&& self.accepted_cost_accounting()
         &&& self.accepted_subset_visited()
         &&& self.root_frontier_gate()
     }
@@ -141,6 +148,7 @@ impl TraversalEngine {
         ensures
             self.type_invariant(),
             self.budget_invariant(),
+            self.accepted_cost_accounting(),
             self.accepted_subset_visited(),
             self.root_frontier_gate(),
             self.root < self.num_nodes,
@@ -162,6 +170,7 @@ impl TraversalEngine {
     {
         reveal(TraversalEngine::inv);
         reveal(TraversalEngine::type_invariant);
+        reveal(TraversalEngine::accepted_cost_accounting);
         reveal(TraversalEngine::accepted_subset_visited);
         reveal(TraversalEngine::root_frontier_gate);
     }
@@ -281,6 +290,7 @@ impl TraversalEngine {
             }
         }
         assert(engine.accepted_subset_visited());
+        assert(engine.accepted_cost_accounting());
         assert(engine.root_frontier_gate());
         engine
     }
@@ -799,6 +809,9 @@ impl TraversalEngine {
         assert(self.budget_invariant()) by {
             reveal(TraversalEngine::budget_invariant);
         }
+        assert(self.accepted_cost_accounting()) by {
+            reveal(TraversalEngine::accepted_cost_accounting);
+        }
         assert(self.inv()) by {
             reveal(TraversalEngine::inv);
         }
@@ -889,6 +902,7 @@ impl TraversalEngine {
             reveal(TraversalEngine::type_invariant);
         }
         assert(self.budget_invariant());
+        assert(self.accepted_cost_accounting());
         assert(self.accepted.accumulated@ == old_accepted);
         assert(self.visited@ == old_visited);
         assert(self.accepted_subset_visited()) by {

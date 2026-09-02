@@ -9,7 +9,7 @@
 // `allocate`, `deallocate`, `actuate`, and `finish` implement the four
 // non-stuttering TLA+ actions. Their `requires` clauses are the action guards;
 // their postconditions name the exact commit and re-establish the specified
-// obligations: EffectFidelity, ActuationScope, and PassCompleteness.
+// contract clauses: EffectFidelity, ActuationScope, and PassCompleteness.
 //
 // The executable `can_*` methods expose admission/rejection without weakening
 // the transition contracts. Rust's exclusive mutable borrow is the sequential
@@ -25,8 +25,9 @@ pub struct ActuationPass {
     pub num_seats: usize,
     /// Live allocation record. `Some(r)` is resource r; `None` is TLA+ NULL.
     pub allocation: Vec<Option<u64>>,
-    /// Resource-valued effect record. `Some(r)` means the operation was
-    /// applied to resource r; `None` means the seat has not been actuated.
+    /// Resource-valued effect record. `Some(r)` means this carrier recorded the
+    /// operation for resource r; `None` means the seat has not been actuated.
+    /// External side-effect execution and observation remain caller-owned.
     pub effects: Vec<Option<u64>>,
     /// The pass has committed its closure transition.
     pub complete: bool,
@@ -67,12 +68,12 @@ impl ActuationPass {
                 ==> (self.allocation@[i] is Some ==> self.effects@[i] is Some)
     }
 
-    /// PassCompleteness: a completed pass has applied every currently allocated seat.
+    /// PassCompleteness: a completed pass has recorded every currently allocated seat.
     pub open spec fn pass_completeness(&self) -> bool {
         self.complete ==> self.ready_to_finish()
     }
 
-    /// Whether all allocation-to-effect lifecycle obligations hold.
+    /// Whether all recorded allocation-to-effect lifecycle contract clauses hold.
     pub open spec fn invariant(&self) -> bool {
         &&& self.type_invariant()
         &&& self.effect_fidelity()

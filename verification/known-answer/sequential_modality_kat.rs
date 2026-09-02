@@ -46,7 +46,7 @@ fn main() {
     ok &= check("second BeginStep admitted", s.begin_step(), true);
     ok &= check("second completion admitted", s.complete_step(3), true);
     ok &= check("terminal cursor bounded", s.pc, 2);
-    ok &= check("history tracks total order", s.history.clone(), vec![2, 3]);
+    ok &= check("history agrees with execution position", s.history.clone(), vec![2, 3]);
     ok &= check("BeginStep rejected at step bound", s.begin_step(), false);
     let before = (s.pc, s.value, s.active, s.history.clone());
     ok &= check("terminal stutter enabled", s.done_stuttering(), true);

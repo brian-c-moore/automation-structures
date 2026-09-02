@@ -2,7 +2,8 @@
 //!
 //! ActuationPass owns the live support and selected-effect projection. Budget owns the sample
 //! ceiling. Sampler adds only the atomic coupling between an actuation and one Budget allocation,
-//! plus caller-supplied proposal admission rules.
+//! plus caller-supplied proposal admission rules. The carrier proves bounded, support-respecting,
+//! without-replacement selection; it makes no claim about the caller's randomness quality.
 
 use crate::primitives::actuation_pass::ActuationPass;
 use crate::primitives::budget::Budget;

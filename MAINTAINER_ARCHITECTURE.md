@@ -5,9 +5,33 @@ describes reusable capabilities. Applications that use the crate choose their ow
 
 ## Ownership model
 
+Ownership is always stated relative to a frame: the trusted boundary, abstraction level, state,
+transition, and property being discussed. The same component may own a primitive transition in one
+frame, act as a delegate inside a larger protocol in another, and provide only evidence to the
+principal that owns a deployment obligation.
+
+These terms are distinct:
+
+| Term | Meaning in this crate |
+| --- | --- |
+| Frame | The perspective that fixes the trusted boundary, abstraction level, state, transitions, assumptions, and property under discussion |
+| Contract clause | A predicate or transition consequence proved about a carrier under stated preconditions; its form is discovered from the structure rather than imposed uniformly |
+| State owner | The single Rust value or protocol that has authority to change a particular invariant-bearing state within the frame |
+| Obligation owner | The single principal or named protocol that has the authority, control, and evidence needed to be accountable for one framed obligation |
+| Delegation | Authorization for another component or principal to perform work without silently creating a second obligation owner; it introduces a trust boundary |
+| Assurance | Evidence or a bounded statement supplied across a trust boundary by a delegate, custodian, checker, or other non-owner |
+| Guarantee | A bounded commitment issued by the obligation owner from the owner's authority, assumptions, controls, and evidence |
+| Ownership transfer | An explicit change of obligation owner; after transfer, the new owner can issue the guarantee and the former owner can supply assurances about its part |
+
+“Shared ownership” is therefore not used for one obligation. Collaborative systems either divide
+the system into separately framed obligations with one owner each, or retain no principal with the
+authority needed to issue the end-to-end guarantee. Composition does not erase those boundaries.
+
 Each catalog structure, connective state type, named composition, and execution modality has one
-claim-bearing Rust owner. Checked public types contain that owner in an `inner` field and delegate
-transitions to it. They do not maintain a parallel state machine.
+state-bearing Rust owner. Checked public types contain that owner in an `inner` field and call its
+transitions. They do not maintain a parallel state machine. This implementation ownership supports
+proof of the carrier contract; it does not automatically make the crate, a wrapper, or a delegate
+the accountable owner of a deployment obligation.
 
 A projection derives an observation from an owner without storing a second copy. Configuration,
 domain policy, and strategy parameters may remain beside the owners they configure. Intrinsic
@@ -21,6 +45,24 @@ Connective forms have two representations:
 
 When a composition needs concrete connective state, it stores and calls that state owner. When it
 needs only a relation, its contract calls the shared relation function.
+
+## Check and act
+
+A check observes a predicate at a particular state and time. An act changes state. A checker that
+does not own the act can provide an assurance about what it observed, but cannot by that observation
+alone guarantee the later effect. The actor can guarantee only the transition consequences inside
+the frame it owns.
+
+Check/act separation is safe only when the owner evaluates the enabling condition and commits the
+corresponding transition within one trusted boundary, or when a protocol binds the observation to
+the act with an explicit freshness, identity, authorization, and atomicity mechanism. Otherwise the
+gap is a trust and time-of-check/time-of-use boundary. The caller must evaluate what can change in
+that gap, who owns it, which evidence crosses the boundary, and which residual remains outside the
+carrier contract.
+
+This is why checked methods in this crate fuse enabledness and mutation where the contract requires
+it. A returned `bool` or `Result` reports that bounded transition outcome. It is not a guarantee that
+an external delegate performed a later side effect.
 
 ## Primitive owners
 
@@ -84,7 +126,7 @@ The composition owners are the files under `src/compositions/`. The checked wrap
 
 ## Adding or changing implementation
 
-Before adding claim-bearing state or a transition:
+Before adding state-bearing state or a transition:
 
 1. Identify its existing owner in this document and delegate to that owner.
 2. If no owner supplies the required role, record the missing role before writing implementation
@@ -96,7 +138,7 @@ Before adding claim-bearing state or a transition:
    publication consumer boundary.
 
 An optimized or fused representation is a separate refinement task. It needs an explicit mapping
-to the structure owner and evidence that every claimed transition and obligation is preserved.
+to the structure owner and evidence that every claimed transition and contract clause is preserved.
 
 ## Release gate
 

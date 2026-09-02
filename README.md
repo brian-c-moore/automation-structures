@@ -11,9 +11,11 @@ systems. It supplies checked state machines for admission, bounded resources, tr
 selection, propagation, coordination, and execution flow so applications can assemble these roles
 instead of implementing them repeatedly.
 
-A structure owns its state, admissible transitions, and preserved obligations. Applications supply
-the identifiers, values, scores, costs, policies, and effects that give those transitions domain
-meaning.
+A structure is the sole Rust owner of its invariant-bearing state and admissible transitions.
+Its contract states the consequences that follow when callers satisfy the documented assumptions.
+Applications supply the identifiers, values, scores, costs, policies, effects, and operating
+boundary that give those consequences domain meaning. State ownership inside this crate is not, by
+itself, deployment accountability or authority to guarantee an application-level obligation.
 
 ## Install
 
@@ -72,24 +74,21 @@ compose the root types directly.
 
 ### Primitives
 
-| Need | Type | Structural guarantee |
+| Need | Type | Bounded contract consequence |
 | --- | --- | --- |
 | Own finite capacity through allocation, reservation, and eviction | `Budget` | Every capacity unit has one accounted lifecycle |
 | Map unique resource identifiers to values | `ResourceRegistry` | At most one live value per key |
-| Retain an append-only operation chain | `AuditSink` | Every entry names its predecessor and derived chain value |
+| Retain an append-only operation chain | `AuditSink` | Every entry names its predecessor and recomputed chain value; collision resistance, durable custody, and tamper detection are outside this carrier |
 | Run snapshot-local graph updates | `PropagationPass` | Each node updates once per round from the same snapshot |
-| Separate allocation from effect commitment | `ActuationPass` | Each allocated seat actuates at most once before closure |
+| Separate allocation from recorded effect commitment | `ActuationPass` | Each allocated seat records at most one corresponding effect before closure; external effect execution is outside this carrier |
 | Maintain ordered parent-child quality and cost constraints | `QualityHierarchy` | Single parent plus level and cost ordering |
-| Traverse choices with exact undo | `BacktrackingTraversal` | Every descent records the inverse used by ascent |
-| Select one highest-scoring candidate | `CompetitiveSelectionHard` | Argmax with deterministic lowest-index ties |
-| Allocate unique winners across several seats | `CompetitiveSelectionHardExclusive` | Hard selection plus cross-seat mutual exclusion |
-| Distribute a fixed weight total | `CompetitiveSelectionSoft` | Reserved-floor sequential Webster allocation |
-| Select the top `k` candidates | `CompetitiveSelectionRanked` | Bounded multiplicity with score ordering |
+| Traverse choices with exact undo | `BacktrackingTraversal` | Every descent records the inverse used by ascent, and every recorded visit is a valid full-depth leaf; exhaustive coverage is not claimed |
+| Choose among candidates using hard, hard-exclusive, soft, or ranked profiles | `CompetitiveSelectionHard`, `CompetitiveSelectionHardExclusive`, `CompetitiveSelectionSoft`, `CompetitiveSelectionRanked` | Each profile enforces its stated allocation rule and deterministic tie policy; the catalog's mutable-score proof profile is a soft-mode profile |
 | Settle and reawaken from a bounded delta history | `ConvergenceGovernor` | Phase-aware convergence and reawakening |
 
 ### Connective forms
 
-| Need | Type or function | Structural guarantee |
+| Need | Type or function | Bounded contract consequence |
 | --- | --- | --- |
 | Preserve monotone progress | `Cursor` | Position never regresses |
 | Move values from pending to retained history | `Accumulator<T>` | Order and membership are preserved across the boundary |
@@ -109,20 +108,20 @@ compose the root types directly.
 | Maintain a merge-bounded partition | `EquivalenceClass` | Parent/rank registries plus operation `Budget` |
 | Enforce a fixed logical-clock window | `RateLimit` | Operation `Budget` plus clock and window configuration |
 | Incrementally reduce an ordered input | `Reduction` | `AuditSink` instantiated with the reduction operation |
-| Store weighted edges and derive adjacency | `RelationshipGraph` | Edge `ResourceRegistry` plus projection relation |
-| Select a bounded sample without replacement | `Sampler` | `ActuationPass + Budget` |
+| Store weighted irreflexive edges and derive adjacency | `RelationshipGraph` | Edge `ResourceRegistry` plus projection relation; the public profile rejects self-loops |
+| Select a bounded weighted sample without replacement | `Sampler` | `ActuationPass + Budget`; caller choices must be in support, but no randomness-quality claim is made |
 | Notify listeners after real value changes | `Signal` | Value-change `AuditSink` plus one `Cursor` per listener |
 | Traverse queued graph work under a budget | `TraversalEngine` | Graph, budget, marker, accumulator, and buffer owners |
 | Select allocations and commit their effects | `SelectThenActuate` | Hard selection owners plus one `ActuationPass` |
 
 ### Execution modalities
 
-| Need | Type | Structural guarantee |
+| Need | Type | Bounded contract consequence |
 | --- | --- | --- |
-| Execute a fixed sequence | `Sequential` | One active step and ordered committed history |
+| Execute a fixed sequence | `Sequential` | One active step and exact agreement between committed-history length and current position |
 | Run workers behind a join barrier | `ForkJoin` | Worker lifecycle, barrier, and stable output snapshot |
 | Execute dependency-governed steps | `StepGraph` | A step becomes ready only after its predecessors complete |
-| Move bounded records through FIFO stages | `StreamGraph` | Backpressure, FIFO order, and exact progress counters |
+| Move bounded records through FIFO stages | `StreamGraph` | Backpressure, FIFO order, count conservation, and a state-level enabled action; scheduler progress is not claimed |
 
 The runnable [catalog example](https://github.com/brian-c-moore/automation-structures/blob/main/examples/catalog.rs)
 constructs and exercises every checked root type:
@@ -138,9 +137,11 @@ slices, and iterators without returning mutable access to invariant-bearing stat
 connectives implement the standard traits their semantics support, including `Debug`, `Default`,
 equality, conversions, and iteration.
 
-Authority-bearing state machines are not `Clone`. Cloning one would duplicate the apparent owner of
+State-bearing state machines are not `Clone`. Cloning one would duplicate the apparent owner of
 a budget, allocation pass, audit chain, or execution lifecycle. Transfer them by move or place them
-behind the application’s chosen shared-ownership and synchronization policy.
+behind an application policy that names one accountable owner and treats synchronization or
+delegated custody as a trust boundary. Several components may own disjoint state, but the same
+framed obligation does not acquire several accountable owners merely because they collaborate.
 
 Every public error enum implements `Debug`, `Display`, `std::error::Error`, equality, and copy
 semantics. Error enums are non-exhaustive so new diagnostic distinctions can be added without
@@ -172,7 +173,7 @@ consumers exercise the same archive.
 Formal definitions, refinement mappings, correspondence checks, and the theory behind the catalog
 are maintained in
 [automation-structures-research](https://github.com/brian-c-moore/automation-structures-research).
-Changes to structure definitions, transition semantics, or preserved obligations originate there
+Changes to structure definitions, transition semantics, or preserved contract clauses originate there
 and flow downstream into this crate.
 
 The [verification guide](https://github.com/brian-c-moore/automation-structures/blob/main/verification/README.md)

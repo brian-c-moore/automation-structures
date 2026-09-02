@@ -570,7 +570,7 @@ fn checked_select_then_actuate_uses_one_selection_and_actuation_lifecycle() {
 }
 
 #[test]
-fn checked_signal_delivers_each_actual_change_once() {
+fn checked_signal_tracks_each_recorded_change_epoch() {
     let signal = Signal::new(0, 3, 2);
     assert!(signal.is_ok());
     if let Ok(mut signal) = signal {
@@ -607,15 +607,22 @@ fn checked_traversal_engine_tracks_budgeted_acceptance() {
     let traversal = TraversalEngine::new(3, 0, 4);
     assert!(traversal.is_ok());
     if let Ok(mut traversal) = traversal {
+        assert_eq!(traversal.accepted_cost(), 0);
         assert_eq!(traversal.terminate(), Err(TraversalError::QueueNotEmpty));
         assert_eq!(traversal.visit(0), Ok(()));
         assert!(traversal.is_accepted(0));
+        assert_eq!(traversal.accepted_len(), 1);
+        assert_eq!(traversal.accepted_cost(), 2);
         assert!(traversal.is_queued(1));
         assert_eq!(traversal.visit(1), Ok(()));
         assert!(traversal.is_accepted(1));
+        assert_eq!(traversal.accepted_len(), 2);
+        assert_eq!(traversal.accepted_cost(), 4);
         assert_eq!(traversal.visit(2), Ok(()));
         assert!(traversal.is_visited(2));
         assert!(!traversal.is_accepted(2));
+        assert_eq!(traversal.accepted_len(), 2);
+        assert_eq!(traversal.accepted_cost(), 4);
         assert_eq!(traversal.terminate(), Ok(()));
     }
 }
@@ -626,8 +633,10 @@ fn checked_traversal_skip_removes_only_the_named_frontier_node() {
     assert!(traversal.is_ok());
     if let Ok(mut traversal) = traversal {
         assert_eq!(traversal.visit(0), Ok(()));
+        assert_eq!(traversal.accepted_cost(), 2);
         assert_eq!(traversal.queued_len(), 3);
         assert_eq!(traversal.skip(2), Ok(()));
+        assert_eq!(traversal.accepted_cost(), 2);
         assert!(!traversal.is_queued(2));
         assert!(!traversal.is_visited(2));
         assert!(!traversal.is_accepted(2));
@@ -639,7 +648,7 @@ fn checked_traversal_skip_removes_only_the_named_frontier_node() {
 }
 
 #[test]
-fn checked_sequential_execution_preserves_total_order() {
+fn checked_sequential_execution_preserves_history_position_agreement() {
     let execution = Sequential::new(2, 4, 0);
     assert!(execution.is_ok());
     if let Ok(mut execution) = execution {
@@ -709,8 +718,16 @@ fn checked_stream_graph_preserves_fifo_and_backpressure() {
     let stream = StreamGraph::new(3, 1, 2, 10);
     assert!(stream.is_ok());
     if let Ok(mut stream) = stream {
+        assert!(stream.has_enabled_action());
         assert_eq!(stream.consume(), None);
         assert!(stream.ingest(3));
+        assert_eq!(
+            stream.ingested(),
+            stream.emitted()
+                + stream.first_queue_len()
+                + stream.second_queue_len()
+                + stream.third_queue_len()
+        );
         assert!(!stream.ingest(5));
         assert!(stream.advance_first());
         assert!(stream.ingest(5));
@@ -718,6 +735,7 @@ fn checked_stream_graph_preserves_fifo_and_backpressure() {
         assert!(stream.advance_first());
         assert_eq!(stream.consume(), Some(5));
         assert!(stream.is_done());
+        assert!(stream.has_enabled_action());
     }
 }
 
@@ -726,6 +744,7 @@ fn checked_four_stage_stream_graph_uses_the_second_transfer() {
     let stream = StreamGraph::new(4, 1, 2, 10);
     assert!(stream.is_ok());
     if let Ok(mut stream) = stream {
+        assert!(stream.has_enabled_action());
         assert!(!stream.advance_second());
         assert!(stream.ingest(3));
         assert!(stream.advance_first());
@@ -739,6 +758,7 @@ fn checked_four_stage_stream_graph_uses_the_second_transfer() {
         assert!(stream.advance_second());
         assert_eq!(stream.consume(), Some(5));
         assert!(stream.is_done());
+        assert!(stream.has_enabled_action());
     }
 }
 

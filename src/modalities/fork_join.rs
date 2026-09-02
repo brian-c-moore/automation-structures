@@ -185,7 +185,7 @@ impl ForkJoin {
         self.output_ready ==> self.phase == ForkJoinPhase::Done
     }
 
-    /// Whether all fork-join obligations hold.
+    /// Whether all fork-join contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         &&& self.type_invariant()
         &&& self.barrier_completeness()

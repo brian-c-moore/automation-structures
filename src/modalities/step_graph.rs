@@ -133,7 +133,8 @@ impl StepGraph {
             ==> Self::predecessors_complete_in(self.edges@, self.nstate@, n)
     }
 
-    /// Whether no node runs or completes before all predecessors complete.
+    /// Derived consequence of `eligibility_closed`: no node runs or completes before all
+    /// predecessors complete.
     pub open spec fn no_run_before_predecessors(&self) -> bool {
         forall|n: usize| n < self.num_nodes
             && (#[trigger] self.nstate@[n as int] == StepGraphNodeState::Running
@@ -141,7 +142,7 @@ impl StepGraph {
             ==> Self::predecessors_complete_in(self.edges@, self.nstate@, n)
     }
 
-    /// Whether all dependency-ordered execution obligations hold.
+    /// Whether all dependency-ordered execution contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant() && self.eligibility_closed()
     }

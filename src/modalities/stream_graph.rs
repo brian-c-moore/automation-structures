@@ -402,14 +402,93 @@ impl StreamGraph {
         &&& self.q3.well_formed()
     }
 
-    /// Whether admitted records equal emitted plus retained records.
-    pub open spec fn no_record_loss(&self) -> bool {
+    /// Whether admitted-record count equals emitted plus retained-record counts.
+    pub open spec fn count_conservation(&self) -> bool {
         self.ingested.value_spec() == self.queue_depth() + self.emitted.value_spec()
     }
 
-    /// Whether all linear-stream obligations hold.
+    /// Compatibility alias for [`Self::count_conservation`].
+    ///
+    /// Count equality alone does not establish record identity or provenance.
+    pub open spec fn no_record_loss(&self) -> bool {
+        self.count_conservation()
+    }
+
+    /// Whether at least one modeled action is enabled in this state.
+    ///
+    /// This is a state predicate. It does not require a scheduler to choose an enabled action and
+    /// therefore does not establish temporal progress or fairness.
+    pub open spec fn some_action_enabled(&self) -> bool {
+        ||| (self.ingested.value_spec() < self.max_inputs as nat
+            && self.q1.values@.len() < self.q1.capacity)
+        ||| (self.q1.values@.len() > 0
+            && self.q2.values@.len() < self.q2.capacity)
+        ||| (self.chain_length == 3 && self.q2.values@.len() > 0)
+        ||| (self.chain_length == 4
+            && self.q2.values@.len() > 0
+            && self.q3.values@.len() < self.q3.capacity)
+        ||| (self.chain_length == 4 && self.q3.values@.len() > 0)
+        ||| (self.ingested.value_spec() == self.max_inputs as nat
+            && self.q1.values@.len() == 0
+            && self.q2.values@.len() == 0
+            && self.q3.values@.len() == 0)
+    }
+
+    /// Whether all linear-stream contract clauses hold.
     pub open spec fn inv(&self) -> bool {
-        self.type_invariant() && self.backpressure_correct() && self.no_record_loss()
+        self.type_invariant() && self.backpressure_correct() && self.count_conservation()
+    }
+
+    /// Establish state-level enabledness from the retained carrier invariant.
+    pub proof fn lemma_some_action_enabled(&self)
+        requires self.inv(),
+        ensures self.some_action_enabled(),
+    {
+        reveal(StreamGraph::inv);
+        reveal(StreamGraph::type_invariant);
+        reveal(StreamGraph::backpressure_correct);
+        reveal(StreamGraph::some_action_enabled);
+
+        if self.ingested.value_spec() < self.max_inputs as nat {
+            if self.q1.values@.len() < self.q1.capacity {
+            } else if self.q2.values@.len() < self.q2.capacity {
+            } else if self.chain_length == 3 {
+            } else if self.q3.values@.len() < self.q3.capacity {
+            } else {
+            }
+        } else if self.q1.values@.len() > 0 {
+            if self.q2.values@.len() < self.q2.capacity {
+            } else if self.chain_length == 3 {
+            } else if self.q3.values@.len() < self.q3.capacity {
+            } else {
+            }
+        } else if self.q2.values@.len() > 0 {
+            if self.chain_length == 3 {
+            } else if self.q3.values@.len() < self.q3.capacity {
+            } else {
+            }
+        } else if self.chain_length == 4 && self.q3.values@.len() > 0 {
+        } else {
+        }
+    }
+
+    /// Evaluate the state-level enabledness predicate.
+    pub fn some_action_enabled_exec(&self) -> (enabled: bool)
+        requires self.inv(),
+        ensures enabled == self.some_action_enabled(),
+    {
+        proof { self.lemma_some_action_enabled(); }
+        (self.ingested.value() < self.max_inputs as u64 && self.q1.len() < self.q1.capacity)
+            || (!self.q1.is_empty() && self.q2.len() < self.q2.capacity)
+            || (self.chain_length == 3 && !self.q2.is_empty())
+            || (self.chain_length == 4
+                && !self.q2.is_empty()
+                && self.q3.len() < self.q3.capacity)
+            || (self.chain_length == 4 && !self.q3.is_empty())
+            || (self.ingested.value() == self.max_inputs as u64
+                && self.q1.is_empty()
+                && self.q2.is_empty()
+                && self.q3.is_empty())
     }
 
     /// Test whether a chain configuration is represented by this carrier.

@@ -2,7 +2,7 @@
 // BacktrackingTraversalUndo.cfg. A descent records the pre-mutation value and
 // chosen delta in an undo token, then applies Mutate in the same commit. An
 // ascent applies the recorded inverse and pops both path and ledger. The model
-// remains order-parametric: Completeness is leaf soundness, not eventual
+// remains order-parametric: recorded-leaf validity is not eventual
 // coverage of every leaf.
 
 use vstd::prelude::*;
@@ -80,13 +80,20 @@ impl BacktrackingTraversal {
                 == Self::mutate_spec(self.ledger@[i - 1].saved, self.ledger@[i - 1].delta))
     }
 
-    /// Completeness: every recorded visit is a valid full-depth leaf.
-    pub open spec fn completeness(&self) -> bool {
+    /// Whether every recorded visit is a valid full-depth leaf.
+    pub open spec fn recorded_leaf_validity(&self) -> bool {
         forall|e: int| 0 <= e < self.visited.len() ==> {
             &&& #[trigger] self.visited@[e].len() == self.max_depth
             &&& (forall|j: int| 0 <= j < self.max_depth as int
                 ==> 1 <= #[trigger] self.visited@[e]@[j] <= self.branch_factor)
         }
+    }
+
+    /// Compatibility alias for [`Self::recorded_leaf_validity`].
+    ///
+    /// This predicate does not claim eventual or exhaustive leaf coverage.
+    pub open spec fn completeness(&self) -> bool {
+        self.recorded_leaf_validity()
     }
 
     /// Whether no full-depth path is recorded more than once.
@@ -101,12 +108,12 @@ impl BacktrackingTraversal {
         exists|e: int| 0 <= e < self.visited.len() && #[trigger] self.visited@[e]@ == p
     }
 
-    /// Whether all traversal and restoration obligations hold.
+    /// Whether all traversal and restoration contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant()
             && self.pairing()
             && self.state_restoration()
-            && self.completeness()
+            && self.recorded_leaf_validity()
             && self.visited_unique()
     }
 
@@ -284,7 +291,7 @@ impl BacktrackingTraversal {
     {
         let copy = clone_path(&self.path);
         self.visited.push(copy);
-        assert(self.completeness()) by {
+        assert(self.recorded_leaf_validity()) by {
             assert forall|e: int| 0 <= e < self.visited.len() implies {
                 &&& #[trigger] self.visited@[e].len() == self.max_depth
                 &&& (forall|j: int| 0 <= j < self.max_depth as int

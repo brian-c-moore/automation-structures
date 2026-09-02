@@ -294,7 +294,11 @@ pub struct AuditRecord {
     pub hash: u64,
 }
 
-/// A bounded append-only audit chain.
+/// A bounded append-only audit chain with a small deterministic model hash.
+///
+/// The default modulo-100 hash supports structural recomputation tests. It is not collision
+/// resistant and does not by itself establish durable custody or detect an attacker who can
+/// rewrite both records and chain values.
 ///
 /// # Examples
 ///
@@ -354,6 +358,9 @@ impl AuditSink {
     }
 
     /// Recompute and validate the concrete structural chain.
+    ///
+    /// A successful result establishes internal arithmetic consistency only. It is not evidence
+    /// of cryptographic integrity, persistence, provenance, or external tamper detection.
     pub fn validate(&self) -> (valid: bool) {
         proof { use_type_invariant(&*self); }
         self.inner.validate()
@@ -682,7 +689,10 @@ pub enum ActuationError {
     PassIncomplete,
 }
 
-/// A governed resource actuation pass.
+/// A governed record of resource allocations and corresponding effects.
+///
+/// `actuate` commits the carrier's effect record. Performing or observing an external side effect
+/// belongs to the caller's actor or adapter boundary.
 ///
 /// # Examples
 ///
@@ -737,7 +747,7 @@ impl ActuationPass {
         }
     }
 
-    /// Read the resource whose effect has committed for a seat.
+    /// Read the resource whose effect record has committed for a seat.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the effect index is in bounds")]
     pub fn effect(&self, seat: usize) -> Option<Option<u64>> {
         if seat < self.inner.effects.len() {
@@ -796,7 +806,7 @@ impl ActuationPass {
         Ok(())
     }
 
-    /// Commit the effect for an allocated seat.
+    /// Commit the effect record for an allocated seat.
     ///
     /// # Errors
     ///
@@ -822,13 +832,13 @@ impl ActuationPass {
         Ok(())
     }
 
-    /// Whether every allocated seat has committed an effect.
+    /// Whether every allocated seat has committed an effect record.
     pub fn ready_to_finish(&self) -> (ready: bool) {
         proof { use_type_invariant(&*self); }
         self.inner.ready_to_finish_exec()
     }
 
-    /// Commit closure after every allocated seat has committed an effect.
+    /// Commit closure after every allocated seat has committed an effect record.
     ///
     /// # Errors
     ///

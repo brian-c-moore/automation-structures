@@ -452,6 +452,14 @@ impl StreamGraph {
     /// Current depth of the optional third queue.
     pub fn third_queue_len(&self) -> usize { self.inner.q3.len() }
 
+    /// Whether at least one modeled transition is enabled in the current state.
+    ///
+    /// This state-level observation does not promise that a scheduler will choose an action.
+    pub fn has_enabled_action(&self) -> bool {
+        proof { use_type_invariant(self); }
+        self.inner.some_action_enabled_exec()
+    }
+
     /// Admit one source record if its value, input bound, and backpressure permit it.
     #[must_use]
     pub fn ingest(&mut self, value: u64) -> (accepted: bool) {
@@ -688,6 +696,7 @@ impl_observational_debug!(StepGraph, "StepGraph",
 impl_observational_debug!(StreamGraph, "StreamGraph",
     "chain_length" => chain_length,
     "capacity" => capacity,
+    "has_enabled_action" => has_enabled_action,
     "ingested" => ingested,
     "emitted" => emitted,
     "first_queue_len" => first_queue_len,

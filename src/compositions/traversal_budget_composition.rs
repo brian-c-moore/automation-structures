@@ -24,6 +24,7 @@ impl TraversalBudgetComposition {
 
     /// Whether accepted nodes and charged cost agree through the wrapped owner.
     pub open spec fn composition_invariant(&self) -> bool {
+        &&& self.traversal.accepted_cost_accounting()
         &&& self.traversal.budget.allocated <= self.traversal.budget.capacity
         &&& self.traversal.budget.allocated as int
             + (self.traversal.budget.capacity as int
@@ -36,7 +37,7 @@ impl TraversalBudgetComposition {
         self.traversal.accepted_subset_visited()
     }
 
-    /// Whether the wrapper preserves all traversal and budget obligations.
+    /// Whether the wrapper preserves all traversal and budget contract clauses.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant()
             && self.composition_invariant()

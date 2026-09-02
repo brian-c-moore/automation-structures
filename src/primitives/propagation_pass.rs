@@ -117,7 +117,7 @@ impl PropagationPass {
         !self.changed ==> self.values@ == self.snapshot@ && self.all_updated()
     }
 
-    /// Whether all propagation-pass obligations hold.
+    /// Whether all propagation-pass contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         &&& self.type_invariant()
         &&& self.iteration_bound()

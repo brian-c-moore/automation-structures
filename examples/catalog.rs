@@ -107,8 +107,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert!(signal.set_value(1)?);
     signal.notify(0)?;
 
-    let mut traversal = TraversalEngine::new(1, 0, 1)?;
+    let mut traversal = TraversalEngine::new(1, 0, 2)?;
     traversal.visit(0)?;
+    assert_eq!(traversal.accepted_cost(), 2);
     traversal.terminate()?;
 
     // Execution modalities.
