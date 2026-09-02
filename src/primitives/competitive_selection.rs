@@ -322,7 +322,7 @@ impl CompetitiveSelectionHardExclusive {
                         ==> (w as int) <= c)
     }
 
-    /// Whether all hard-exclusive selection obligations hold.
+    /// Whether all hard-exclusive selection contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant() && self.mutual_exclusion()
             && self.winner_optimality() && self.winner_tie_break()
@@ -1118,7 +1118,7 @@ impl CompetitiveSelectionSoft {
     }
 
     /// Construct the reserved-floor sequential Webster allocation over
-    /// `scores`: one guaranteed unit per candidate, then Pool further units
+    /// `scores`: one reserved unit per candidate, then Pool further units
     /// awarded one at a time to the current highest-priority candidate.
     /// Mirrors CompetitiveSelectionSoft.tla's Init + AssignNext exactly.
     pub fn new(scores: Vec<u64>, weight_total: u64, max_score: u64) -> (s: CompetitiveSelectionSoft)
@@ -1812,7 +1812,7 @@ impl CompetitiveSelectionRanked {
                     || (self.scores@[s] == self.scores@[c] && s < c))
     }
 
-    /// Whether all ranked-selection obligations hold.
+    /// Whether all ranked-selection contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant() && self.bounded_multiplicity()
             && self.threshold_optimality() && self.ranked_tie_break()

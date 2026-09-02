@@ -30,22 +30,22 @@ fn main() {
 
     let original_op = s.log[1].operation;
     s.log[1].operation = 7;
-    all_ok &= check("operation tamper detected", s.validate(), false);
+    all_ok &= check("operation-only mutation fails recomputation", s.validate(), false);
     s.log[1].operation = original_op;
     all_ok &= check("restored operation validates", s.validate(), true);
 
     let original_prev = s.log[1].prev_hash;
     s.log[1].prev_hash = original_prev + 1;
-    all_ok &= check("link tamper detected", s.validate(), false);
+    all_ok &= check("link-only mutation fails recomputation", s.validate(), false);
     s.log[1].prev_hash = original_prev;
 
     let original_record_hash = s.log[1].hash;
     s.log[1].hash = original_record_hash + 1;
-    all_ok &= check("stored-hash tamper detected", s.validate(), false);
+    all_ok &= check("stored-hash-only mutation fails recomputation", s.validate(), false);
     s.log[1].hash = original_record_hash;
 
     s.last_hash += 1;
-    all_ok &= check("head tamper detected", s.validate(), false);
+    all_ok &= check("head-only mutation fails recomputation", s.validate(), false);
     s.last_hash -= 1;
     all_ok &= check("fully restored chain validates", s.validate(), true);
 

@@ -1,6 +1,6 @@
 // Shared append-only chain owner for AuditSink and its named compositions.
 //
-// The chain operation is a verified parameter. BoundedHash is the public audit-hash instance;
+// The chain operation is a verified parameter. BoundedHash is the public bounded model instance;
 // AdditiveChain is the ReductionStream instance proved by ReductionStreamFromAuditSink.tla.
 
 use vstd::prelude::*;
@@ -25,7 +25,10 @@ pub trait ChainOperation: Copy {
         ensures result == self.combine_spec(previous, operation);
 }
 
-/// The bounded content-binding operation used by the public audit sink.
+/// The bounded recomputation operation used by the public audit sink.
+///
+/// Its modulo-100 output intentionally permits collisions. It supplies neither cryptographic
+/// collision resistance nor evidence of durable custody or external tamper detection.
 #[derive(Clone, Copy)]
 pub struct BoundedHash;
 
@@ -153,7 +156,9 @@ impl<O: ChainOperation> AuditSink<O> {
         }
     }
 
-    /// Every entry is the configured chain operation applied to its own content.
+    /// Every entry is the configured chain operation recomputed from its stored content.
+    ///
+    /// For `BoundedHash`, this is an arithmetic consistency check, not a cryptographic binding.
     pub open spec fn hash_binds_content(&self) -> bool {
         forall|index: int|
             #![trigger self.log@[index]]
@@ -181,7 +186,7 @@ impl<O: ChainOperation> AuditSink<O> {
         self.log.len() > 0 ==> self.log@[0].prev_hash == 0
     }
 
-    /// Whether all append-only chain obligations hold.
+    /// Whether all append-only chain contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         &&& self.type_invariant()
         &&& self.chain_integrity()

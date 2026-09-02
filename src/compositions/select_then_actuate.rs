@@ -63,7 +63,7 @@ impl SelectThenActuate {
         &&& self.actuation.pass_completeness()
     }
 
-    /// Whether all local and cross-component obligations hold.
+    /// Whether all local and cross-component contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         self.type_invariant() && self.composition_invariant()
     }

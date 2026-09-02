@@ -1,7 +1,7 @@
 //! Executable Cursor connective.
 //!
 //! Cursor retains a position. It carries no delivery, replay, persistence, or exactly-once
-//! obligation. Its owner supplies the admissible bound and movement rule.
+//! contract clause. Its owner supplies the admissible bound and movement rule.
 
 use vstd::prelude::*;
 
@@ -19,7 +19,7 @@ pub proof fn regression_rejected(position: nat, head: nat)
 {
 }
 
-/// A retained position with owner-supplied movement obligations.
+/// A retained position with owner-supplied movement contract clauses.
 pub struct Cursor {
     /// Retained monotone position.
     pub position: usize,

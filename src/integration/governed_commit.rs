@@ -3,8 +3,8 @@
 // The slice owns the mapped ResourceRegistry, Budget, PropagationPass,
 // ActuationPass, AuditSink, and Sequential carriers. It fixes one
 // registry key, one seat, one work item, and a unit resource charge.  Those bounds
-// make the cross-tool transition relation finite without changing the transferred
-// claim: capacity safety and `Committed => durable audit evidence`.
+// make the cross-tool transition relation finite while retaining the bridge contract:
+// capacity safety and `Committed => modeled durable audit evidence`.
 //
 // Runtime boundaries that Rust does not supply are explicit in the API:
 //
@@ -52,9 +52,9 @@ pub enum CommitPhase {
     Ready,
     /// A pre-effect failure permits another bounded attempt.
     Retryable,
-    /// An applied effect is waiting for durable recovery evidence.
+    /// An adapter-reported effect is waiting for modeled durable recovery evidence.
     RecoveryPending,
-    /// Effect and durable evidence have both committed.
+    /// The effect receipt and modeled durable evidence have both committed.
     Committed,
     /// The request cannot make another admitted attempt.
     Rejected,
@@ -77,8 +77,8 @@ pub enum AbstractPhase {
 }
 
 /// One bounded integrated request.  The component fields are the actual
-/// executable carriers; the remaining fields expose the external effect,
-/// persistence, failure, and recovery boundary absent from the individual rows.
+/// executable carriers; the remaining fields expose the adapter-reported effect,
+/// modeled persistence, failure, and recovery boundary absent from the individual rows.
 pub struct GovernedCommit {
     /// Registry owner for the admitted request.
     pub registry: ResourceRegistry<u64, u64>,
@@ -88,7 +88,7 @@ pub struct GovernedCommit {
     pub propagation: PropagationPass,
     /// External-effect lifecycle owner.
     pub actuation: ActuationPass,
-    /// Durable evidence owner.
+    /// Modeled evidence-chain owner; durability depends on the registered persistence provider.
     pub audit: AuditSink,
     /// Execution-order owner.
     pub sequential: Sequential,
@@ -96,11 +96,11 @@ pub struct GovernedCommit {
     pub phase: CommitPhase,
     /// Owner of bounded retry attempts.
     pub attempt_budget: Budget,
-    /// Whether the external effect has been applied.
+    /// Whether the external adapter reports that the effect was applied.
     pub effect_applied: bool,
-    /// Whether durable evidence for the effect has been retained.
+    /// Whether the persistence adapter acknowledges retaining evidence for the effect.
     pub evidence_persisted: bool,
-    /// Whether durable recovery intent has been retained.
+    /// Whether the persistence adapter acknowledges retaining recovery intent.
     pub recovery_intent: bool,
     /// Whether the modeled process is currently crashed.
     pub crashed: bool,
@@ -304,15 +304,23 @@ impl GovernedCommit {
                     && self.budget.reserved == 0)
     }
 
-    /// Whether all component and integration obligations hold.
+    /// Whether all component and integration contract clauses hold.
     pub open spec fn inv(&self) -> bool {
         self.component_invariants() && self.integrated_coupling()
     }
 
-    /// The exact bounded guarantee transferred by the semantic bridge.
-    pub open spec fn transferred_guarantee(&self) -> bool {
+    /// The exact bounded contract consequence established by the semantic bridge.
+    pub open spec fn bridge_contract(&self) -> bool {
         &&& self.budget.used() <= self.budget.capacity as int
         &&& (self.phase == CommitPhase::Committed ==> self.evidence_persisted)
+    }
+
+    /// Compatibility alias for [`Self::bridge_contract`].
+    ///
+    /// The bridge proves this state predicate. A deployment guarantee still belongs to the
+    /// principal that owns the framed persistence and effect obligation.
+    pub open spec fn transferred_guarantee(&self) -> bool {
+        self.bridge_contract()
     }
 
     /// Construct one pending bounded request.
@@ -320,7 +328,7 @@ impl GovernedCommit {
         requires capacity <= 1, 0 < max_attempts <= 2,
         ensures
             s.inv(),
-            s.transferred_guarantee(),
+            s.bridge_contract(),
             s.abstract_init(),
             s.abstract_observation_agrees(),
             s.phase == CommitPhase::Pending,
@@ -409,7 +417,7 @@ impl GovernedCommit {
     }
 
     /// Budget admission.  Capacity rejection is an explicit terminal API result
-    /// and leaves every claim-bearing carrier other than the phase unchanged.
+    /// and leaves every state-bearing carrier other than the phase unchanged.
     pub fn admit(&mut self) -> (accepted: bool)
         requires
             old(self).inv(),
@@ -419,7 +427,7 @@ impl GovernedCommit {
         ensures
             final(self).component_invariants(),
             final(self).integrated_coupling(),
-            final(self).transferred_guarantee(),
+            final(self).bridge_contract(),
             accepted ==> Self::abstract_system_step(old(self), final(self)),
             !accepted ==> Self::abstract_failure_step(old(self), final(self)),
             accepted == (old(self).budget.used() + 1 <= old(self).budget.capacity as int),
@@ -477,7 +485,7 @@ impl GovernedCommit {
             old(self).propagation.iteration == 0,
         ensures
             final(self).inv(),
-            final(self).transferred_guarantee(),
+            final(self).bridge_contract(),
             Self::abstract_system_step(old(self), final(self)),
             final(self).phase == CommitPhase::Ready,
             final(self).sequential.pc == 2,
@@ -533,7 +541,7 @@ impl GovernedCommit {
             !old(self).evidence_persisted,
         ensures
             final(self).inv(),
-            final(self).transferred_guarantee(),
+            final(self).bridge_contract(),
             Self::abstract_failure_step(old(self), final(self)),
             final(self).attempt_budget.allocated == old(self).attempt_budget.allocated + 1,
             final(self).registry == old(self).registry,
@@ -584,7 +592,7 @@ impl GovernedCommit {
             old(self).actuation.effects@[0] is None,
         ensures
             final(self).inv(),
-            final(self).transferred_guarantee(),
+            final(self).bridge_contract(),
             Self::abstract_failure_step(old(self), final(self)),
             final(self).attempt_budget.allocated == old(self).attempt_budget.allocated + 1,
             final(self).phase == CommitPhase::RecoveryPending,
@@ -637,7 +645,7 @@ impl GovernedCommit {
             old(self).actuation.effects@[0] is None,
         ensures
             final(self).inv(),
-            final(self).transferred_guarantee(),
+            final(self).bridge_contract(),
             Self::abstract_commit_step(old(self), final(self)),
             final(self).attempt_budget.allocated == old(self).attempt_budget.allocated + 1,
             final(self).phase == CommitPhase::Committed,
@@ -707,7 +715,7 @@ impl GovernedCommit {
             old(self).audit.log@.len() == 0,
         ensures
             final(self).inv(),
-            final(self).transferred_guarantee(),
+            final(self).bridge_contract(),
             Self::abstract_commit_step(old(self), final(self)),
             final(self).phase == CommitPhase::Committed,
             final(self).effect_applied,
@@ -756,7 +764,7 @@ impl GovernedCommit {
         requires old(self).inv(),
         ensures
             final(self).inv(),
-            final(self).transferred_guarantee(),
+            final(self).bridge_contract(),
             Self::abstract_failure_step(old(self), final(self)),
             final(self).crashed,
             final(self).phase == old(self).phase,
@@ -779,7 +787,7 @@ impl GovernedCommit {
         requires old(self).inv(), old(self).crashed,
         ensures
             final(self).inv(),
-            final(self).transferred_guarantee(),
+            final(self).bridge_contract(),
             Self::abstract_stutter_step(old(self), final(self)),
             !final(self).crashed,
             final(self).phase == old(self).phase,

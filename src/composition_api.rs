@@ -1018,6 +1018,9 @@ impl TraversalEngine {
     /// Number of budget-accepted nodes.
     pub fn accepted_len(&self) -> usize { self.inner.accepted.len() }
 
+    /// Total cost committed for budget-accepted nodes.
+    pub fn accepted_cost(&self) -> u64 { self.inner.budget.allocated }
+
     /// Whether a node is queued.
     pub fn is_queued(&self, node: usize) -> bool { self.inner.queue_contains(node) }
 
@@ -1535,6 +1538,7 @@ impl_observational_debug!(TraversalEngine, "TraversalEngine",
     "queued_len" => queued_len,
     "visited_len" => visited_len,
     "accepted_len" => accepted_len,
+    "accepted_cost" => accepted_cost,
 );
 impl_observational_debug!(SelectThenActuate, "SelectThenActuate",
     "seat_count" => seat_count,

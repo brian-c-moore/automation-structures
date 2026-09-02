@@ -1,4 +1,4 @@
-//! Total-order execution carrier.
+//! Fixed-sequence execution carrier.
 
 use vstd::prelude::*;
 
@@ -37,7 +37,7 @@ pub open spec fn complete_step_action(
     }
 }
 
-/// Totally ordered execution owner.
+/// Fixed-sequence execution owner.
 pub struct Sequential {
     /// Total number of steps.
     pub steps: usize,
@@ -69,9 +69,16 @@ impl Sequential {
         &&& self.values_valid()
     }
 
-    /// Whether the history records one total execution order.
-    pub open spec fn total_order(&self) -> bool {
+    /// Whether committed-history length agrees with the next execution position.
+    pub open spec fn history_position_agreement(&self) -> bool {
         self.history@.len() == self.pc
+    }
+
+    /// Compatibility alias for [`Self::history_position_agreement`].
+    ///
+    /// This predicate does not characterize a general total-order relation.
+    pub open spec fn total_order(&self) -> bool {
+        self.history_position_agreement()
     }
 
     /// Whether an active step always precedes terminal completion.
@@ -79,9 +86,9 @@ impl Sequential {
         self.active ==> self.pc < self.steps
     }
 
-    /// Whether all sequential-execution obligations hold.
+    /// Whether all fixed-sequence execution contract clauses hold.
     pub open spec fn inv(&self) -> bool {
-        self.type_invariant() && self.total_order() && self.active_before_done()
+        self.type_invariant() && self.history_position_agreement() && self.active_before_done()
     }
 
     /// Construct an inactive execution at the first step.

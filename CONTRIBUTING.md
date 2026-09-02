@@ -4,7 +4,7 @@ Thank you for helping improve `automation-structures`.
 
 ## Before opening a change
 
-The catalog, structure definitions, transition semantics, and preserved obligations originate in
+The catalog, structure definitions, transition semantics, and preserved contract clauses originate in
 the [Automation Structures research repository](https://github.com/brian-c-moore/automation-structures-research).
 Propose changes to those foundations there first. Accepted research changes flow downstream into
 this Rust crate.

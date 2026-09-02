@@ -244,10 +244,11 @@ impl Bisection {
         }
     }
 
-    /// Drive probes to convergence (the TLA+ EventualConvergence under fairness).
+    /// Drive probes to convergence by choosing every next probe inside this call.
     /// The `decreases hi - lo` is the loop-termination witness: the loop
     /// halts, and on exit the interval is a point (hi - lo < 2) that still
-    /// straddles the threshold.
+    /// straddles the threshold. When probe selection is delegated to an external scheduler,
+    /// temporal convergence instead depends on the corresponding scheduling fairness rely.
     pub fn bisect(&mut self)
         requires
             old(self).invariant(),

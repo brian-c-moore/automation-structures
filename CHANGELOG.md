@@ -2,6 +2,25 @@
 
 All notable changes to this crate are documented here.
 
+## 0.2.2 - 2026-09-02
+
+- Defines ownership relative to a trusted frame and separates Rust state ownership, accountable
+  obligation ownership, delegation, assurance, guarantee, and ownership transfer. Documents how
+  check/act separation creates a trust and time-of-check/time-of-use boundary unless one owner or
+  an explicit protocol binds the observation to the transition.
+- Adds precise proof-facing predicates for recorded-leaf validity, sequential history-position
+  agreement, stream count conservation, and the governed-commit bridge contract. The prior names
+  remain compatibility aliases with explicit semantic ceilings.
+- Strengthens `TraversalEngine` and `TraversalBudgetComposition` with exact accepted-node cost
+  accounting and exposes committed accepted cost through the checked API.
+- Adds state-level `StreamGraph` enabledness and a checked observation while keeping scheduler
+  progress and fairness outside the claim.
+- Clarifies that the default `AuditSink` hash is a collision-prone model function, `ActuationPass`
+  records effects rather than proving external execution, `Sampler` does not establish randomness
+  quality, and the public `RelationshipGraph` is the selected irreflexive profile.
+- Presents the primitive catalog as nine families, with four public selection carriers under the
+  single `CompetitiveSelection` family.
+
 ## 0.2.1 - 2026-08-31
 
 - Strengthens proof-facing constructors, observers, transitions, and batch operations from

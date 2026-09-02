@@ -3,7 +3,8 @@
 // The formal reduction stores each weighted edge as one ResourceRegistry key. The graph's
 // adjacency relation is the source/destination projection of those keys; it is not a second
 // mutable graph representation. AddEdge and RemoveEdge therefore mutate registry state only by
-// calling ResourceRegistry actions.
+// calling ResourceRegistry actions. The public carrier is the selected irreflexive profile and
+// rejects self-loops; that policy is not asserted for every possible relationship structure.
 
 use vstd::prelude::*;
 

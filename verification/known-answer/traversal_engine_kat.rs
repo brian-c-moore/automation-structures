@@ -52,6 +52,11 @@ fn main() {
     all_ok &= check("root visited", walk.visited_contains(0), true);
     all_ok &= check("root accepted", walk.accepted_contains(0), true);
     all_ok &= check("root cost charged", walk.budget_remaining(), 4);
+    all_ok &= check(
+        "root charged cost equals accepted count times node cost",
+        walk.budget.allocated,
+        walk.accepted.len() as u64 * 2,
+    );
     all_ok &= check("duplicate visit disabled", walk.can_visit(0), false);
 
     walk.visit_node(1);
@@ -59,6 +64,11 @@ fn main() {
     all_ok &= check("leaf adds no children", walk.queue.values.clone(), vec![2, 3]);
     all_ok &= check("child accepted", walk.accepted_contains(1), true);
     all_ok &= check("second cost charged", walk.budget_remaining(), 2);
+    all_ok &= check(
+        "second charged cost equals accepted count times node cost",
+        walk.budget.allocated,
+        walk.accepted.len() as u64 * 2,
+    );
 
     let mut exhausted = TraversalEngine::new(2, 0, 2);
     exhausted.visit_node(0);
@@ -77,6 +87,11 @@ fn main() {
         "unaffordable visit frames zero budget",
         exhausted.budget_remaining(),
         0,
+    );
+    all_ok &= check(
+        "unaffordable visit preserves accepted-cost accounting",
+        exhausted.budget.allocated,
+        exhausted.accepted.len() as u64 * 2,
     );
     all_ok &= check(
         "unaffordable visit removes queue member",
