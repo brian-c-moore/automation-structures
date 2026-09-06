@@ -82,6 +82,11 @@ impl RateLimit {
 
     /// Construct the initial state: count = 0, window_start = 0, clock = 0.
     /// Realises the TLA+ `Init` predicate and establishes all three invariants.
+    ///
+    /// This proof-facing model retains zero duration in its parameter domain:
+    /// every acquisition then rolls the window and succeeds, so it provides no
+    /// throttling. Operational rate limiting requires a positive duration, which
+    /// the checked crate-root `RateLimit` constructor enforces.
     pub fn new(max_per_window: u64, window_duration: u64, max_clock: u64) -> (r: RateLimit)
         requires
             max_per_window >= 1,   // constants clause (header note)

@@ -1,8 +1,22 @@
 # Changelog
 
-All notable changes to this crate are documented here.
+## 0.2.3
 
-## 0.2.2 - 2026-09-02
+- Rejects zero-duration windows in the checked `RateLimit` constructor with
+  `RateLimitBuildError::ZeroWindowDuration`. Previously, each acquisition reset the
+  window and succeeded without advancing the clock. The proof-facing carrier retains
+  its broader model domain and documents that zero duration provides no throttling.
+- States the checked Bisection, TraversalEngine, Reduction, and StreamGraph profile
+  limits in the selection guide: the known threshold, fixed star topology and node
+  cost, additive reduction, and supported chain lengths.
+- Corrects Counter's increment/decrement description and documents the
+  ConvergenceGovernor parameter ceilings and corresponding error.
+- States check/act safety in terms of predicate stability under admitted interference,
+  with fusion and protocol binding as ways to obtain the required stability.
+- Reorganizes the README around choosing and using the Rust types, with supported
+  inputs, error handling, execution limits, and links to the verification details.
+
+## 0.2.2
 
 - Defines ownership relative to a trusted frame and separates Rust state ownership, accountable
   obligation ownership, delegation, assurance, guarantee, and ownership transfer. Documents how
@@ -21,23 +35,24 @@ All notable changes to this crate are documented here.
 - Presents the primitive catalog as nine families, with four public selection carriers under the
   single `CompetitiveSelection` family.
 
-## 0.2.1 - 2026-08-31
+## 0.2.1
 
-- Strengthens proof-facing constructors, observers, transitions, and batch operations from
-  invariant-only results to exact input/state effects, rejection stutter, and untouched-owner
-  frames.
+- Strengthens the contracts for proof-facing constructors, observers, transitions, and batch
+  operations. They specify exact results and state changes, preserve state on rejection, and
+  preserve unrelated owners' state in addition to maintaining invariants.
 - Makes `Buffer` removal and `ResourceRegistry` replacement/removal preserve deterministic
   survivor order and exposes that order in their Verus contracts.
 - Binds allocation capture, absent binary-search results, union results, traversal frontiers,
   signal history, soft-selection batch construction, and governed-commit recovery steps to their
-  complete executable outcomes.
+  returned results and resulting state.
 - Adds adversarial controls for order corruption, incomplete folds, false success, wrong-owner
   updates, history replacement, constructor substitution, tie-breaking drift, and crash/restart
   durable-state mutation.
 - Expands checked-facade tests across sampler admission/rejection, traversal skipping, four-stage
-  streaming, deterministic registry/buffer ordering, constructor origins, and owner frames.
+  streaming, deterministic registry/buffer ordering, initial state from constructors, and
+  preservation of unrelated owners' state.
 
-## 0.2.0 - 2026-08-31
+## 0.2.0
 
 - Replaces the invariant-breaking root `Buffer`, `Counter`, and `Marker` proof carriers with
   checked, encapsulated facades. Proof carriers remain available through `proof-api`.
@@ -60,11 +75,11 @@ All notable changes to this crate are documented here.
 - Adds automated public API compatibility, dependency policy, archive-consumer, and documentation
   gates.
 
-## 0.1.1 - 2026-08-31
+## 0.1.1
 
-- Publishes the initial crate and applies the first dependency-automation updates.
+Publishes the initial crate and applies the first dependency-automation updates.
 
-## 0.1.0 - 2026-08-30
+## 0.1.0
 
 - Introduces the initial Automation Structure primitives, connective roles, named compositions,
   and execution carriers.

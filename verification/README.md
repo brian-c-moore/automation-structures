@@ -1,38 +1,31 @@
 # Formal verification
 
-The crate's checked public facades and proof-oriented carriers are verified from the real crate
-root, `src/lib.rs`, with the `proof-api` feature enabled. The separate downstream proof crate under
-`verification/downstream-verus/` consumes the unpacked publication archive and confirms that the
-public proof modules and relations remain usable across a crate boundary.
+Verification starts at `src/lib.rs`. With `proof-api` enabled, Verus checks the public wrappers and
+their underlying state machines; the separate proof crate in `verification/downstream-verus/`
+checks that the published proof modules and relations can be used by another crate built against
+the extracted publication archive.
 
-Known-answer sources under `verification/known-answer/` exercise every retained executable
-carrier. `run_known_answer.sh` compiles and runs each standalone source, including the aggregate
-catalog witness.
+Run `run_known_answer.sh` for concrete examples. It compiles and runs each standalone source in
+`verification/known-answer/`, which exercises every retained executable carrier, and also runs the
+catalog witness that exercises the carriers together in one program.
 
-`run_packaged_consumer.sh` builds the crates.io archive, then runs its tests, doctest, strict
-documentation build, known-answer programs, complete catalog example, and a separate checked-API
-consumer from the unpacked archive. Set `PACKAGE_ALLOW_DIRTY=1` only when checking an
-intentionally uncommitted release candidate.
+Check the package with `run_packaged_consumer.sh`. It builds the crates.io archive and checks its
+extracted contents with tests, doctests, a documentation build that rejects warnings, known-answer
+programs, the catalog example, and a separate consumer of the checked public API.
+Set `PACKAGE_ALLOW_DIRTY=1` only when checking an intentionally uncommitted release candidate.
 
-The downstream fixtures use `Cargo.toml.template` files so Cargo includes them in the publication
-archive. The preparation script materializes each temporary consumer manifest and lockfile before
-the consumer is built.
+The consumer manifests are templates. The `Cargo.toml.template` filenames let Cargo include the
+fixtures in the publication archive, and the preparation script creates each temporary consumer's
+manifest and lockfile before the consumer is built against the extracted crate.
 
-The GitHub `Formal verification` workflow downloads Verus `0.2026.05.24.ecee80a`, checks the
-release archive against the pinned SHA-256 digest, verifies the complete crate root, and verifies
-the external proof consumer. The workflow file is the executable source for the exact verifier
-identity and invocation.
+CI pins the verifier version. The GitHub `Formal verification` workflow downloads Verus
+`0.2026.05.24.ecee80a`, checks its release archive against the pinned SHA-256 digest, verifies the
+crate from its root module, and verifies the separate proof consumer against the publication archive.
 
-For a local run on x86-64 Linux, obtain that exact Verus release, verify the digest recorded in
+For a local run on x86-64 Linux, obtain that Verus release, verify the digest recorded in
 `.github/workflows/formal-verification.yml`, and run:
 
 ```text
 VERUS_BIN=/path/to/verus sh verification/run_verus_gate.sh
 PATH=/path/to/verus-directory:$PATH sh verification/run_packaged_verus_consumer.sh
 ```
-
-The automated layers are complementary: Verus checks the encoded state and transition contracts,
-the downstream proof crate checks cross-crate proof imports from the publication archive, public
-integration tests check consumer-visible behavior, known-answer executables check concrete carrier
-traces, the Cargo package consumer checks the same archive, and the catalog example constructs and
-exercises the advertised public objects together.

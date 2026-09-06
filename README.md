@@ -6,16 +6,13 @@
 [![docs.rs](https://docs.rs/automation-structures/badge.svg)](https://docs.rs/automation-structures)
 [![license](https://img.shields.io/crates/l/automation-structures.svg)](https://github.com/brian-c-moore/automation-structures#license)
 
-`automation-structures` is a Rust library of reusable structural building blocks for automation
-systems. It supplies checked state machines for admission, bounded resources, traversal,
-selection, propagation, coordination, and execution flow so applications can assemble these roles
-instead of implementing them repeatedly.
+`automation-structures` provides checked state machines. Its reusable types track resource budgets,
+select candidates, traverse graphs with cost limits, and coordinate execution steps through
+operations that check whether the requested state change is allowed before applying it.
 
-A structure is the sole Rust owner of its invariant-bearing state and admissible transitions.
-Its contract states the consequences that follow when callers satisfy the documented assumptions.
-Applications supply the identifiers, values, scores, costs, policies, effects, and operating
-boundary that give those consequences domain meaning. State ownership inside this crate is not, by
-itself, deployment accountability or authority to guarantee an application-level obligation.
+Your application runs external work. It supplies inputs and calls the transition methods; the
+execution types track state without starting threads, while the tables below specify each type's
+supported inputs and its limits on graph shapes or resource costs.
 
 ## Install
 
@@ -24,6 +21,7 @@ cargo add automation-structures
 ```
 
 The default feature set exposes the checked runtime API at the crate root.
+Requires Rust 1.95 or later.
 
 ## Quick start
 
@@ -39,19 +37,19 @@ assert_eq!(budget.available(), 5);
 # Ok::<(), automation_structures::BudgetError>(())
 ```
 
-Disabled transitions are explicit. Methods that can distinguish invalid input from disabled state
-return `Result`; conditional transitions named `try_*` return `bool`; indexed observations return
-`Option`.
+Check each method's return type. For example, `try_reserve` returns `false` when capacity is
+unavailable, whereas `commit_reservation` returns an error if the amount exceeds the reservation;
+methods that distinguish errors use `Result`, and observations that may be absent use `Option`.
 
 ## What composition means
 
-Composition is the mechanical assembly of existing owners through explicit connective roles. A
-composition contains the structure owners, configuration, and only the coupling state needed
-to make their transitions commit together. It does not reimplement the component state machines.
+Compositions reuse the same state machines. Each supplied composition stores its component state
+machines and exposes their combined operation through one API, so callers use that operation to
+coordinate the state changes required by the composition's contract.
 
-For example, `SelectThenActuate` owns hard selection for each seat and one shared `ActuationPass`.
-Selection determines the allocation; actuation records the corresponding effect; the composition
-closes only after every selected allocation has been applied.
+Your application performs external effects. `SelectThenActuate` selects a candidate for each seat
+and records modeled effects through one shared `ActuationPass`; the pass can finish only after
+every allocation selected for a seat has a corresponding recorded effect.
 
 ```rust
 use automation_structures::SelectThenActuate;
@@ -67,61 +65,58 @@ assert!(pass.is_complete());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Named compositions package recurring assemblies behind one checked contract. Applications can also
-compose the root types directly.
-
 ## Choose a structure
 
-### Primitives
+### Resource and processing types
 
-| Need | Type | Bounded contract consequence |
+| Need | Type | Behavior and limits |
 | --- | --- | --- |
-| Own finite capacity through allocation, reservation, and eviction | `Budget` | Every capacity unit has one accounted lifecycle |
+| Track capacity through allocation, reservation, and eviction | `Budget` | Allocated, reserved, and pending-eviction charges together stay within capacity |
 | Map unique resource identifiers to values | `ResourceRegistry` | At most one live value per key |
-| Retain an append-only operation chain | `AuditSink` | Every entry names its predecessor and recomputed chain value; collision resistance, durable custody, and tamper detection are outside this carrier |
+| Retain an append-only operation chain | `AuditSink` | Entries link to their predecessors using a recomputed chain value; this type does not provide cryptographic hashing, durable storage, or tamper detection |
 | Run snapshot-local graph updates | `PropagationPass` | Each node updates once per round from the same snapshot |
-| Separate allocation from recorded effect commitment | `ActuationPass` | Each allocated seat records at most one corresponding effect before closure; external effect execution is outside this carrier |
+| Track completion after allocation | `ActuationPass` | Each allocated seat records at most one corresponding effect before closure; the application performs external effects |
 | Maintain ordered parent-child quality and cost constraints | `QualityHierarchy` | Single parent plus level and cost ordering |
-| Traverse choices with exact undo | `BacktrackingTraversal` | Every descent records the inverse used by ascent, and every recorded visit is a valid full-depth leaf; exhaustive coverage is not claimed |
-| Choose among candidates using hard, hard-exclusive, soft, or ranked profiles | `CompetitiveSelectionHard`, `CompetitiveSelectionHardExclusive`, `CompetitiveSelectionSoft`, `CompetitiveSelectionRanked` | Each profile enforces its stated allocation rule and deterministic tie policy; the catalog's mutable-score proof profile is a soft-mode profile |
-| Settle and reawaken from a bounded delta history | `ConvergenceGovernor` | Phase-aware convergence and reawakening |
+| Traverse choices with exact undo | `BacktrackingTraversal` | Descent records the inverse used by ascent; recorded visits are valid full-depth leaves, but need not cover every leaf |
+| Select one winner, exclusive winners, weighted shares, or a ranked subset | `CompetitiveSelectionHard`, `CompetitiveSelectionHardExclusive`, `CompetitiveSelectionSoft`, `CompetitiveSelectionRanked` | Each type enforces its documented allocation and tie rules |
+| Track convergence and resume after changes | `ConvergenceGovernor` | Uses a bounded delta history and explicit phases; window length and maximum delta are each limited to one billion |
 
-### Connective forms
+### Small state helpers
 
-| Need | Type or function | Bounded contract consequence |
+| Need | Type or function | Behavior and limits |
 | --- | --- | --- |
 | Preserve monotone progress | `Cursor` | Position never regresses |
 | Move values from pending to retained history | `Accumulator<T>` | Order and membership are preserved across the boundary |
-| Retain bounded FIFO state | `Buffer<T>` | Capacity, order, and head removal are owned once |
-| Retain monotone numeric progress | `Counter` | Counter state and increment transition |
+| Retain bounded FIFO state | `Buffer<T>` | Enforces capacity and removes items from the head in insertion order |
+| Retain a nonnegative count | `Counter` | Checked increment and decrement within the `u64` range |
 | Retain a binary fact | `Marker` | Marked/unmarked state |
-| Relate an owner to a derived view | `projection_consistent` | The projection equals the owner-derived observation |
+| Compare projected and source membership flags | `projection_consistent` | Reports whether the two supplied Boolean values agree |
 | Relate two ordered passes | `strictly_before` | The first position strictly precedes the second |
 
-### Named compositions
+### Combined state machines
 
-| Need | Type | Assembly |
+| Need | Type | Behavior and limits |
 | --- | --- | --- |
 | Admit nodes while charging their costs | `AllocationSnapshot` | `ResourceRegistry + Budget` |
 | Delegate master capacity to sub-pools | `FederatedBudget` | One master `Budget` plus one `Budget` per pool |
-| Find a monotone boundary | `Bisection` | Probe `Budget` plus interval cursor relation |
-| Maintain a merge-bounded partition | `EquivalenceClass` | Parent/rank registries plus operation `Budget` |
-| Enforce a fixed logical-clock window | `RateLimit` | Operation `Budget` plus clock and window configuration |
-| Incrementally reduce an ordered input | `Reduction` | `AuditSink` instantiated with the reduction operation |
-| Store weighted irreflexive edges and derive adjacency | `RelationshipGraph` | Edge `ResourceRegistry` plus projection relation; the public profile rejects self-loops |
+| Model bisection around a known threshold | `Bisection` | Probe `Budget` plus interval cursor relation; the caller supplies the threshold, with no external predicate interface |
+| Merge disjoint sets within an operation budget | `EquivalenceClass` | Parent/rank registries plus operation `Budget` |
+| Enforce a positive-duration logical-clock window | `RateLimit` | Operation `Budget` plus caller-driven clock and window configuration; the checked constructor rejects zero duration |
+| Incrementally sum an ordered `u64` input | `Reduction` | Sums values in order through `AuditSink`; at most one billion items, each at most one billion |
+| Store weighted edges and derive adjacency | `RelationshipGraph` | Stores edges in a `ResourceRegistry` and rejects self-loops |
 | Select a bounded weighted sample without replacement | `Sampler` | `ActuationPass + Budget`; caller choices must be in support, but no randomness-quality claim is made |
 | Notify listeners after real value changes | `Signal` | Value-change `AuditSink` plus one `Cursor` per listener |
-| Traverse queued graph work under a budget | `TraversalEngine` | Graph, budget, marker, accumulator, and buffer owners |
-| Select allocations and commit their effects | `SelectThenActuate` | Hard selection owners plus one `ActuationPass` |
+| Traverse a star graph under a fixed-cost budget | `TraversalEngine` | `RelationshipGraph + Budget + Marker + Accumulator + Buffer`; every accepted node costs two units |
+| Select allocations and commit their effects | `SelectThenActuate` | One hard selection per seat plus one `ActuationPass` |
 
-### Execution modalities
+### Execution state
 
-| Need | Type | Bounded contract consequence |
+| Need | Type | Behavior and limits |
 | --- | --- | --- |
-| Execute a fixed sequence | `Sequential` | One active step and exact agreement between committed-history length and current position |
-| Run workers behind a join barrier | `ForkJoin` | Worker lifecycle, barrier, and stable output snapshot |
-| Execute dependency-governed steps | `StepGraph` | A step becomes ready only after its predecessors complete |
-| Move bounded records through FIFO stages | `StreamGraph` | Backpressure, FIFO order, count conservation, and a state-level enabled action; scheduler progress is not claimed |
+| Track a fixed sequence | `Sequential` | One active step; the completed-history length equals the current position |
+| Track workers behind a join barrier | `ForkJoin` | Worker lifecycle, barrier, and stable output snapshot |
+| Track steps with predecessor dependencies | `StepGraph` | A step becomes ready only after its predecessors complete |
+| Move bounded records through a three- or four-stage FIFO chain | `StreamGraph` | Tracks backpressure, FIFO order, and record counts; your runtime must schedule and advance the stages |
 
 The runnable [catalog example](https://github.com/brian-c-moore/automation-structures/blob/main/examples/catalog.rs)
 constructs and exercises every checked root type:
@@ -130,22 +125,22 @@ constructs and exercises every checked root type:
 cargo run --example catalog
 ```
 
-## Observation and ownership
+## State access and errors
 
-Public checked types encapsulate their state owner. They expose scalar observations, borrowed
-slices, and iterators without returning mutable access to invariant-bearing state. Small value-like
-connectives implement the standard traits their semantics support, including `Debug`, `Default`,
-equality, conversions, and iteration.
+State changes go through checked methods. Public types expose read-only observations as values
+or borrowed views such as slices and iterators, while the small state helpers provide the
+applicable standard traits for debugging, default values, equality, conversions, and iteration.
 
-State-bearing state machines are not `Clone`. Cloning one would duplicate the apparent owner of
-a budget, allocation pass, audit chain, or execution lifecycle. Transfer them by move or place them
-behind an application policy that names one accountable owner and treats synchronization or
-delegated custody as a trust boundary. Several components may own disjoint state, but the same
-framed obligation does not acquire several accountable owners merely because they collaborate.
+Move state machines to transfer ownership. Types that track budgets, allocations, audit chains,
+and execution lifecycles do not implement `Clone`, because a copy would create two independent
+accounts of the same work or capacity while leaving the application responsible for the resource.
+If callers share an instance, synchronize access and route resource changes through that same
+accounting. Reading available capacity does not reserve it; use an admission method before
+charging work to it.
 
-Every public error enum implements `Debug`, `Display`, `std::error::Error`, equality, and copy
-semantics. Error enums are non-exhaustive so new diagnostic distinctions can be added without
-breaking downstream matches.
+Match error enums non-exhaustively. Each public error enum implements `Debug`, `Display`,
+`std::error::Error`, equality, and copy semantics, with the non-exhaustive restriction so that a
+later release can add an error variant without breaking downstream matches.
 
 ## Features
 
@@ -158,45 +153,45 @@ Verified downstream crates can enable the proof API directly:
 
 ```toml
 [dependencies]
-automation-structures = { version = "0.2", features = ["proof-api"] }
+automation-structures = { version = "0.2.3", features = ["proof-api"] }
 ```
 
-The checked API remains available when `proof-api` is enabled. docs.rs builds all features.
+Use crate-root types in application code. Enabling `proof-api` keeps the checked API available
+and exposes lower-level proof types whose preconditions are checked by Verus but may not be
+enforced at runtime by an ordinary Rust build. docs.rs builds all features.
 
-## Formal basis
+## Verification and limits
 
-The distributed Rust source contains Verus contracts for the carrier state, enabled transitions,
-and preserved invariants. The formal workflow verifies the real crate root and an external proof
-consumer against the unpacked `.crate` archive. Known-answer executables and ordinary downstream
-consumers exercise the same archive.
-
-Formal definitions, refinement mappings, correspondence checks, and the theory behind the catalog
-are maintained in
-[automation-structures-research](https://github.com/brian-c-moore/automation-structures-research).
-Changes to structure definitions, transition semantics, or preserved contract clauses originate there
-and flow downstream into this crate.
-
+Verus checks the encoded contracts. CI verifies `src/lib.rs` and an external proof consumer
+against the extracted `.crate` archive; known-answer executables and ordinary Rust consumers
+exercise the packaged code through concrete calls and check their expected results.
 The [verification guide](https://github.com/brian-c-moore/automation-structures/blob/main/verification/README.md)
-records the exact verifier identity, package boundary, and reproducible commands.
+lists the verifier version and commands.
+
+Propose structural changes in research first.
+[automation-structures-research](https://github.com/brian-c-moore/automation-structures-research)
+maintains the formal definitions, refinement mappings, correspondence checks, and theory behind
+the catalog; accepted changes to transition rules and preserved contract clauses are then
+implemented in this crate's Rust types.
 
 ## Compatibility
 
-The minimum supported Rust version is 1.95.0. CI tests Rust 1.95.0 and current stable Rust on Linux,
-Windows, and macOS. Public API compatibility is checked against the latest crates.io release.
+Rust 1.95.0 is the minimum. CI tests that version on Linux and current stable Rust
+on Linux, Windows, and macOS. Public API compatibility is checked against the latest crates.io release.
 
-The crate follows Cargo semantic versioning. Before 1.0, a change from `0.x` to `0.(x + 1)` may
-contain API changes; patch releases preserve the public API. Changes to formal semantics are called
-out independently of Rust API compatibility.
+Patch releases preserve the public API. Under Cargo semantic versioning, a pre-1.0 update from
+`0.x` to `0.(x + 1)` may change the API, and any changes to formal semantics are documented
+separately from Rust API compatibility.
 
 ## Contributing and security
 
-The [contribution guide](https://github.com/brian-c-moore/automation-structures/blob/main/CONTRIBUTING.md)
-defines the downstream implementation and evidence workflow. State ownership and composition
-are mapped in
-[MAINTAINER_ARCHITECTURE.md](https://github.com/brian-c-moore/automation-structures/blob/main/MAINTAINER_ARCHITECTURE.md).
-
-Report suspected vulnerabilities through the private process in the
-[security policy](https://github.com/brian-c-moore/automation-structures/blob/main/SECURITY.md).
+Report suspected vulnerabilities privately. The
+[security policy](https://github.com/brian-c-moore/automation-structures/blob/main/SECURITY.md)
+gives the reporting process, the
+[contribution guide](https://github.com/brian-c-moore/automation-structures/blob/main/CONTRIBUTING.md)
+lists the checks required for code changes, and
+[MAINTAINER_ARCHITECTURE.md](https://github.com/brian-c-moore/automation-structures/blob/main/MAINTAINER_ARCHITECTURE.md)
+maps each structure's state to its implementation.
 
 ## License
 

@@ -1,20 +1,17 @@
 # Contributing
 
-Thank you for helping improve `automation-structures`.
-
 ## Before opening a change
 
-The catalog, structure definitions, transition semantics, and preserved contract clauses originate in
-the [Automation Structures research repository](https://github.com/brian-c-moore/automation-structures-research).
-Propose changes to those foundations there first. Accepted research changes flow downstream into
-this Rust crate.
+Propose structure or contract changes upstream. The
+[Automation Structures research repository](https://github.com/brian-c-moore/automation-structures-research)
+defines the catalog, structure behavior, and preserved contract clauses; changes to those definitions
+need to be accepted there before they are implemented in this crate.
 
-Use this repository for issues and pull requests concerning the published Rust API, its
-implementation, tests, documentation, packaging, and automation. A change that alters the
-underlying structure or contract must reference its accepted research change.
+File crate issues here. Use this repository for changes to the published Rust API, its implementation,
+tests, documentation, packaging, and automation; if a change also alters a structure or its contract,
+link to the accepted research change.
 
-Repository implementation ownership and composition are recorded in
-[MAINTAINER_ARCHITECTURE.md](MAINTAINER_ARCHITECTURE.md).
+See [MAINTAINER_ARCHITECTURE.md](MAINTAINER_ARCHITECTURE.md) for rules on state ownership and composition.
 
 ## Development checks
 
@@ -34,20 +31,19 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
 cargo deny --all-features check
 ```
 
-CI downloads checksum-pinned actionlint and ShellCheck releases before running these static
-checks.
+CI checks actionlint and ShellCheck downloads against pinned checksums before running them.
 
-Changes to a verified carrier or its checked facade must also pass the formal verification
-workflow described in [verification/README.md](verification/README.md). Add or update public API
-tests for every behavior visible to a downstream consumer.
+Test changes through the public API. Changes to a verified carrier or its checked facade must also
+pass the formal verification workflow in [verification/README.md](verification/README.md), so update
+the public API tests for each changed behavior that a downstream consumer can observe.
 
 Patch releases must pass `cargo semver-checks check-release --all-features` against the latest
 published version. The pinned GitHub workflow runs this comparison automatically.
 
 ## Pull requests
 
-Keep changes focused. Explain the structural role, the behavior or obligation that changed, and
-the evidence used to check it. Update `CHANGELOG.md` for a user-visible change.
+Keep changes focused. Explain which behavior or contract changed, why the change is needed, and how
+you checked it; add an entry to `CHANGELOG.md` when the change affects users of the crate.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
 the work by you, as defined in the Apache-2.0 license, is dual-licensed under MIT OR Apache-2.0,

@@ -1,10 +1,10 @@
 [package]
 name = "automation-structures"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Brian Moore"]
-description = "Reusable, formally specified building blocks for composing automation systems."
+description = "Checked state machines for budgets, selection, traversal, and automation execution flow."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 documentation = "https://docs.rs/automation-structures"

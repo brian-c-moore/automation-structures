@@ -1788,7 +1788,10 @@ pub enum ConvergenceBuildError {
     ThresholdOutOfRange,
     /// A moving-average window must retain at least one delta.
     EmptyWindow,
-    /// The largest admitted window sum would overflow `u64`.
+    /// The window length or maximum delta exceeds the supported one-billion ceiling.
+    ///
+    /// These parameter bounds ensure representable window sums; the error can
+    /// also reject configurations whose sum would fit in `u64`.
     WindowSumOutOfRange,
 }
 
@@ -1823,6 +1826,9 @@ impl ConvergenceGovernor {
     }
 
     /// Validate arithmetic bounds and construct an active governor.
+    ///
+    /// The window must be in `1..=1_000_000_000`, `max_delta` must be at most
+    /// `1_000_000_000`, and `threshold` must be at most `u64::MAX / 2`.
     ///
     /// # Errors
     ///
@@ -2426,7 +2432,7 @@ impl_public_error!(CompetitiveSelectionError, {
 impl_public_error!(ConvergenceBuildError, {
     Self::ThresholdOutOfRange => "convergence threshold cannot be doubled safely",
     Self::EmptyWindow => "convergence history window must be nonempty",
-    Self::WindowSumOutOfRange => "maximum convergence window sum exceeds u64",
+    Self::WindowSumOutOfRange => "convergence window or maximum delta exceeds one billion",
 });
 impl_public_error!(ConvergenceError, {
     Self::DeltaOutOfRange => "delta exceeds the configured maximum",

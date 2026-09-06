@@ -1,10 +1,8 @@
 # Security policy
 
-## Reporting a vulnerability
+Report suspected vulnerabilities privately. Use
+[GitHub Security Advisories](https://github.com/brian-c-moore/automation-structures/security/advisories/new)
+and include the affected crate version, the public API call or input that triggers the problem,
+the expected invariant, and a minimal reproduction so the failure can be checked.
 
-Please report suspected vulnerabilities privately through
-[GitHub Security Advisories](https://github.com/brian-c-moore/automation-structures/security/advisories/new).
-Do not open a public issue for a vulnerability that has not been disclosed.
-
-A report is most useful when it identifies the affected version, the public transition or input
-that triggers the problem, the expected invariant, and a minimal reproduction.
+Keep undisclosed vulnerabilities out of public issues.
