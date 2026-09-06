@@ -473,6 +473,23 @@ fn checked_rate_limit_rolls_windows_on_its_logical_clock() {
 }
 
 #[test]
+fn checked_rate_limit_rejects_zero_duration_and_bounds_an_unchanged_clock() {
+    assert!(matches!(
+        RateLimit::new(1, 0, 10),
+        Err(automation_structures::RateLimitBuildError::ZeroWindowDuration)
+    ));
+    let mut limit = RateLimit::new(2, 1, 1).expect("positive-duration window");
+    let admitted = (0..100).filter(|_| limit.try_acquire()).count();
+    assert_eq!(admitted, 2);
+    assert_eq!(limit.clock(), 0);
+    assert_eq!(limit.count(), 2);
+    assert_eq!(limit.tick(), Ok(()));
+    assert!(limit.try_acquire());
+    assert!(limit.try_acquire());
+    assert!(!limit.try_acquire());
+}
+
+#[test]
 fn checked_reduction_consumes_one_ordered_prefix() {
     let reduction = Reduction::new(vec![2, 3, 5]);
     assert!(reduction.is_ok());

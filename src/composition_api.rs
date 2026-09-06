@@ -235,7 +235,11 @@ pub enum BisectionError {
     AlreadyConverged,
 }
 
-/// A bounded monotone-boundary bisection machine.
+/// A bounded bisection model over an already-known monotone boundary.
+///
+/// The caller supplies the threshold at construction. Probes narrow the interval
+/// around that retained threshold; this type has no caller-supplied predicate or
+/// external probe-result interface.
 ///
 /// # Examples
 ///
@@ -255,7 +259,7 @@ impl Bisection {
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool { self.inner.invariant() }
 
-    /// Construct a full-domain bisection using the complete `u64` probe budget.
+    /// Construct a full-domain bisection around a known threshold using the complete `u64` probe budget.
     ///
     /// # Errors
     ///
@@ -410,6 +414,8 @@ impl EquivalenceClass {
 pub enum RateLimitBuildError {
     /// A rate limit must admit at least one operation per window.
     ZeroLimit,
+    /// A rate-limiting window must span at least one logical-clock unit.
+    ZeroWindowDuration,
 }
 
 /// A disabled rate-limit transition.
@@ -439,17 +445,21 @@ pub struct RateLimit {
 impl RateLimit {
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool {
-        self.inner.type_invariant() && self.inner.window_start_not_future()
+        self.inner.type_invariant()
+            && self.inner.window_start_not_future()
+            && self.inner.window_duration > 0
     }
 
-    /// Construct a rate limit at logical clock zero.
+    /// Construct a rate limit at logical clock zero with a positive window duration.
     ///
     /// # Errors
     ///
-    /// Returns [`RateLimitBuildError::ZeroLimit`] when no operation can be admitted.
+    /// Returns [`RateLimitBuildError::ZeroLimit`] when no operation can be admitted,
+    /// or [`RateLimitBuildError::ZeroWindowDuration`] for a zero-length window.
     pub fn new(max_per_window: u64, window_duration: u64, max_clock: u64)
         -> (result: Result<Self, RateLimitBuildError>) {
         if max_per_window == 0 { return Err(RateLimitBuildError::ZeroLimit); }
+        if window_duration == 0 { return Err(RateLimitBuildError::ZeroWindowDuration); }
         Ok(Self { inner: RateLimitCarrier::new(max_per_window, window_duration, max_clock) })
     }
 
@@ -965,6 +975,9 @@ pub enum TraversalError {
 
 /// A budgeted star-graph traversal with accepted-subset tracking.
 ///
+/// The root has an edge to every other node, and each accepted node costs two
+/// budget units. This checked profile fixes both the topology and node cost.
+///
 /// # Examples
 ///
 /// ```rust
@@ -1302,6 +1315,7 @@ fn equivalence_class_sentinel() -> (carrier: EquivalenceClassCarrier)
 
 fn rate_limit_sentinel() -> (carrier: RateLimitCarrier)
     ensures carrier.type_invariant(), carrier.window_start_not_future(),
+        carrier.window_duration > 0,
 { RateLimitCarrier::new(1, 1, 0) }
 
 fn reduction_sentinel() -> (carrier: ReductionCarrier)
@@ -1558,7 +1572,10 @@ impl_public_error!(BisectionBuildError, {
 });
 impl_public_error!(BisectionError, { Self::AlreadyConverged => "bisection is already converged" });
 impl_public_error!(EquivalenceClassError, { Self::ElementOutOfRange => "element is outside the partition" });
-impl_public_error!(RateLimitBuildError, { Self::ZeroLimit => "rate limit must admit at least one operation" });
+impl_public_error!(RateLimitBuildError, {
+    Self::ZeroLimit => "rate limit must admit at least one operation",
+    Self::ZeroWindowDuration => "rate-limit window duration must be positive",
+});
 impl_public_error!(RateLimitError, { Self::ClockExhausted => "rate-limit logical clock is exhausted" });
 impl_public_error!(ReductionBuildError, {
     Self::TooManyItems => "reduction input exceeds the verified item ceiling",
