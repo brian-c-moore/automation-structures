@@ -7,6 +7,7 @@ target_dir="${CARGO_TARGET_DIR:-$repository_root/target}"
 binary_dir="$target_dir/debug"
 
 cd "$repository_root"
+sh "$script_dir/run_dependency_boundary.sh"
 cargo build --locked --all-features
 
 for source in verification/known-answer/*_kat.rs; do

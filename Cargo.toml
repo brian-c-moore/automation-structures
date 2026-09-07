@@ -1,6 +1,6 @@
 [package]
 name = "automation-structures"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Brian Moore"]
@@ -46,6 +46,7 @@ proof-api = []
 
 [dependencies]
 vstd = "=0.0.0-2026-05-24-0157"
+indexmap = "=2.14.0"
 
 [package.metadata.verus]
 verify = true
@@ -70,3 +71,8 @@ new_without_default = "allow"
 ptr_arg = "allow"
 redundant_pattern_matching = "allow"
 vec_init_then_push = "allow"
+
+[[example]]
+name = "registry_index_probe"
+path = "verification/known-answer/registry_index_probe.rs"
+required-features = ["proof-api"]

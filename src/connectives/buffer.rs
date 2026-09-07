@@ -149,6 +149,25 @@ impl<T> Buffer<T> {
         Self { capacity, values: Vec::new() }
     }
 
+    /// Construct an empty FIFO after reserving storage for its admitted capacity.
+    ///
+    /// Allocation uses the standard allocator. Successful construction avoids storage growth
+    /// while pushes stay within the logical bound; allocator behavior is a runtime rely.
+    ///
+    /// # Errors
+    ///
+    /// Returns the allocation error if the requested storage cannot be reserved.
+    pub fn try_new(capacity: usize) -> (result: Result<Self, std::collections::TryReserveError>)
+        ensures
+            result is Ok ==> result->Ok_0.well_formed(),
+            result is Ok ==> result->Ok_0.capacity == capacity,
+            result is Ok ==> result->Ok_0.values@ == Seq::<T>::empty(),
+    {
+        let mut buffer = Self::new(capacity);
+        buffer.values.try_reserve(capacity)?;
+        Ok(buffer)
+    }
+
     /// Fixed FIFO capacity.
     pub fn capacity(&self) -> (capacity: usize)
         ensures capacity == self.capacity,

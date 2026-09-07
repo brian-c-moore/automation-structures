@@ -15,6 +15,38 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
 fn main() {
     let mut all_ok = true;
 
+    let mut typed = AuditSink::with_summary(
+        3,
+        automation_structures::primitives::audit_sink::CheckedSignedSumCount,
+    );
+    use automation_structures::primitives::audit_sink::NullableSigned::{Missing, Value};
+    all_ok &= check(
+        "nullable summary accepts signed input",
+        typed.record_typed(Value(-7)),
+        true,
+    );
+    all_ok &= check(
+        "nullable summary accepts null input",
+        typed.record_typed(Missing),
+        true,
+    );
+    all_ok &= check(
+        "nullable summary accepts next input",
+        typed.record_typed(Value(11)),
+        true,
+    );
+    all_ok &= check(
+        "typed sum/count projection",
+        (typed.carry().sum, typed.carry().count),
+        (4, 2),
+    );
+    all_ok &= check("input count includes null", typed.committed_count(), 3);
+    all_ok &= check(
+        "summary capacity refusal",
+        typed.record_typed(Value(1)),
+        false,
+    );
+
     let empty = AuditSink::new(0);
     all_ok &= check("empty/genesis chain validates", empty.validate(), true);
 
@@ -30,22 +62,38 @@ fn main() {
 
     let original_op = s.log[1].operation;
     s.log[1].operation = 7;
-    all_ok &= check("operation-only mutation fails recomputation", s.validate(), false);
+    all_ok &= check(
+        "operation-only mutation fails recomputation",
+        s.validate(),
+        false,
+    );
     s.log[1].operation = original_op;
     all_ok &= check("restored operation validates", s.validate(), true);
 
     let original_prev = s.log[1].prev_hash;
     s.log[1].prev_hash = original_prev + 1;
-    all_ok &= check("link-only mutation fails recomputation", s.validate(), false);
+    all_ok &= check(
+        "link-only mutation fails recomputation",
+        s.validate(),
+        false,
+    );
     s.log[1].prev_hash = original_prev;
 
     let original_record_hash = s.log[1].hash;
     s.log[1].hash = original_record_hash + 1;
-    all_ok &= check("stored-hash-only mutation fails recomputation", s.validate(), false);
+    all_ok &= check(
+        "stored-hash-only mutation fails recomputation",
+        s.validate(),
+        false,
+    );
     s.log[1].hash = original_record_hash;
 
     s.last_hash += 1;
-    all_ok &= check("head-only mutation fails recomputation", s.validate(), false);
+    all_ok &= check(
+        "head-only mutation fails recomputation",
+        s.validate(),
+        false,
+    );
     s.last_hash -= 1;
     all_ok &= check("fully restored chain validates", s.validate(), true);
 

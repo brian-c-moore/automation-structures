@@ -163,8 +163,49 @@ impl FederatedBudget {
             },
             federated.inv(),
     {
+        Self::initialize(master_capacity, num_pools, Vec::new())
+    }
+
+    /// Reserve storage for the fixed set of sub-pool owners.
+    ///
+    /// # Errors
+    /// Returns the allocation error before exposing any delegated capacity.
+    pub fn try_new(master_capacity: u64, num_pools: usize)
+        -> (result: Result<Self, std::collections::TryReserveError>)
+        ensures result is Ok ==> {
+            let s = result.unwrap();
+            &&& s.inv() && s.master.capacity == master_capacity
+            &&& s.master.allocated == 0 && s.master.reserved == 0 && s.master.pending_eviction == 0
+            &&& s.sub_pools@.len() == num_pools
+            &&& forall|i: int| 0 <= i < num_pools ==> {
+                let p = #[trigger] s.sub_pools@[i];
+                p.capacity == master_capacity && p.allocated == 0 && p.reserved == 0 && p.pending_eviction == 0
+            }
+        },
+    {
+        let mut sub_pools = Vec::new(); sub_pools.try_reserve(num_pools)?;
+        Ok(Self::initialize(master_capacity, num_pools, sub_pools))
+    }
+
+    fn initialize(master_capacity: u64, num_pools: usize, mut sub_pools: Vec<Budget>) -> (federated: Self)
+        requires
+            sub_pools@.len() == 0,
+        ensures
+            federated.master.capacity == master_capacity,
+            federated.master.allocated == 0,
+            federated.master.reserved == 0,
+            federated.master.pending_eviction == 0,
+            federated.sub_pools.len() == num_pools,
+            forall|index: int| 0 <= index < num_pools ==> {
+                let pool = #[trigger] federated.sub_pools@[index];
+                &&& pool.capacity == master_capacity
+                &&& pool.allocated == 0
+                &&& pool.reserved == 0
+                &&& pool.pending_eviction == 0
+            },
+            federated.inv(),
+    {
         let master = Budget::new(master_capacity);
-        let mut sub_pools: Vec<Budget> = Vec::new();
         let mut index: usize = 0;
         while index < num_pools
             invariant

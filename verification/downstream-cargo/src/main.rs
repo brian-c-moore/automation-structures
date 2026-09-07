@@ -1,11 +1,15 @@
 //! External checked-API consumer used by the packaged-artifact release gate.
 
 use automation_structures::{
-    Budget, ForkJoin, RelationshipGraph, Sequential, Signal, StepGraph, StreamGraph,
+    Budget, Buffer, ForkJoin, RelationshipGraph, Sequential, Signal, StepGraph, StreamGraph,
 };
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let mut buffer = Buffer::try_new(1)?;
+    assert_eq!(buffer.push(String::from("payload")), Ok(()));
+    assert_eq!(buffer.pop().as_deref(), Some("payload"));
+
     let mut budget = Budget::new(4);
     assert!(budget.try_reserve(2));
     budget.commit_reservation(2)?;

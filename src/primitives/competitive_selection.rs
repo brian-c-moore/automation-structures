@@ -187,7 +187,36 @@ impl CompetitiveSelectionHard {
             h.allocation is None,
             h.inv(),
     {
-        let mut scores: Vec<u64> = Vec::new();
+        Self::initialize(num_candidates, Vec::new())
+    }
+
+    /// Reserve the score vector before constructing the existing selection owner.
+    ///
+    /// # Errors
+    /// Returns the standard allocation error before exposing a selection owner.
+    pub fn try_new(num_candidates: usize)
+        -> (result: Result<Self, std::collections::TryReserveError>)
+        ensures result is Ok ==> {
+            let h = result.unwrap();
+            &&& h.scores@.len() == num_candidates
+            &&& forall|c: int| 0 <= c < num_candidates ==> #[trigger] h.scores@[c] == 0
+            &&& h.allocation is None
+            &&& h.inv()
+        },
+    {
+        let mut scores = Vec::<u64>::new();
+        scores.try_reserve(num_candidates)?;
+        Ok(Self::initialize(num_candidates, scores))
+    }
+
+    fn initialize(num_candidates: usize, mut scores: Vec<u64>) -> (h: CompetitiveSelectionHard)
+        requires scores@.len() == 0,
+        ensures
+            h.scores@.len() == num_candidates,
+            forall|c: int| 0 <= c < num_candidates ==> h.scores@[c] == 0,
+            h.allocation is None,
+            h.inv(),
+    {
         let mut i: usize = 0;
         while i < num_candidates
             invariant

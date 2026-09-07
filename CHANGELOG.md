@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.2.4
+
+- Routes the root proof gate through the checksum-pinned Cargo-Verus so the locked
+  data-library dependency is resolved for the same crate-root verification.
+
+- Adds fallible storage admission to the existing Buffer, CompetitiveSelectionHard, StepGraph,
+  ActuationPass, scalar Sequential, ForkJoin, FederatedBudget and phase-aware governor owners.
+  Legacy and fallible constructors share initialization. Full-history AuditSink can reserve
+  records without changing its logical chain, operator or lifetime ceiling.
+- Reuses ForkJoin output storage and PropagationPass round arrays after admission. Allocation
+  failure is injected at the new constructor, full-audit and visit-preparation sites listed in
+  the standalone harness. Earlier Buffer, Registry and arrangement repairs retain their separate
+  controls; allocator behavior remains a standard-library premise.
+- Parameterizes the existing PropagationPass over Copy data, exact ValueEq and a pure snapshot
+  operation. Undefined updates refuse unchanged. The default decrement-neighbor profile and
+  its public API remain available through the same round/update actions.
+- Parameterizes the existing BacktrackingTraversal over Copy auxiliary/delta data and a pure
+  mutation/inverse domain with a required inverse proof. Shared descent/ascent retain token/path
+  pairing and exact restoration; fallible depth/visit admission prepares storage before commit.
+  The default modulo-three profile remains available. Neither generic interface establishes
+  eventual convergence or exhaustive search.
+- Adds bounded monotonic clock observation to RateLimit, with an explicit finite Tick-path proof.
+  Repeated time accepts a stutter; regression or an out-of-range observation refuses unchanged.
+- Keeps general stream topology/transactions in consumer compositions. The unpublished relocation
+  of StreamGraphConnection and optional owned-value Sequential extension are excluded from this
+  candidate; scalar Sequential history admission remains included.
+
+- Adds fallible finite arrangement to the canonical OrderingPass connective, with exact position
+  coverage, uniqueness and order. A verified nullable signed domain handles direction/nulls;
+  original input position breaks ties. Standard range extension and slice sorting are explicit
+  library premises, with separate native false-premise controls.
+
+- Adds a sealed indexed byte-key representation to the existing ResourceRegistry. The default
+  remains Vec storage; IndexedStorage uses IndexMap 2.14.0 with exact byte equality and borrowed
+  probes. Register/Deregister retain one shared implementation and the original order/value frames.
+- Adds direct mutable borrowing of retained values and fallible entry reservation before Register.
+  A failed reservation returns the unconsumed key/value and preserves the logical mapping. IndexMap
+  layout/search adapters are explicit data-library premises. Forced collisions, reservation refusal,
+  per-group owner updates, false library premises and downstream sealing attempts have controls.
+
+- Generalizes the existing proof-facing AuditSink over typed Item/Carry domain operations and
+  two sealed record representations. The full-history default preserves its four public fields
+  and legacy Record/validation contracts. Summary retention uses Counter, one latest input and
+  proof-only history inside that same owner; both profiles execute one checked Record body.
+- Adds checked signed and nullable sum/count domain witnesses. Capacity and arithmetic refusal
+  preserve the complete owner. Summary retention supplies no runtime log, replay or validation;
+  its lifetime ceiling allocates no per-record storage. Generic typed genesis/partial-operation
+  contracts are proved directly, separately from the Nat/zero-only research model instances.
+
+- Adds logical key identity and borrowed-query adapters to the same proof-facing Registry
+  owner. `ByteKey` retains encoded bytes and compares by content; `lookup_query` borrows
+  the retained value using a byte-slice probe. Equal bytes from different allocations
+  replace one binding through the shared canonical removal/append actions.
+- Preserves the existing exact-key API and proof contracts through checked equivalence
+  delegates. Byte-schema correctness remains a consumer obligation; the indexed/fallible binding is above.
+  Byte-slice comparison uses Rust's standard-library equality through an explicit trusted
+  data-leaf contract; the structural proof does not verify the standard-library body.
+
+- Removes the `Copy` requirement from the proof-facing `ResourceRegistry<K, V>` owner.
+  Keys still require the existing exact `RegistryKey` equality contract. `lookup_ref`
+  borrows retained values; `lookup` remains available when the value is `Copy`.
+- Routes registry replacement and key removal through its existing positional
+  `Deregister` action. Replacements retain backing storage and preserve the contract:
+  unchanged entries retain their order and values, and the replaced key moves to the end.
+  The default representation retains linear lookup; the indexed binding above shares these actions.
+
 ## 0.2.3
 
 - Rejects zero-duration windows in the checked `RateLimit` constructor with

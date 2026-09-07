@@ -117,6 +117,13 @@ fn draw_frequencies(
 }
 
 fn main() {
+    // Constructor allocation and owned FIFO behavior through the Verus-compiled carrier.
+    let mut reserved = automation_structures::connectives::buffer::Buffer::<String>::try_new(1)
+        .expect("one reserved slot");
+    assert_eq!(reserved.push(String::from("payload")), Ok(()));
+    assert_eq!(reserved.push(String::from("full")), Err(String::from("full")));
+    assert_eq!(reserved.pop().as_deref(), Some("payload"));
+    assert!(automation_structures::connectives::buffer::Buffer::<u64>::try_new(usize::MAX).is_err());
     println!("Catalog primitive and composition KAT cross-check");
     let mut all_ok = true;
 
@@ -210,6 +217,27 @@ fn main() {
         red.position(),
         3,
     );
+
+    // Exact bytes use the same registry owner with a borrowed representation query.
+    let mut byte_registry = ResourceRegistry::new();
+    byte_registry.register_key(automation_structures::primitives::resource_registry::ByteKey::from_bytes(vec![1, 0]), 7u64);
+    byte_registry.register_key(automation_structures::primitives::resource_registry::ByteKey::from_bytes(vec![1, 0]), 9u64);
+    all_ok &= check("ResourceRegistry equal byte allocations upsert once", byte_registry.entries.len(), 1);
+    all_ok &= check("ResourceRegistry borrowed byte probe", byte_registry.lookup_query(&&[1u8, 0][..]), Some(&9));
+    all_ok &= check("ResourceRegistry unequal prefix is absent", byte_registry.lookup_query(&&[1u8][..]), None);
+
+    all_ok &= check("fallible selection admits fixed scores", automation_structures::primitives::competitive_selection::CompetitiveSelectionHard::try_new(3).is_ok(), true);
+    all_ok &= check("fallible selection refuses oversized scores", automation_structures::primitives::competitive_selection::CompetitiveSelectionHard::try_new(usize::MAX).is_err(), true);
+    all_ok &= check("fallible step graph admits dependencies", automation_structures::modalities::step_graph::StepGraph::try_new(2, vec![(0,1)]).is_ok(), true);
+    all_ok &= check("fallible step graph refuses oversized state", automation_structures::modalities::step_graph::StepGraph::try_new(usize::MAX, vec![(0,1)]).is_err(), true);
+    all_ok &= check("fallible actuation admits assignments", automation_structures::primitives::actuation_pass::ActuationPass::try_new(vec![Some(7)],1).is_ok(), true);
+
+    let mut reserved_registry = ResourceRegistry::<u64, Vec<u8>>::new();
+    reserved_registry.register(7, vec![3, 1]);
+    all_ok &= check("Registry linear preflight succeeds", reserved_registry.try_reserve_entries(2).is_ok(), true);
+    all_ok &= check("Registry linear preflight preserves owned value", reserved_registry.lookup_ref(&7), Some(&vec![3, 1]));
+    all_ok &= check("Registry linear oversized preflight refuses", reserved_registry.try_reserve_entries(usize::MAX).is_err(), true);
+    all_ok &= check("Registry linear refusal preserves owned value", reserved_registry.lookup_ref(&7), Some(&vec![3, 1]));
 
     // ResourceRegistry ResourceRegistry: unique key->value mapping (TLA+ Register/Deregister).
     let mut reg: ResourceRegistry<u64, u64> = ResourceRegistry::new();

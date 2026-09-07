@@ -201,7 +201,6 @@ impl StepGraph {
         true
     }
 
-    #[expect(clippy::arithmetic_side_effects, reason = "Verus proves the state-construction cursor remains within the node bound")]
     /// Construct initial readiness states for a valid edge set.
     pub fn new(num_nodes: usize, edges: Vec<(usize, usize)>) -> (s: StepGraph)
         requires
@@ -221,7 +220,57 @@ impl StepGraph {
             s.inv(),
             s.no_run_before_predecessors(),
     {
-        let mut nstate = Vec::new();
+        Self::initialize(num_nodes, edges, Vec::new())
+    }
+
+    /// Reserve lifecycle storage before constructing the admitted dependency owner.
+    /// The raw proof API retains the existing edge-domain preconditions.
+    ///
+    /// # Errors
+    /// Returns the allocation error and the unconsumed edge data on reservation failure.
+    pub fn try_new(num_nodes: usize, edges: Vec<(usize, usize)>)
+        -> (result: Result<Self, (std::collections::TryReserveError, Vec<(usize, usize)>)>)
+        requires Self::edges_valid(edges@, num_nodes), Self::edges_distinct(edges@),
+        ensures
+            result is Err ==> (result->Err_0).1@ == edges@,
+            result is Ok ==> {
+                let s = result.unwrap();
+                &&& s.num_nodes == num_nodes
+                &&& s.edges@ == edges@
+                &&& s.nstate@.len() == num_nodes
+                &&& forall|n: usize| n < num_nodes ==> #[trigger] s.nstate@[n as int]
+                    == if Self::has_predecessor_in(edges@, n) {
+                        StepGraphNodeState::NotReady
+                    } else { StepGraphNodeState::Ready }
+                &&& s.inv()
+                &&& s.no_run_before_predecessors()
+            },
+    {
+        let mut nstate = Vec::<StepGraphNodeState>::new();
+        if let Err(error) = nstate.try_reserve(num_nodes) { return Err((error, edges)); }
+        Ok(Self::initialize(num_nodes, edges, nstate))
+    }
+
+    #[expect(clippy::arithmetic_side_effects, reason = "Verus proves the state-construction cursor remains within the node bound")]
+    fn initialize(num_nodes: usize, edges: Vec<(usize, usize)>, mut nstate: Vec<StepGraphNodeState>) -> (s: StepGraph)
+        requires
+            nstate@.len() == 0,
+            Self::edges_valid(edges@, num_nodes),
+            Self::edges_distinct(edges@),
+        ensures
+            s.num_nodes == num_nodes,
+            s.edges@ == edges@,
+            s.nstate@.len() == num_nodes,
+            forall|n: usize| n < num_nodes ==>
+                #[trigger] s.nstate@[n as int]
+                    == if Self::has_predecessor_in(edges@, n) {
+                        StepGraphNodeState::NotReady
+                    } else {
+                        StepGraphNodeState::Ready
+                    },
+            s.inv(),
+            s.no_run_before_predecessors(),
+    {
         let mut n = 0;
         while n < num_nodes
             invariant
