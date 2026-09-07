@@ -194,7 +194,6 @@ impl ForkJoin {
         &&& self.ready_only_done()
     }
 
-    #[expect(clippy::arithmetic_side_effects, reason = "Verus proves the construction cursor remains within the worker bound")]
     /// Construct a fork-phase execution with ready workers.
     pub fn new(workers: usize, value_domain_size: u64, initial_value: u64) -> (s: ForkJoin)
         requires
@@ -213,9 +212,51 @@ impl ForkJoin {
             !s.output_ready,
             s.inv(),
     {
-        let mut wstate = Vec::new();
-        let mut wvalue = Vec::new();
-        let mut snapshot = Vec::new();
+        Self::initialize(workers, value_domain_size, initial_value, Vec::new(), Vec::new(), Vec::new())
+    }
+
+    /// Reserve all worker and output storage before exposing the fork.
+    ///
+    /// # Errors
+    /// Returns the allocation error before any worker can start.
+    pub fn try_new(workers: usize, value_domain_size: u64, initial_value: u64)
+        -> (result: Result<Self, std::collections::TryReserveError>)
+        requires value_domain_size > 0, initial_value < value_domain_size,
+        ensures result is Ok ==> {
+            let s = result.unwrap();
+            &&& s.inv() && s.value_domain_size == value_domain_size
+            &&& s.wstate@.len() == workers && s.wvalue@.len() == workers
+            &&& s.output_snapshot@.len() == workers
+            &&& s.phase == ForkJoinPhase::Fork && !s.output_ready
+            &&& forall|i: int| 0 <= i < workers ==> #[trigger] s.wstate@[i] == ForkJoinWorkerState::Ready
+            &&& forall|i: int| 0 <= i < workers ==> #[trigger] s.wvalue@[i] == initial_value
+            &&& forall|i: int| 0 <= i < workers ==> #[trigger] s.output_snapshot@[i] == initial_value
+        },
+    {
+        let mut states = Vec::new(); let mut values = Vec::new(); let mut snapshot = Vec::new();
+        states.try_reserve(workers)?; values.try_reserve(workers)?; snapshot.try_reserve(workers)?;
+        Ok(Self::initialize(workers, value_domain_size, initial_value, states, values, snapshot))
+    }
+
+    #[expect(clippy::arithmetic_side_effects, reason = "Verus proves the construction cursor remains within the worker bound")]
+    fn initialize(workers: usize, value_domain_size: u64, initial_value: u64, mut wstate: Vec<ForkJoinWorkerState>, mut wvalue: Vec<u64>, mut snapshot: Vec<u64>) -> (s: ForkJoin)
+        requires
+            wstate@.len() == 0, wvalue@.len() == 0, snapshot@.len() == 0,
+            value_domain_size > 0,
+            initial_value < value_domain_size,
+        ensures
+            s.value_domain_size == value_domain_size,
+            s.wstate@.len() == workers,
+            s.wvalue@.len() == workers,
+            s.output_snapshot@.len() == workers,
+            forall|i: int| 0 <= i < workers ==>
+                s.wstate@[i] == ForkJoinWorkerState::Ready,
+            forall|i: int| 0 <= i < workers ==> s.wvalue@[i] == initial_value,
+            forall|i: int| 0 <= i < workers ==> s.output_snapshot@[i] == initial_value,
+            s.phase == ForkJoinPhase::Fork,
+            !s.output_ready,
+            s.inv(),
+    {
         let mut i = 0;
         while i < workers
             invariant
@@ -398,7 +439,20 @@ impl ForkJoin {
             final(self).inv(),
     {
         if matches!(self.phase, ForkJoinPhase::Join) {
-            self.output_snapshot = self.wvalue.clone();
+            let mut i: usize = 0;
+            while i < self.wvalue.len()
+                invariant
+                    self.inv(), self.phase == ForkJoinPhase::Join, !self.output_ready,
+                    self.wstate@ == old(self).wstate@, self.wvalue@ == old(self).wvalue@,
+                    self.value_domain_size == old(self).value_domain_size,
+                    i <= self.wvalue.len(),
+                    forall|j: int| 0 <= j < i ==> #[trigger] self.output_snapshot@[j] == self.wvalue@[j],
+                decreases self.wvalue.len() - i,
+            {
+                self.output_snapshot.set(i, self.wvalue[i]);
+                i += 1;
+            }
+            assert(self.output_snapshot@ =~= self.wvalue@);
             self.output_ready = true;
             self.phase = ForkJoinPhase::Done;
             true

@@ -170,6 +170,61 @@ impl RateLimit {
         }
     }
 
+    /// One exact clock-only Tick transition, including its maximum-clock guard.
+    pub open spec fn tick_step(before: Self, after: Self) -> bool {
+        &&& before.clock < before.max_clock
+        &&& after.clock as int == before.clock as int + 1
+        &&& after.budget == before.budget
+        &&& after.window_start == before.window_start
+        &&& after.window_duration == before.window_duration
+        &&& after.max_clock == before.max_clock
+    }
+
+    /// A finite sequence of zero or more exact Tick transitions.
+    pub open spec fn tick_closure(before: Self, after: Self) -> bool {
+        exists|path: Seq<Self>| path.len() >= 1 && path[0] == before && path.last() == after
+            && forall|i: int| 0 <= i < path.len() - 1 ==> Self::tick_step(#[trigger] path[i],path[i+1])
+    }
+
+    /// Construct the explicit finite Tick path for a bounded clock observation.
+    pub proof fn lemma_clock_path(before: Self, after: Self)
+        requires before.clock <= after.clock <= before.max_clock,
+            after.budget == before.budget, after.window_start == before.window_start,
+            after.window_duration == before.window_duration, after.max_clock == before.max_clock,
+        ensures Self::tick_closure(before,after),
+    {
+        let path = Seq::new((after.clock - before.clock + 1) as nat, |i: int| Self {
+            budget: before.budget, window_start: before.window_start,
+            window_duration: before.window_duration, max_clock: before.max_clock,
+            clock: (before.clock + i) as u64,
+        });
+        assert(path[0] == before);
+        assert(path.last() == after);
+        assert forall|i: int| 0 <= i < path.len() - 1 implies Self::tick_step(#[trigger] path[i],path[i+1]) by {}
+        assert(Self::tick_closure(before,after));
+    }
+
+    /// Observe a bounded monotonic clock value; equivalent to zero or more Tick actions.
+    /// A repeated value is an accepted stutter. Regression and overflow refuse unchanged.
+    pub fn advance_clock_to(&mut self, now: u64) -> (accepted: bool)
+        requires old(self).type_invariant(), old(self).window_start_not_future(),
+        ensures
+            accepted == (old(self).clock <= now && now <= old(self).max_clock),
+            accepted ==> Self::tick_closure(*old(self),*final(self)),
+            final(self).clock == if accepted { now } else { old(self).clock },
+            final(self).budget == old(self).budget,
+            final(self).window_duration == old(self).window_duration,
+            final(self).max_clock == old(self).max_clock,
+            final(self).window_start == old(self).window_start,
+            final(self).type_invariant(), final(self).window_start_not_future(),
+            !accepted ==> *final(self) == *old(self),
+    {
+        if now < self.clock || now > self.max_clock { return false; }
+        self.clock = now;
+        proof { Self::lemma_clock_path(*old(self),*self); }
+        true
+    }
+
     // ── Tick (TLA+ Tick) ────────────────────────────────────────────────
 
     /// Advance the runtime-given clock by one. Realises the TLA+ `Tick`
@@ -187,6 +242,7 @@ impl RateLimit {
             final(self).budget.allocated == old(self).budget.allocated,
             final(self).window_start == old(self).window_start,
             final(self).clock == old(self).clock + 1,
+            Self::tick_step(*old(self),*final(self)),
             counter::increment(old(self).clock as int, final(self).clock as int),
             final(self).type_invariant(),
             final(self).window_count_bound(),

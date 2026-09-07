@@ -106,13 +106,50 @@ impl Sequential {
             s.history@.len() == 0,
             s.inv(),
     {
+        Self::initialize(steps, value_domain_size, initial_value, Vec::new())
+    }
+
+    /// Reserve the finite history before exposing this execution owner.
+    ///
+    /// # Errors
+    /// Returns the allocation error without exposing a partially initialized carrier.
+    pub fn try_new(steps: usize, value_domain_size: u64, initial_value: u64)
+        -> (result: Result<Self, std::collections::TryReserveError>)
+        requires steps > 0, value_domain_size > 0, initial_value < value_domain_size,
+        ensures result is Ok ==> {
+            let s = result.unwrap();
+            &&& s.steps == steps && s.value_domain_size == value_domain_size
+            &&& s.pc == 0 && s.value == initial_value && !s.active
+            &&& s.history@.len() == 0 && s.inv()
+        },
+    {
+        let mut history = Vec::new();
+        history.try_reserve(steps)?;
+        Ok(Self::initialize(steps, value_domain_size, initial_value, history))
+    }
+
+    fn initialize(steps: usize, value_domain_size: u64, initial_value: u64, history: Vec<u64>) -> (s: Sequential)
+        requires
+            history@.len() == 0,
+            steps > 0,
+            value_domain_size > 0,
+            initial_value < value_domain_size,
+        ensures
+            s.steps == steps,
+            s.value_domain_size == value_domain_size,
+            s.pc == 0,
+            s.value == initial_value,
+            !s.active,
+            s.history@.len() == 0,
+            s.inv(),
+    {
         Sequential {
             steps,
             value_domain_size,
             pc: 0,
             value: initial_value,
             active: false,
-            history: Vec::new(),
+            history,
         }
     }
 

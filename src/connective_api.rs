@@ -177,6 +177,25 @@ impl<T> Buffer<T> {
         Self { inner: BufferCarrier::new(capacity) }
     }
 
+    /// Construct an empty FIFO after reserving its admitted storage once.
+    ///
+    /// Allocation uses the standard allocator; its behavior is a runtime rely.
+    ///
+    /// # Errors
+    ///
+    /// Returns the allocation error if the requested storage cannot be reserved.
+    pub fn try_new(capacity: usize) -> (result: Result<Self, std::collections::TryReserveError>)
+        ensures
+            result is Ok ==> result->Ok_0.well_formed(),
+            result is Ok ==> result->Ok_0.distinct(),
+            result is Ok ==> result->Ok_0.admitted_capacity() == capacity as nat,
+            result is Ok ==> result->Ok_0.retained() == Seq::<T>::empty(),
+            result is Ok ==> forall|value: T| !result->Ok_0.contains_retained(value),
+    {
+        let inner = BufferCarrier::try_new(capacity)?;
+        Ok(Self { inner })
+    }
+
     /// Fixed FIFO capacity.
     pub fn capacity(&self) -> (capacity: usize)
         ensures capacity as nat == self.admitted_capacity(),

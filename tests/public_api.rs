@@ -1,3 +1,154 @@
+#[cfg(feature = "proof-api")]
+mod registry_byte_keys {
+    use automation_structures::primitives::resource_registry::{ByteKey, ResourceRegistry};
+
+    #[test]
+    fn equal_allocations_replace_and_borrowed_queries_do_not_escape() {
+        let encoded = vec![1u8, 0, 2];
+        let allocation = encoded.as_ptr();
+        let key = ByteKey::from_bytes(encoded);
+        assert_eq!(key.as_bytes().as_ptr(), allocation);
+        let mut registry = ResourceRegistry::<ByteKey, Vec<u64>>::new();
+        registry.register_key(key, vec![11, 12]);
+        registry.register_key(ByteKey::from_bytes(vec![9]), vec![31, 32]);
+        let storage = registry.entries.as_ptr();
+        let capacity = registry.entries.capacity();
+        let replacement = ByteKey::from_bytes(vec![1u8, 0, 2]);
+        assert_ne!(replacement.as_bytes().as_ptr(), allocation);
+        registry.register_key(replacement, vec![21, 22]);
+        assert_eq!(registry.entries.len(), 2);
+        assert_eq!(registry.entries[0].0.as_bytes(), &[9]);
+        assert_eq!(registry.entries[0].1, vec![31, 32]);
+        assert_eq!(registry.entries[1].0.as_bytes(), &[1, 0, 2]);
+        assert_eq!(registry.entries.as_ptr(), storage);
+        assert_eq!(registry.entries.capacity(), capacity);
+        let value = {
+            let temporary_probe = [99, 1, 0, 2, 88];
+            registry.lookup_query(&&temporary_probe[1..4]).unwrap()
+        };
+        assert_eq!(value, &[21, 22]);
+        assert!(std::ptr::eq(value, &registry.entries[1].1));
+        assert!(registry.lookup_query(&&[1u8, 0][..]).is_none());
+        registry.deregister_key(ByteKey::from_bytes(vec![1u8, 0, 2]));
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(registry.entries[0].0.as_bytes(), &[9]);
+        assert_eq!(registry.entries.as_ptr(), storage);
+    }
+
+    #[test]
+    fn exact_byte_identity_distinguishes_lengths_prefixes_and_embedded_zeros() {
+        let cases: &[&[u8]] = &[
+            &[],
+            &[0],
+            &[0, 0],
+            &[1],
+            &[1, 0],
+            &[1, 0, 1],
+            &[1, 1, 0],
+            &[255, 0],
+        ];
+        let mut registry = ResourceRegistry::<ByteKey, u64>::new();
+        for (id, bytes) in cases.iter().enumerate() {
+            registry.register_key(ByteKey::from_bytes(bytes.to_vec()), id as u64);
+        }
+        assert_eq!(registry.entries.len(), cases.len());
+        let storage = registry.entries.as_ptr();
+        for _ in 0..128 {
+            for (id, bytes) in cases.iter().enumerate() {
+                assert_eq!(registry.lookup_query(bytes), Some(&(id as u64)));
+            }
+            assert!(registry.lookup_query(&&[2u8][..]).is_none());
+        }
+        assert_eq!(registry.entries.as_ptr(), storage);
+        registry.register_key(ByteKey::from_bytes(vec![1, 0]), 99);
+        assert_eq!(registry.entries.len(), cases.len());
+        for (id, bytes) in cases.iter().enumerate() {
+            let expected = if *bytes == [1, 0] { 99 } else { id as u64 };
+            assert_eq!(registry.lookup_query(bytes), Some(&expected));
+        }
+    }
+}
+
+#[cfg(feature = "proof-api")]
+mod registry_owned {
+
+    use automation_structures::primitives::resource_registry::{RegistryKey, ResourceRegistry};
+    use vstd::prelude::*;
+
+    verus! {
+    struct OwnedKey { code: u64 }
+
+    impl RegistryKey for OwnedKey {
+        fn value_eq(&self, other: &Self) -> (equal: bool)
+            ensures equal == (*self == *other),
+        {
+            self.code == other.code
+        }
+    }
+    }
+
+    #[test]
+    fn owned_registry_borrows_and_preserves_exact_replacement_order() {
+        let mut registry = ResourceRegistry::<OwnedKey, Vec<u64>>::new();
+        registry.register(OwnedKey { code: 7 }, vec![11, 12]);
+        registry.register(OwnedKey { code: 8 }, vec![21, 22]);
+        registry.register(OwnedKey { code: 9 }, vec![31, 32]);
+        let borrowed = registry.lookup_ref(&OwnedKey { code: 8 }).unwrap();
+        assert!(std::ptr::eq(borrowed, &registry.entries[1].1));
+        assert_eq!(borrowed, &[21, 22]);
+        assert!(registry.lookup_ref(&OwnedKey { code: 99 }).is_none());
+        let storage = registry.entries.as_ptr();
+        let capacity = registry.entries.capacity();
+
+        registry.register(OwnedKey { code: 8 }, vec![41, 42]);
+        assert_eq!(registry.entries.as_ptr(), storage);
+        assert_eq!(registry.entries.capacity(), capacity);
+        let observed: Vec<_> = registry
+            .entries
+            .iter()
+            .map(|(k, v)| (k.code, v.as_slice()))
+            .collect();
+        assert_eq!(
+            observed,
+            vec![(7, &[11, 12][..]), (9, &[31, 32][..]), (8, &[41, 42][..])]
+        );
+
+        registry.deregister(OwnedKey { code: 9 });
+        assert_eq!(registry.entries.as_ptr(), storage);
+        assert_eq!(registry.entries.capacity(), capacity);
+        let observed: Vec<_> = registry
+            .entries
+            .iter()
+            .map(|(k, v)| (k.code, v.as_slice()))
+            .collect();
+        assert_eq!(observed, vec![(7, &[11, 12][..]), (8, &[41, 42][..])]);
+        assert!(registry.lookup_ref(&OwnedKey { code: 9 }).is_none());
+        let removed = registry.deregister_at(1);
+        assert_eq!((removed.0.code, removed.1), (8, vec![41, 42]));
+        assert_eq!(registry.entries[0].1, vec![11, 12]);
+    }
+
+    #[test]
+    fn repeated_replacement_retains_the_registry_allocation() {
+        let mut registry = ResourceRegistry::<u64, u64>::new();
+        registry.register(7, 11);
+        registry.register(8, 21);
+        registry.register(9, 31);
+        let storage = registry.entries.as_ptr();
+        let capacity = registry.entries.capacity();
+        for value in 0..4096 {
+            registry.register(8, value);
+            assert_eq!(registry.entries.as_ptr(), storage);
+            assert_eq!(registry.entries.capacity(), capacity);
+            assert_eq!(registry.entries, vec![(7, 11), (9, 31), (8, value)]);
+            assert_eq!(registry.lookup(8), Some(value));
+            assert_eq!(registry.lookup(7), Some(11));
+            assert_eq!(registry.lookup(9), Some(31));
+            assert_eq!(registry.lookup(99), None);
+        }
+    }
+}
+
 use automation_structures::{
     Accumulator, ActuationError, ActuationPass, AllocationSnapshot, AllocationSnapshotError,
     AuditRecord, AuditSink, BacktrackingBuildError, BacktrackingError, BacktrackingTraversal,
@@ -833,6 +984,49 @@ fn connective_buffer_is_bounded_fifo() {
 }
 
 #[test]
+fn preallocated_buffer_preserves_owned_fifo_and_reports_capacity_overflow() {
+    let mut buffer = Buffer::<String>::try_new(2).expect("two payload slots");
+    assert_eq!(buffer.capacity(), 2);
+    assert!(buffer.is_empty());
+    assert_eq!(buffer.push(String::from("first")), Ok(()));
+    assert_eq!(buffer.push(String::from("second")), Ok(()));
+    assert_eq!(
+        buffer.push(String::from("refused")),
+        Err(String::from("refused"))
+    );
+    assert_eq!(buffer.pop().as_deref(), Some("first"));
+    assert_eq!(buffer.push(String::from("third")), Ok(()));
+    assert_eq!(buffer.pop().as_deref(), Some("second"));
+    assert_eq!(buffer.pop().as_deref(), Some("third"));
+    assert_eq!(buffer.pop(), None);
+    assert!(Buffer::<u64>::try_new(usize::MAX).is_err());
+    let mut zero = Buffer::<u64>::try_new(0).expect("empty storage");
+    assert_eq!(zero.push(1), Err(1));
+    assert_eq!(zero.pop(), None);
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn preallocated_buffer_reuses_reserved_storage_through_fifo_cycles() {
+    use automation_structures::connectives::buffer::Buffer as Carrier;
+    let mut buffer = Carrier::<u64>::try_new(4).expect("four slots");
+    let capacity = buffer.values.capacity();
+    let allocation = buffer.values.as_ptr();
+    assert!(capacity >= 4);
+    for cycle in 0..32 {
+        for offset in 0..4 {
+            assert_eq!(buffer.push(cycle * 4 + offset), Ok(()));
+        }
+        assert_eq!(buffer.push(999), Err(999));
+        for offset in 0..4 {
+            assert_eq!(buffer.pop(), Some(cycle * 4 + offset));
+        }
+        assert_eq!(buffer.values.capacity(), capacity);
+        assert_eq!(buffer.values.as_ptr(), allocation);
+    }
+}
+
+#[test]
 fn connective_counter_marker_projection_and_order_are_reusable() {
     let mut counter = Counter::new(0);
     assert!(!counter.try_decrement());
@@ -989,4 +1183,651 @@ fn checked_constructors_reject_invalid_configurations() {
         StreamGraph::new(3, 1, 1, 0),
         Err(automation_structures::StreamGraphBuildError::EmptyRecordDomain)
     ));
+}
+
+#[cfg(feature = "proof-api")]
+mod summarized_audit {
+    use automation_structures::primitives::audit_sink::{
+        AuditSink, CheckedSignedAdd, CheckedSignedSumCount, NullableSigned, SignedSumCount,
+    };
+
+    #[test]
+    fn typed_summary_preserves_order_latest_and_refuses_overflow() {
+        let mut sink = AuditSink::with_summary(4, CheckedSignedAdd);
+        assert_eq!(sink.committed_count(), 0);
+        assert_eq!(sink.latest(), None);
+        for value in [7, -11, 8] {
+            assert!(sink.record_typed(value));
+        }
+        assert_eq!(sink.carry(), 4);
+        assert_eq!(sink.latest(), Some(8));
+        assert_eq!(sink.committed_count(), 3);
+        assert!(!sink.record_typed(i64::MAX));
+        assert_eq!(
+            (sink.carry(), sink.latest(), sink.committed_count()),
+            (4, Some(8), 3)
+        );
+        assert!(sink.record_typed(-4));
+        assert!(!sink.record_typed(1));
+        assert_eq!(
+            (sink.carry(), sink.latest(), sink.committed_count()),
+            (0, Some(-4), 4)
+        );
+    }
+
+    #[test]
+    fn summary_and_retained_share_record_for_signed_limits_and_repeated_work() {
+        let mut empty = AuditSink::with_summary(0, CheckedSignedAdd);
+        assert!(!empty.record_typed(0));
+        let mut full = AuditSink::with_typed_operator(4, CheckedSignedAdd);
+        let mut summary = AuditSink::with_summary(4, CheckedSignedAdd);
+        for value in [i64::MIN, -1, i64::MAX, 1, 0, 1] {
+            assert_eq!(summary.record_typed(value), full.record_typed(value));
+            assert_eq!(summary.carry(), full.carry());
+            assert_eq!(summary.committed_count(), full.committed_count());
+            assert_eq!(summary.latest(), full.latest());
+        }
+        let mut repeated = AuditSink::with_summary(1_000_000, CheckedSignedAdd);
+        for _ in 0..100_000 {
+            assert!(repeated.record_typed(1));
+        }
+        assert_eq!(repeated.carry(), 100_000);
+        assert_eq!(repeated.committed_count(), 100_000);
+        assert_eq!(repeated.latest(), Some(1));
+        assert!(core::mem::size_of_val(&repeated) < 128);
+    }
+
+    #[test]
+    fn nullable_pair_counts_contributions_and_frames_refusal() {
+        let mut fold = AuditSink::with_summary(6, CheckedSignedSumCount);
+        use NullableSigned::{Missing, Value};
+        for value in [Missing, Value(7), Missing, Value(-11)] {
+            assert!(fold.record_typed(value));
+        }
+        assert_eq!(fold.carry(), SignedSumCount { sum: -4, count: 2 });
+        assert_eq!(fold.committed_count(), 4);
+        assert_eq!(fold.latest(), Some(Value(-11)));
+        assert!(!fold.record_typed(Value(i64::MIN)));
+        assert_eq!(
+            (fold.carry(), fold.committed_count()),
+            (SignedSumCount { sum: -4, count: 2 }, 4)
+        );
+        assert!(fold.record_typed(Missing));
+        assert_eq!(fold.latest(), Some(Missing));
+        assert_eq!(fold.carry(), SignedSumCount { sum: -4, count: 2 });
+    }
+}
+
+#[cfg(feature = "proof-api")]
+mod indexed_registry {
+    use automation_structures::primitives::{
+        audit_sink::{AuditSink, CheckedSignedAdd},
+        resource_registry::{ByteKey, RegistryStorage, ResourceRegistry},
+    };
+
+    #[test]
+    fn exact_bytes_borrowed_probes_order_and_owned_storage() {
+        let keys = [
+            vec![],
+            vec![0],
+            vec![1],
+            vec![1, 0],
+            vec![1, 0, 2],
+            vec![1, 2],
+        ];
+        let mut registry = ResourceRegistry::new_indexed();
+        assert!(registry.try_reserve_entries(keys.len()));
+        let capacity = registry.entries.capacity();
+        for (i, bytes) in keys.iter().enumerate() {
+            let retained = bytes.clone();
+            let address = retained.as_ptr();
+            assert!(
+                registry
+                    .try_register_key(ByteKey::from_bytes(retained), vec![i])
+                    .is_ok()
+            );
+            assert_eq!(registry.entries.key_at(i).as_bytes().as_ptr(), address);
+        }
+        for (i, bytes) in keys.iter().enumerate() {
+            let mut surrounded = vec![255];
+            surrounded.extend(bytes);
+            surrounded.push(254);
+            let probe = &surrounded[1..surrounded.len() - 1];
+            assert_eq!(registry.lookup_query(&probe), Some(&vec![i]));
+        }
+        assert!(registry.lookup_query(&[1u8, 0, 2, 0].as_slice()).is_none());
+        assert!(
+            registry
+                .try_register_key(ByteKey::from_bytes(vec![1]), vec![99])
+                .is_ok()
+        );
+        let expected = [
+            vec![],
+            vec![0],
+            vec![1, 0],
+            vec![1, 0, 2],
+            vec![1, 2],
+            vec![1],
+        ];
+        for (i, key) in expected.iter().enumerate() {
+            assert_eq!(registry.entries.key_at(i).as_bytes(), key);
+        }
+        registry.deregister_key(ByteKey::from_bytes(vec![1, 0]));
+        assert_eq!(registry.entries.len(), 5);
+        assert!(registry.lookup_query(&[1u8, 0].as_slice()).is_none());
+        assert_eq!(registry.lookup_query(&[1u8].as_slice()), Some(&vec![99]));
+        assert_eq!(registry.entries.capacity(), capacity);
+        assert!(!registry.try_reserve_entries(usize::MAX));
+        assert_eq!(registry.entries.len(), 5);
+        assert_eq!(registry.lookup_query(&[1u8].as_slice()), Some(&vec![99]));
+    }
+
+    #[test]
+    fn borrowed_aggregate_owners_retain_keys_values_and_capacity() {
+        let mut registry = ResourceRegistry::new_indexed();
+        assert!(registry.try_reserve_entries(64));
+        for i in 0u64..64 {
+            assert!(
+                registry
+                    .try_register_key(
+                        ByteKey::from_bytes(i.to_be_bytes().to_vec()),
+                        AuditSink::with_summary(100_000, CheckedSignedAdd)
+                    )
+                    .is_ok()
+            );
+        }
+        let key_addresses: Vec<_> = (0..64)
+            .map(|i| registry.entries.key_at(i).as_bytes().as_ptr())
+            .collect();
+        let value_addresses: Vec<_> = (0..64)
+            .map(|i| registry.entries.value_at(i) as *const _)
+            .collect();
+        let capacity = registry.entries.capacity();
+        for i in 0u64..100_000 {
+            let probe = (i % 64).to_be_bytes();
+            let fold = registry
+                .lookup_query_mut(&probe.as_slice())
+                .expect("retained group");
+            assert!(fold.record_typed(1));
+        }
+        let mut total = 0;
+        for i in 0..64 {
+            let fold = registry.entries.value_at(i);
+            total += fold.carry();
+            assert_eq!(fold.carry() as usize, fold.committed_count());
+            assert_eq!(
+                fold.committed_count(),
+                100_000 / 64 + usize::from(i < 100_000 % 64)
+            );
+            assert_eq!(
+                registry.entries.key_at(i).as_bytes().as_ptr(),
+                key_addresses[i]
+            );
+            assert_eq!(fold as *const _, value_addresses[i]);
+        }
+        assert_eq!(total, 100_000);
+        assert_eq!(registry.entries.capacity(), capacity);
+        assert!(registry.lookup_query_mut(&[255u8].as_slice()).is_none());
+        assert_eq!(registry.entries.len(), 64);
+    }
+}
+
+#[cfg(feature = "proof-api")]
+mod finite_ordering {
+    use automation_structures::{
+        connectives::ordering_pass::{ArrangementError, SignedRowOrder, try_arrange_indices},
+        primitives::audit_sink::NullableSigned::{Missing, Value},
+    };
+
+    #[test]
+    fn direction_nulls_and_equal_key_ties_are_exact() {
+        let values = vec![Value(3), Missing, Value(2), Value(3), Missing, Value(-4)];
+        let ascending = SignedRowOrder {
+            values: &values,
+            descending: false,
+            nulls_first: true,
+        };
+        assert_eq!(
+            try_arrange_indices(6, &ascending),
+            Ok(vec![1, 4, 5, 2, 0, 3])
+        );
+        let descending = SignedRowOrder {
+            values: &values,
+            descending: true,
+            nulls_first: false,
+        };
+        assert_eq!(
+            try_arrange_indices(6, &descending),
+            Ok(vec![0, 3, 2, 5, 1, 4])
+        );
+        let descending = SignedRowOrder {
+            values: &values,
+            descending: true,
+            nulls_first: true,
+        };
+        assert_eq!(
+            try_arrange_indices(6, &descending),
+            Ok(vec![1, 4, 0, 3, 2, 5])
+        );
+        assert_eq!(try_arrange_indices(3, &descending), Ok(vec![1, 0, 2]));
+        assert_eq!(
+            values,
+            vec![Value(3), Missing, Value(2), Value(3), Missing, Value(-4)]
+        );
+    }
+    #[test]
+    fn empty_domain_bounds_and_signed_extremes() {
+        let values = vec![Value(i64::MAX), Value(i64::MIN), Value(0), Value(i64::MIN)];
+        let order = SignedRowOrder {
+            values: &values,
+            descending: false,
+            nulls_first: false,
+        };
+        assert_eq!(try_arrange_indices(0, &order), Ok(vec![]));
+        assert_eq!(try_arrange_indices(4, &order), Ok(vec![1, 3, 2, 0]));
+        assert_eq!(
+            try_arrange_indices(5, &order),
+            Err(ArrangementError::OutsideDomain)
+        );
+        assert_eq!(
+            try_arrange_indices(usize::MAX, &order),
+            Err(ArrangementError::OutsideDomain)
+        );
+    }
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn linear_registry_reservation_preserves_owned_mapping_and_capacity() {
+    use automation_structures::primitives::resource_registry::ResourceRegistry;
+    let mut owner = ResourceRegistry::<u64, Vec<u8>>::new();
+    owner.register(7, vec![3, 1]);
+    let payload_pointer = owner.lookup_ref(&7).unwrap().as_ptr();
+    owner.try_reserve_entries(3).unwrap();
+    let capacity = owner.entries.capacity();
+    let entries_pointer = owner.entries.as_ptr();
+    assert_eq!(owner.lookup_ref(&7).unwrap().as_ptr(), payload_pointer);
+    assert_eq!(owner.lookup_ref(&7), Some(&vec![3, 1]));
+    owner.register(2, vec![4]);
+    owner.register(9, vec![8]);
+    owner.register(4, vec![6]);
+    owner.register(2, vec![5]);
+    assert_eq!(
+        owner
+            .entries
+            .iter()
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>(),
+        vec![7, 9, 4, 2]
+    );
+    assert_eq!(owner.lookup_ref(&2), Some(&vec![5]));
+    assert_eq!(owner.lookup_ref(&7), Some(&vec![3, 1]));
+    assert_eq!(owner.entries.capacity(), capacity);
+    assert_eq!(owner.entries.as_ptr(), entries_pointer);
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn linear_registry_reservation_refuses_oversized_storage_without_mutation() {
+    use automation_structures::primitives::resource_registry::ResourceRegistry;
+    let mut owner = ResourceRegistry::<u64, Vec<u8>>::new();
+    owner.register(7, vec![3, 1]);
+    owner.register(2, vec![8]);
+    let entries_pointer = owner.entries.as_ptr();
+    let payload_pointer = owner.lookup_ref(&7).unwrap().as_ptr();
+    assert!(owner.try_reserve_entries(usize::MAX).is_err());
+    assert_eq!(owner.entries, vec![(7, vec![3, 1]), (2, vec![8])]);
+    assert_eq!(owner.entries.as_ptr(), entries_pointer);
+    assert_eq!(owner.lookup_ref(&7).unwrap().as_ptr(), payload_pointer);
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn fallible_admission_selection_retains_canonical_initialization_and_ties() {
+    use automation_structures::primitives::competitive_selection::CompetitiveSelectionHard;
+    let mut owner = CompetitiveSelectionHard::try_new(3).unwrap();
+    assert_eq!(owner.scores, vec![0, 0, 0]);
+    assert_eq!(owner.allocation, None);
+    assert_eq!(owner.scores, CompetitiveSelectionHard::new(3).scores);
+    let capacity = owner.scores.capacity();
+    let pointer = owner.scores.as_ptr();
+    owner.update_score(2, 1);
+    owner.update_score(1, 1);
+    owner.evaluate();
+    assert_eq!(owner.allocation, Some(1));
+    assert_eq!(owner.scores.capacity(), capacity);
+    assert_eq!(owner.scores.as_ptr(), pointer);
+    assert!(CompetitiveSelectionHard::try_new(usize::MAX).is_err());
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn fallible_admission_step_graph_retains_dependencies_and_refused_edges() {
+    use automation_structures::{StepState, modalities::step_graph::StepGraph};
+    let edges = vec![(0, 1), (1, 2)];
+    let pointer = edges.as_ptr();
+    let mut owner = StepGraph::try_new(3, edges).unwrap();
+    assert_eq!(owner.edges.as_ptr(), pointer);
+    assert_eq!(
+        owner.nstate,
+        vec![StepState::Ready, StepState::NotReady, StepState::NotReady]
+    );
+    assert_eq!(owner.nstate, StepGraph::new(3, vec![(0, 1), (1, 2)]).nstate);
+    let states_pointer = owner.nstate.as_ptr();
+    assert!(!owner.start_running(1));
+    assert!(owner.start_running(0));
+    assert!(owner.complete_node(0));
+    assert!(owner.become_ready(1));
+    assert!(owner.start_running(1));
+    assert!(owner.complete_node(1));
+    assert!(owner.become_ready(2));
+    assert!(owner.start_running(2));
+    assert!(owner.complete_node(2));
+    assert!(owner.done_stuttering());
+    assert_eq!(owner.nstate.as_ptr(), states_pointer);
+    let edges = vec![(0, 1)];
+    let pointer = edges.as_ptr();
+    let Err((_, returned)) = StepGraph::try_new(usize::MAX, edges) else {
+        panic!("oversized state must refuse");
+    };
+    assert_eq!(returned, vec![(0, 1)]);
+    assert_eq!(returned.as_ptr(), pointer);
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn fallible_admission_actuation_retains_assignments_and_effect_scope() {
+    use automation_structures::primitives::actuation_pass::ActuationPass;
+    let assignments = vec![Some(7), None, Some(9)];
+    let pointer = assignments.as_ptr();
+    let mut owner = ActuationPass::try_new(assignments, 3).unwrap();
+    assert_eq!(owner.allocation.as_ptr(), pointer);
+    assert_eq!(owner.effects, vec![None, None, None]);
+    assert!(!owner.complete);
+    let effects_pointer = owner.effects.as_ptr();
+    owner.actuate(0);
+    owner.actuate(2);
+    owner.finish();
+    assert_eq!(owner.effects, vec![Some(7), None, Some(9)]);
+    assert!(owner.complete);
+    assert_eq!(owner.effects.as_ptr(), effects_pointer);
+    let empty = ActuationPass::try_new(vec![], 0).unwrap();
+    assert!(empty.allocation.is_empty() && empty.effects.is_empty() && !empty.complete);
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn admitted_scalar_sequence_preserves_storage_and_order() {
+    use automation_structures::modalities::sequential::Sequential;
+    assert!(Sequential::try_new(usize::MAX, 10, 0).is_err());
+    let mut s = Sequential::try_new(4, 10, 0).unwrap();
+    let pointer = s.history.as_ptr();
+    let capacity = s.history.capacity();
+    for value in [3, 1, 4, 2] {
+        assert!(!s.complete_step(value));
+        assert!(s.begin_step());
+        assert!(!s.complete_step(10));
+        assert!(s.complete_step(value));
+        assert_eq!(s.history.as_ptr(), pointer);
+        assert_eq!(s.history.capacity(), capacity);
+    }
+    assert_eq!(s.history, vec![3, 1, 4, 2]);
+    assert!(s.done_stuttering());
+    assert!(!s.begin_step());
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn admitted_fork_keeps_snapshot_storage_and_barrier() {
+    use automation_structures::modalities::fork_join::ForkJoin;
+    assert!(ForkJoin::try_new(usize::MAX, 10, 0).is_err());
+    let mut s = ForkJoin::try_new(3, 10, 0).unwrap();
+    let pointers = (
+        s.wstate.as_ptr(),
+        s.wvalue.as_ptr(),
+        s.output_snapshot.as_ptr(),
+    );
+    assert!(!s.produce_output());
+    for (worker, value) in [3, 1, 4].into_iter().enumerate() {
+        assert!(!s.barrier());
+        assert!(s.start_worker(worker));
+        assert!(s.complete_worker(worker, value));
+    }
+    assert!(s.barrier());
+    assert!(s.produce_output());
+    assert!(!s.produce_output());
+    assert_eq!(s.output_snapshot, vec![3, 1, 4]);
+    assert_eq!(
+        (
+            s.wstate.as_ptr(),
+            s.wvalue.as_ptr(),
+            s.output_snapshot.as_ptr()
+        ),
+        pointers
+    );
+    let mut empty = ForkJoin::try_new(0, 1, 0).unwrap();
+    assert!(empty.barrier());
+    assert!(empty.produce_output());
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn admitted_federation_keeps_owner_storage_and_conservation() {
+    use automation_structures::compositions::federated_budget::FederatedBudget;
+    assert!(FederatedBudget::try_new(10, usize::MAX).is_err());
+    let mut f = FederatedBudget::try_new(10, 2).unwrap();
+    let pointer = f.sub_pools.as_ptr();
+    assert!(f.allocate_sub_pool(0, 7));
+    assert!(!f.allocate_sub_pool(1, 4));
+    assert!(f.allocate_from_sub_pool(0, 5));
+    assert!(f.release_from_sub_pool(0, 5));
+    assert_eq!(f.master.allocated, 7);
+    assert_eq!((f.sub_pools[0].allocated, f.sub_pools[0].reserved), (0, 7));
+    assert_eq!(f.sub_pools.as_ptr(), pointer);
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn admitted_audit_storage_frames_chain_on_reservation_failure() {
+    use automation_structures::primitives::audit_sink::{AdditiveChain, AuditSink};
+    let mut s = AuditSink::with_operator(4, AdditiveChain);
+    s.try_reserve_records(4).unwrap();
+    let pointer = s.log.as_ptr();
+    for value in [3, 1, 4, 2] {
+        assert!(s.record(value));
+        assert_eq!(s.log.as_ptr(), pointer);
+    }
+    let before = (s.committed_count(), s.carry(), s.latest());
+    assert!(s.try_reserve_records(usize::MAX).is_err());
+    assert_eq!((s.committed_count(), s.carry(), s.latest()), before);
+    assert_eq!(s.log.as_ptr(), pointer);
+    assert!(!s.record(1));
+    assert_eq!(s.carry(), 10);
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn admitted_governor_reuses_complete_window() {
+    use automation_structures::primitives::convergence_governor_phase_aware::ConvergenceGovernorPhaseAware;
+    assert!(ConvergenceGovernorPhaseAware::try_new(1, 2, usize::MAX, 0).is_err());
+    let mut g = ConvergenceGovernorPhaseAware::try_new(3, 6, 3, 9).unwrap();
+    assert!(!g.peak_observed);
+    let pointer = g.delta_history.as_ptr();
+    for round in 0..64 {
+        let value = round % 10;
+        g.update(value);
+        assert!(g.delta_history.len() <= 3);
+        assert_eq!(g.delta_history.as_ptr(), pointer);
+        assert_eq!(g.delta_history.last(), Some(&value));
+    }
+}
+
+#[cfg(feature = "proof-api")]
+#[test]
+fn rate_clock_observation_matches_repeated_ticks() {
+    use automation_structures::compositions::rate_limit::RateLimit;
+    let mut observed = RateLimit::new(2, 5, 100);
+    let mut ticked = RateLimit::new(2, 5, 100);
+    for now in [0, 0, 3, 5, 27, 100] {
+        while ticked.clock < now {
+            ticked.tick();
+        }
+        assert!(observed.advance_clock_to(now));
+        assert_eq!(observed.try_acquire(), ticked.try_acquire());
+        assert_eq!(
+            (
+                observed.clock,
+                observed.window_start,
+                observed.budget.allocated
+            ),
+            (ticked.clock, ticked.window_start, ticked.budget.allocated)
+        );
+    }
+    let before = (
+        observed.clock,
+        observed.window_start,
+        observed.budget.allocated,
+    );
+    assert!(!observed.advance_clock_to(99));
+    assert!(!observed.advance_clock_to(101));
+    assert_eq!(
+        (
+            observed.clock,
+            observed.window_start,
+            observed.budget.allocated
+        ),
+        before
+    );
+}
+
+#[cfg(feature = "proof-api")]
+#[allow(dead_code)]
+#[path = "../verification/downstream-verus/src/domains.rs"]
+mod domain_witnesses;
+
+#[test]
+#[cfg(feature = "proof-api")]
+fn generic_propagation_retains_snapshot_and_refuses_without_marking() {
+    use automation_structures::primitives::propagation_pass::PropagationPass;
+    use domain_witnesses::{Bit, NeighborComplement};
+    let mut p = PropagationPass::try_new(
+        2,
+        8,
+        NeighborComplement { allowed: 2 },
+        vec![],
+        vec![Bit { set: false }; 2],
+    )
+    .unwrap();
+    let storage = (p.snapshot.as_ptr(), p.updated.as_ptr(), p.values.as_ptr());
+    assert!(!p.try_update_node(0));
+    for round in 0..8 {
+        p.start_round();
+        assert!(p.try_update_node(0));
+        assert!(!p.try_update_node(0));
+        assert!(!p.try_update_node(2));
+        assert!(p.try_update_node(1));
+        assert_eq!(
+            p.values,
+            vec![
+                Bit {
+                    set: round % 2 == 0
+                };
+                2
+            ]
+        );
+        assert_eq!(
+            p.snapshot,
+            vec![
+                Bit {
+                    set: round % 2 != 0
+                };
+                2
+            ]
+        );
+        p.end_round();
+        assert_eq!(p.iteration, round + 1);
+        assert_eq!(
+            (p.snapshot.as_ptr(), p.updated.as_ptr(), p.values.as_ptr()),
+            storage
+        );
+    }
+    let mut refused = PropagationPass::try_new(
+        2,
+        1,
+        NeighborComplement { allowed: 1 },
+        vec![],
+        vec![Bit { set: false }; 2],
+    )
+    .unwrap();
+    refused.start_round();
+    assert!(!refused.try_update_node(1));
+    assert_eq!(refused.values, vec![Bit { set: false }; 2]);
+    assert_eq!(refused.updated, vec![false; 2]);
+    let edges = vec![(0, 1)];
+    let values = vec![Bit { set: false }; 2];
+    let pointers = (edges.as_ptr(), values.as_ptr());
+    // Capacity-overflow probes are ordinary Rust misuse of raw logical preconditions;
+    // they check only error-path ownership, not admitted graph shape.
+    let Err((_, domain, edges, values)) = PropagationPass::try_new(
+        usize::MAX,
+        1,
+        NeighborComplement { allowed: 2 },
+        edges,
+        values,
+    ) else {
+        panic!("overflow admitted");
+    };
+    assert_eq!(domain.allowed, 2);
+    assert_eq!((edges.as_ptr(), values.as_ptr()), pointers);
+}
+
+#[test]
+#[cfg(feature = "proof-api")]
+fn generic_traversal_retains_tokens_and_restores_domain_data() {
+    use automation_structures::primitives::backtracking_traversal::BacktrackingTraversal;
+    use domain_witnesses::{Bit, Toggle};
+    let mut t =
+        BacktrackingTraversal::try_new(Toggle { choices: 3 }, 3, Bit { set: false }).unwrap();
+    t.try_reserve_visits(3).unwrap();
+    let storage = (t.path.as_ptr(), t.ledger.as_ptr(), t.visited.as_ptr());
+    assert!(!t.can_descend(0, true));
+    assert!(!t.can_descend(4, true));
+    assert!(!t.can_descend(1, false));
+    for choice in 1..=3 {
+        for depth in 0..3 {
+            t.descend(choice, true);
+            assert_eq!(t.aux.set, depth % 2 == 0);
+            assert_eq!(
+                t.ledger.last().unwrap().saved,
+                Bit {
+                    set: depth % 2 != 0
+                }
+            );
+            assert!(t.ledger.last().unwrap().delta);
+        }
+        assert!(!t.can_descend(1, true));
+        assert!(t.can_visit());
+        t.try_visit().unwrap();
+        assert!(!t.can_visit());
+        assert_eq!(t.visited.last().unwrap(), &vec![choice; 3]);
+        assert!(t.try_reserve_visits(usize::MAX).is_err());
+        assert_eq!(t.visited.len(), choice as usize);
+        for depth in (0..3).rev() {
+            t.ascend();
+            assert_eq!(t.aux.set, depth % 2 != 0);
+        }
+        assert_eq!(t.aux, Bit { set: false });
+        assert!(t.path.is_empty() && t.ledger.is_empty());
+        assert_eq!(
+            (t.path.as_ptr(), t.ledger.as_ptr(), t.visited.as_ptr()),
+            storage
+        );
+    }
+    let Err((_, domain, initial)) =
+        BacktrackingTraversal::try_new(Toggle { choices: 3 }, usize::MAX, Bit { set: true })
+    else {
+        panic!("overflow admitted");
+    };
+    assert_eq!(domain.choices, 3);
+    assert_eq!(initial, Bit { set: true });
 }

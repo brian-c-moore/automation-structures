@@ -242,9 +242,50 @@ impl ConvergenceGovernorPhaseAware {
             g.peak_observed == false,
             g.inv(),
     {
+        Self::initialize(threshold, awaken_threshold, window, max_delta, Vec::new())
+    }
+
+    /// Admit the complete sliding-window storage before the first update.
+    ///
+    /// # Errors
+    /// Returns the allocation error without exposing a governor.
+    pub fn try_new(threshold: u64, awaken_threshold: u64, window: usize, max_delta: u64)
+        -> (result: Result<Self, std::collections::TryReserveError>)
+        requires threshold <= u64::MAX / 2, window >= 1,
+            window as int * max_delta as int <= u64::MAX as int,
+        ensures result is Ok ==> {
+            let g = result.unwrap();
+            &&& g.inv() && g.threshold == threshold && g.awaken_threshold == awaken_threshold
+            &&& g.window == window && g.max_delta == max_delta
+            &&& g.state == GovState::Active && g.gradient_phase == Phase::Cold
+            &&& !g.peak_observed && g.delta_history@.len() == 0
+        },
+    {
+        let mut history = Vec::new(); history.try_reserve(window)?;
+        Ok(Self::initialize(threshold, awaken_threshold, window, max_delta, history))
+    }
+
+    fn initialize(threshold: u64, awaken_threshold: u64, window: usize, max_delta: u64, delta_history: Vec<u64>)
+        -> (g: ConvergenceGovernorPhaseAware)
+        requires
+            delta_history@.len() == 0,
+            threshold <= u64::MAX / 2,
+            window >= 1,
+            window as int * max_delta as int <= u64::MAX as int,
+        ensures
+            g.threshold == threshold,
+            g.awaken_threshold == awaken_threshold,
+            g.window == window,
+            g.max_delta == max_delta,
+            g.state == GovState::Active,
+            g.gradient_phase == Phase::Cold,
+            g.delta_history@.len() == 0,
+            g.peak_observed == false,
+            g.inv(),
+    {
         ConvergenceGovernorPhaseAware {
             threshold, awaken_threshold, window, max_delta,
-            state: GovState::Active, gradient_phase: Phase::Cold, delta_history: Vec::new(),
+            state: GovState::Active, gradient_phase: Phase::Cold, delta_history,
             peak_observed: false,
         }
     }

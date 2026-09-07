@@ -96,7 +96,46 @@ impl ActuationPass {
             !s.complete,
             s.invariant(),
     {
-        let mut effects: Vec<Option<u64>> = Vec::new();
+        Self::initialize(allocation, num_seats, Vec::new())
+    }
+
+    /// Reserve effect storage before constructing the existing actuation owner.
+    /// The raw proof API retains the allocation-length precondition.
+    ///
+    /// # Errors
+    /// Returns the allocation error and unconsumed assignments on reservation failure.
+    pub fn try_new(allocation: Vec<Option<u64>>, num_seats: usize)
+        -> (result: Result<Self, (std::collections::TryReserveError, Vec<Option<u64>>)>)
+        requires allocation@.len() == num_seats,
+        ensures
+            result is Err ==> (result->Err_0).1@ == allocation@,
+            result is Ok ==> {
+                let s = result.unwrap();
+                &&& s.num_seats == num_seats
+                &&& s.allocation@ == allocation@
+                &&& s.effects@.len() == num_seats
+                &&& forall|i: int| 0 <= i < num_seats ==> #[trigger] s.effects@[i] is None
+                &&& !s.complete
+                &&& s.invariant()
+            },
+    {
+        let mut effects = Vec::<Option<u64>>::new();
+        if let Err(error) = effects.try_reserve(num_seats) { return Err((error, allocation)); }
+        Ok(Self::initialize(allocation, num_seats, effects))
+    }
+
+    fn initialize(allocation: Vec<Option<u64>>, num_seats: usize, mut effects: Vec<Option<u64>>) -> (s: ActuationPass)
+        requires
+            effects@.len() == 0,
+            allocation.len() == num_seats,
+        ensures
+            s.num_seats == num_seats,
+            s.allocation@ == allocation@,
+            s.effects.len() == num_seats,
+            forall|i: int| 0 <= i < num_seats ==> s.effects@[i] is None,
+            !s.complete,
+            s.invariant(),
+    {
         let mut i: usize = 0;
         while i < num_seats
             invariant
