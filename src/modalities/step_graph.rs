@@ -171,7 +171,8 @@ impl StepGraph {
 
     #[expect(clippy::indexing_slicing, reason = "the type invariant and loop invariant bound edge and predecessor-state indices")]
     #[expect(clippy::arithmetic_side_effects, reason = "Verus proves the predecessor-completion cursor increment remains in bounds")]
-    fn predecessors_complete_exec(&self, node: usize) -> (b: bool)
+    /// Observe the exact predecessor-completion predicate used by readiness admission.
+    pub fn predecessors_complete_exec(&self, node: usize) -> (b: bool)
         requires
             self.type_invariant(),
             node < self.num_nodes,

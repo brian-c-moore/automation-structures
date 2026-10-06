@@ -12,7 +12,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut all_ok = true;
     let mut u = EquivalenceClass::new(6, 4);
 
@@ -94,8 +94,9 @@ fn main() {
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (EquivalenceClass)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (EquivalenceClass)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

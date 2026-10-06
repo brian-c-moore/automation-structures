@@ -242,20 +242,47 @@ impl ResourceRegistry {
         previous
     }
 
+    /// Insert an absent key, preserving existing bindings on refusal.
+    ///
+    /// # Errors
+    /// Returns the refusal reason and unconsumed key/value when duplicate or storage admission fails.
+    pub fn try_insert_unique(&mut self, key: u64, value: u64)
+        -> Result<usize, (crate::primitives::resource_registry::RegistryInsertError, u64, u64)>
+    {
+        proof { use_type_invariant(&*self); }
+        let mut carrier = registry_sentinel();
+        core::mem::swap(&mut self.inner, &mut carrier);
+        let result = carrier.try_insert_unique(key, value);
+        proof { crate::primitives::resource_registry::identity_entries_are_exact(carrier.entries@); }
+        core::mem::swap(&mut self.inner, &mut carrier);
+        result
+    }
+
+    /// Count matching entries using the retained Registry's named Reduction query.
+    pub fn count_matching<P: crate::primitives::resource_registry::RegistryPredicate<u64, u64>>(
+        &self, predicate: &P,
+    ) -> usize { self.inner.count_matching(predicate) }
+
+    /// Whether any entry matches, using the same retained owner query.
+    pub fn any_matching<P: crate::primitives::resource_registry::RegistryPredicate<u64, u64>>(
+        &self, predicate: &P,
+    ) -> bool { self.inner.any_matching(predicate) }
+
+    /// Whether all entries match; true for an empty Registry.
+    pub fn all_matching<P: crate::primitives::resource_registry::RegistryPredicate<u64, u64>>(
+        &self, predicate: &P,
+    ) -> bool { self.inner.all_matching(predicate) }
+
     /// Remove a key and return its previous value.
     pub fn remove(&mut self, key: u64) -> (previous: Option<u64>) {
         proof { use_type_invariant(&*self); }
-        let previous = self.inner.lookup(key);
-        match previous {
-            Some(value) => {
-                let mut carrier = registry_sentinel();
-                core::mem::swap(&mut self.inner, &mut carrier);
-                carrier.deregister(key);
-                core::mem::swap(&mut self.inner, &mut carrier);
-                Some(value)
-            },
-            None => None,
-        }
+        proof { crate::primitives::resource_registry::identity_entries_are_exact(self.inner.entries@); }
+        let mut carrier = registry_sentinel();
+        core::mem::swap(&mut self.inner, &mut carrier);
+        let removed = carrier.take_query(&key);
+        proof { crate::primitives::resource_registry::identity_entries_are_exact(carrier.entries@); }
+        core::mem::swap(&mut self.inner, &mut carrier);
+        removed.map(|entry| entry.1)
     }
 
     /// Read an entry by storage index for deterministic inspection.
@@ -911,6 +938,7 @@ impl QualityHierarchy {
         self.inner.type_invariant()
             && self.inner.strict_level_descent()
             && self.inner.parent_edge_agreement()
+            && self.inner.parent_has_edge()
             && self.inner.cost_monotonicity()
     }
 
@@ -918,6 +946,36 @@ impl QualityHierarchy {
     pub fn new(num_nodes: usize, max_level: u64) -> (hierarchy: Self) {
         let inner = QualityHierarchyCarrier::new(num_nodes, max_level);
         Self { inner }
+    }
+
+    /// Reserve node properties and edge storage before constructing the forest.
+    ///
+    /// # Errors
+    /// Returns storage refusal before a hierarchy is exposed.
+    pub fn try_new(num_nodes: usize, max_level: u64)
+        -> (result: Result<Self, std::collections::TryReserveError>)
+    {
+        match QualityHierarchyCarrier::try_new(num_nodes, max_level) {
+            Ok(inner) => Ok(Self { inner }), Err(error) => Err(error),
+        }
+    }
+
+    /// Consume this unchanged forest into parent-before-child canonical discovery.
+    /// The task work account is checked and proved nonbinding; domain costs are
+    /// unchanged and no route-slot quota is introduced.
+    ///
+    /// # Errors
+    /// Returns the original hierarchy on work-budget overflow or storage refusal.
+    pub fn try_traversal(self)
+        -> (result: Result<crate::compositions::traversal_engine::RootedTraversal,
+            (crate::composition_api::TraversalBuildError, Self)>)
+        ensures result matches Ok(profile) ==> profile.inv() && profile.considered_spec() == 0,
+            result matches Err((_, original)) ==> original == self,
+    {
+        proof { use_type_invariant(&self); }
+        match crate::compositions::traversal_engine::RootedTraversal::try_new(self.inner) {
+            Ok(profile) => Ok(profile), Err((error, inner)) => Err((error, Self { inner })),
+        }
     }
 
     /// Number of admitted nodes.
@@ -1405,6 +1463,7 @@ impl CompetitiveSelectionHardExclusive {
     /// Read one seat allocation, or `None` when the seat is invalid or unallocated.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the seat index is in bounds")]
     #[expect(clippy::manual_map, reason = "the explicit match is supported by the Verus boundary")]
+    #[expect(clippy::cast_possible_truncation, reason = "the private carrier invariant bounds each retained candidate below num_candidates: usize")]
     pub fn allocation(&self, seat: usize) -> Option<usize> {
         proof { use_type_invariant(&*self); }
         if seat >= self.inner.num_seats {
@@ -1470,6 +1529,7 @@ impl CompetitiveSelectionHardExclusive {
     ///
     /// Returns [`CompetitiveSelectionError`] when the seat is invalid, allocated, or has no candidate.
     #[expect(clippy::indexing_slicing, reason = "the guards prove the seat index is in bounds")]
+    #[expect(clippy::cast_possible_truncation, reason = "evaluate preserves the private carrier invariant and returns a candidate below num_candidates: usize")]
     pub fn evaluate(
         &mut self,
         seat: usize,
@@ -1747,6 +1807,17 @@ impl CompetitiveSelectionRanked {
         }
     }
 
+    /// Mathematical selected cardinality from the retained membership owner.
+    pub closed spec fn selected_len_spec(&self) -> int {
+        crate::primitives::competitive_selection::count_true(
+            self.inner.selected@, self.inner.selected@.len() as int)
+    }
+
+    /// Number of currently selected candidates, through the owner's named Reduction.
+    pub fn selected_len(&self) -> (count: usize)
+        ensures count as int == self.selected_len_spec(),
+    { self.inner.selected_len() }
+
     /// Recompute the stable top-k selection.
     pub fn select(&mut self) {
         proof { use_type_invariant(&*self); }
@@ -1833,6 +1904,7 @@ impl ConvergenceGovernor {
     /// # Errors
     ///
     /// Returns [`ConvergenceBuildError`] when the threshold, window, or maximum delta is invalid.
+    #[expect(clippy::integer_division, reason = "floor(u64::MAX / 2) is the exact threshold ceiling that makes doubling representable")]
     pub fn new(
         threshold: u64,
         awaken_threshold: u64,
@@ -1970,6 +2042,7 @@ fn quality_hierarchy_sentinel() -> (carrier: QualityHierarchyCarrier)
         carrier.type_invariant(),
         carrier.strict_level_descent(),
         carrier.parent_edge_agreement(),
+        carrier.parent_has_edge(),
         carrier.cost_monotonicity(),
 {
     QualityHierarchyCarrier::new(0, 0)
@@ -2253,6 +2326,10 @@ impl CompetitiveSelectionSoft {
     }
 
     /// Iterate over current candidate weights.
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "the private mutable-score invariant bounds every extra by weight_total <= 1_000_000_000 before adding its reserved unit"
+    )]
     pub fn weights(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.inner.extra.iter().map(|extra| extra + 1)
     }
@@ -2267,15 +2344,6 @@ impl CompetitiveSelectionRanked {
     /// Borrow current selection markers by candidate index.
     pub fn selections(&self) -> &[bool] {
         self.inner.selected.as_slice()
-    }
-
-    /// Number of currently selected candidates.
-    pub fn selected_len(&self) -> usize {
-        self.inner
-            .selected
-            .iter()
-            .filter(|selected| **selected)
-            .count()
     }
 }
 

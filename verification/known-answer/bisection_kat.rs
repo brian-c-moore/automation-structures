@@ -12,7 +12,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
 
     // The tight domain-fit instance: 32 = 2^5. Threshold 1 follows the
@@ -27,7 +27,11 @@ fn main() {
     tight.probe();
     ok &= check("tight step 2 hi", tight.hi, 8);
     tight.bisect();
-    ok &= check("tight converged", tight.hi - tight.lo < 2, true);
+    ok &= check(
+        "tight converged",
+        tight.hi.checked_sub(tight.lo).map(|width| width < 2),
+        Some(true),
+    );
     ok &= check("tight endpoint", (tight.lo, tight.hi), (0, 1));
     ok &= check(
         "tight exact budget",
@@ -38,7 +42,11 @@ fn main() {
     // A slack budget remains a ceiling, not a required number of probes.
     let mut slack = Bisection::new(0, 16, 15, 16, 5);
     slack.bisect();
-    ok &= check("slack converged", slack.hi - slack.lo < 2, true);
+    ok &= check(
+        "slack converged",
+        slack.hi.checked_sub(slack.lo).map(|width| width < 2),
+        Some(true),
+    );
     ok &= check(
         "slack threshold bracketed",
         slack.lo <= slack.threshold && slack.threshold <= slack.hi,
@@ -72,8 +80,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (Bisection MaxProbes)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (Bisection MaxProbes)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

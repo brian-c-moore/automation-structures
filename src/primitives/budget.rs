@@ -108,6 +108,17 @@ impl Budget {
         self.capacity - used
     }
 
+    /// Preview two additional charges against this unchanged owner without overflow.
+    /// The quantities may be pure projections from another canonical owner.
+    #[expect(clippy::arithmetic_side_effects, reason = "short-circuit first <= available proves available - first cannot underflow")]
+    pub fn admits_additional(&self, first: u64, second: u64) -> (admitted: bool)
+        requires self.safety_invariant(),
+        ensures admitted == (self.used() + first as int + second as int <= self.capacity as int),
+    {
+        let available = self.available();
+        first <= available && second <= available - first
+    }
+
     // ── TryAllocate (TLA+ TryAllocate) ──────────────────────────────────
 
     /// Try to commit `amount`: succeeds iff it fits under the ceiling. The

@@ -6,9 +6,99 @@
 
 use vstd::prelude::*;
 
+use crate::compositions::reduction::{IncrementalReduction, ReductionProjection};
+use crate::primitives::audit_sink::AdditiveChain;
 use crate::value_eq::ValueEq;
 
 verus! {
+
+// Delegate through pinned vstd's generic Iterator contract. Its concrete Vec
+// specialization has no next binding, while the standard trait specification
+// supplies the same FIFO transfer law without introducing another assumption.
+pub(crate) fn advance_owned_transfer<T, I: core::iter::Iterator<Item=T>>(transfer: &mut I) -> (value: Option<T>)
+    requires vstd::std_specs::iter::IteratorSpec::obeys_prophetic_iter_laws(old(transfer)),
+    ensures vstd::std_specs::iter::IteratorSpec::obeys_prophetic_iter_laws(final(transfer)),
+        if vstd::std_specs::iter::IteratorSpec::remaining(old(transfer)).len() > 0 {
+            value == Some(vstd::std_specs::iter::IteratorSpec::remaining(old(transfer))[0])
+                && vstd::std_specs::iter::IteratorSpec::remaining(final(transfer))
+                    == vstd::std_specs::iter::IteratorSpec::remaining(old(transfer)).drop_first()
+        } else {
+            value == None && vstd::std_specs::iter::IteratorSpec::remaining(final(transfer))
+                == vstd::std_specs::iter::IteratorSpec::remaining(old(transfer))
+        },
+{ core::iter::Iterator::next(transfer) }
+
+/// Pure domain sizing of one retained Buffer value.
+pub trait BufferSizeProjection<T> {
+    /// Mathematical encoded size, independent of automation state.
+    spec fn size_spec(&self, value: T) -> usize;
+    /// Evaluate the declared size without retaining a counter or aggregate.
+    fn size(&self, value: &T) -> (size: usize)
+        ensures size == self.size_spec(*value);
+}
+
+/// A projected total cannot be represented by the public size type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BufferSizeError {
+    /// The exact projected total exceeds usize::MAX.
+    Overflow,
+}
+
+/// Mathematical projected size of an immutable retained prefix.
+pub open spec fn projected_size_to<T, P: BufferSizeProjection<T>>(
+    values: Seq<T>, end: int, projection: P,
+) -> int
+    decreases end,
+{
+    if end <= 0 || end > values.len() { 0 }
+    else { projected_size_to(values, end - 1, projection)
+        + projection.size_spec(values[end - 1]) as int }
+}
+
+/// Nonnegative sizes make every retained prefix no larger than a later prefix.
+pub proof fn projected_size_monotone<T, P: BufferSizeProjection<T>>(
+    values: Seq<T>, earlier: int, later: int, projection: P,
+)
+    requires 0 <= earlier <= later <= values.len(),
+    ensures projected_size_to(values, earlier, projection)
+        <= projected_size_to(values, later, projection),
+    decreases later - earlier,
+{
+    if earlier < later {
+        projected_size_monotone(values, earlier, later - 1, projection);
+    }
+}
+
+// Borrowed sizing content; the named Reduction owns its entire traversal.
+struct BufferSizeInput<'a, T, P: BufferSizeProjection<T>> {
+    buffer: &'a Buffer<T>,
+    projection: &'a P,
+}
+impl<'a, T, P: BufferSizeProjection<T>> ReductionProjection<AdditiveChain>
+    for BufferSizeInput<'a, T, P>
+{
+    closed spec fn domain_len(&self) -> nat { self.buffer.values@.len() }
+    closed spec fn item_spec(&self, position: int) -> u64 {
+        self.projection.size_spec(self.buffer.values@[position]) as u64
+    }
+    fn len(&self) -> (length: usize) { self.buffer.values.len() }
+    #[expect(clippy::indexing_slicing, reason = "ReductionProjection requires position below the retained Buffer value length")]
+    fn item(&self, position: usize) -> (item: u64) {
+        self.projection.size(&self.buffer.values[position]) as u64
+    }
+}
+impl<'a, T, P: BufferSizeProjection<T>> BufferSizeInput<'a, T, P> {
+    proof fn prefix_correct(&self, end: int)
+        requires 0 <= end <= self.buffer.values@.len(),
+            crate::compositions::reduction::projected_prefix_admitted(*self, AdditiveChain, end),
+        ensures crate::compositions::reduction::projected_fold_to(*self, AdditiveChain, end) as int
+            == projected_size_to(self.buffer.values@, end, *self.projection),
+        decreases end,
+    {
+        if end > 0 { self.prefix_correct(end - 1); }
+    }
+}
 
 /// A retained logical sequence fits within its admitted capacity.
 pub open spec fn buffer_bounded<T>(values: Seq<T>, capacity: nat) -> bool {
@@ -134,10 +224,31 @@ pub struct Buffer<T> {
 }
 
 impl<T> Buffer<T> {
+    /// Adopt an already owned sequence without allocation or copying values.
+    /// Its initial length is the fixed admitted capacity.
+    pub fn from_values(values: Vec<T>) -> (buffer: Self)
+        ensures buffer.well_formed(), buffer.values@ == values@,
+            buffer.capacity == values@.len(),
+    { Self { capacity: values.len(), values } }
+
+    /// Transfer the retained sequence once in FIFO order without shifting it.
+    /// This consumes the Buffer. Vec's owned iterator is the pinned data-library
+    /// binding; it moves each value once and allocates no replacement sequence.
+    pub fn into_transfer(self) -> (transfer: std::vec::IntoIter<T>)
+        ensures vstd::std_specs::iter::IteratorSpec::remaining(&transfer) == self.values@,
+            vstd::std_specs::iter::IteratorSpec::obeys_prophetic_iter_laws(&transfer),
+    { self.values.into_iter() }
+
     /// Whether the retained FIFO contents fit within the configured capacity.
     pub closed spec fn well_formed(&self) -> bool {
         buffer_bounded(self.values@, self.capacity as nat)
     }
+
+    /// Expose the retained capacity bound without exposing another queue owner.
+    pub proof fn expose_capacity_bound(&self)
+        requires self.well_formed(),
+        ensures self.values@.len() <= self.capacity,
+    { reveal(Buffer::well_formed); }
 
     /// Construct an empty FIFO with a fixed capacity.
     pub fn new(capacity: usize) -> (buffer: Self)
@@ -196,6 +307,39 @@ impl<T> Buffer<T> {
         self.values.len() == self.capacity
     }
 
+    /// Sum a pure size projection through the named canonical Reduction.
+    /// The Buffer remains immutably borrowed; no total is retained or cached.
+    ///
+    /// # Errors
+    /// Returns overflow exactly when the mathematical total exceeds usize::MAX.
+    #[expect(clippy::cast_possible_truncation, reason = "the total > usize::MAX guard rejects every unrepresentable Reduction result")]
+    pub fn projected_size<P: BufferSizeProjection<T>>(&self, projection: &P)
+        -> (result: Result<usize, BufferSizeError>)
+        ensures
+            result matches Ok(total) ==> total as int
+                == projected_size_to(self.values@, self.values@.len() as int, *projection),
+            result is Err <==> projected_size_to(self.values@,
+                self.values@.len() as int, *projection) > usize::MAX as int,
+            result is Err ==> result == Err(BufferSizeError::Overflow),
+    {
+        let length = self.values.len();
+        let mut reduction = IncrementalReduction::new(length, AdditiveChain);
+        let source = BufferSizeInput { buffer: self, projection };
+        let folded = reduction.try_fold_projection(&source);
+        let ghost end = reduction.processed_spec() as int;
+        proof { source.prefix_correct(end); }
+        if folded.is_err() {
+            proof {
+                assert(reduction.result_spec() as int + source.item_spec(end) as int > u64::MAX as int);
+                projected_size_monotone(self.values@, end + 1, length as int, *projection);
+            }
+            return Err(BufferSizeError::Overflow);
+        }
+        let total = reduction.result();
+        if total > usize::MAX as u64 { Err(BufferSizeError::Overflow) }
+        else { Ok(total as usize) }
+    }
+
     /// Push one value, returning it unchanged when the FIFO is full.
     ///
     /// # Errors
@@ -236,6 +380,8 @@ impl<T> Buffer<T> {
 }
 
 /// Query membership in a retained sequence using its verified equality adapter.
+#[expect(clippy::indexing_slicing, reason = "the membership loop checks index < values.len() before the read")]
+#[expect(clippy::arithmetic_side_effects, reason = "the membership cursor advances only while strictly below values.len()")]
 pub fn retained_contains<T: ValueEq + Copy>(values: &Vec<T>, value: T) -> (present: bool)
     ensures present == contains_value(values@, value),
 {
@@ -305,6 +451,8 @@ impl<T: ValueEq + Copy> Buffer<T> {
     }
 
     /// Remove one distinct retained value wherever it occurs.
+    #[expect(clippy::indexing_slicing, reason = "the removal loop checks index < the unchanged retained length before matching or removing an item")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the removal cursor advances only while strictly below retained length")]
     pub fn remove_value(&mut self, value: T) -> (removed: bool)
         requires
             old(self).well_formed(),
@@ -400,6 +548,10 @@ impl<T: ValueEq + Copy> Buffer<T> {
 }
 
 }
+
+impl_public_error!(BufferSizeError, {
+    BufferSizeError::Overflow => "projected Buffer size exceeds usize::MAX",
+});
 
 impl<T: core::fmt::Debug> core::fmt::Debug for Buffer<T> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

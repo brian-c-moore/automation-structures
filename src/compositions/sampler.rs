@@ -130,6 +130,7 @@ impl Sampler {
         &&& !self.actuation.complete
         &&& self.support_domain()
         &&& self.budget.safety_invariant()
+        &&& self.budget.capacity <= usize::MAX
         &&& self.budget.reserved == 0
         &&& self.budget.pending_eviction == 0
         &&& self.budget.allocated as int
@@ -155,6 +156,8 @@ impl Sampler {
     }
 
     /// Build the ActuationPass support projection and an empty sample Budget.
+    #[expect(clippy::indexing_slicing, reason = "the projection loop checks index < the immutable distribution length before each weight read")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the projection cursor advances only while strictly below distribution length")]
     pub fn new(distribution: Vec<u64>, sample_size: usize) -> (sampler: Self)
         ensures
             sampler.actuation.num_seats == distribution@.len(),
@@ -208,6 +211,7 @@ impl Sampler {
     }
 
     /// Read one support weight, mapping ActuationPass's absent allocation to zero.
+    #[expect(clippy::indexing_slicing, reason = "the required Sampler invariant and item < num_seats precondition bound the allocation read")]
     pub fn weight(&self, item: usize) -> (weight: u64)
         requires self.inv(), item < self.actuation.num_seats,
         ensures weight == self.support_weight(item),

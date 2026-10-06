@@ -142,7 +142,9 @@ impl<T: Copy> Accumulator<T> {
             accumulator.pending@ == values@,
     {
         let ghost original = values@;
-        Self { original: Ghost(original), accumulated: Vec::new(), pending: values }
+        #[expect(clippy::unreachable, reason = "pinned Verus erasure supplies an uncalled type-inference closure to Ghost's PhantomData constructor")]
+        let original = Ghost(original);
+        Self { original, accumulated: Vec::new(), pending: values }
     }
 
     /// Construct an accumulator whose supplied prefix is already incorporated.
@@ -154,7 +156,9 @@ impl<T: Copy> Accumulator<T> {
             accumulator.pending@.len() == 0,
     {
         let ghost original = values@;
-        Self { original: Ghost(original), accumulated: values, pending: Vec::new() }
+        #[expect(clippy::unreachable, reason = "pinned Verus erasure supplies an uncalled type-inference closure to Ghost's PhantomData constructor")]
+        let original = Ghost(original);
+        Self { original, accumulated: values, pending: Vec::new() }
     }
 
     /// Number of values already accumulated.
@@ -279,7 +283,9 @@ impl<T: Copy> Accumulator<T> {
         let ghost old_accumulated = self.accumulated@;
         let ghost old_pending = self.pending@;
         self.accumulated.push(value);
-        self.original = Ghost(old_original.push(value));
+        #[expect(clippy::unreachable, reason = "pinned Verus erasure supplies an uncalled type-inference closure to Ghost's PhantomData constructor")]
+        let original = Ghost(old_original.push(value));
+        self.original = original;
         proof {
             assert(old_pending =~= Seq::<T>::empty());
             assert(old_original == old_accumulated.add(old_pending));

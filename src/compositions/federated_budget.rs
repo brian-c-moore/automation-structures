@@ -187,6 +187,7 @@ impl FederatedBudget {
         Ok(Self::initialize(master_capacity, num_pools, sub_pools))
     }
 
+    #[expect(clippy::arithmetic_side_effects, reason = "the initialization cursor advances only while strictly below num_pools")]
     fn initialize(master_capacity: u64, num_pools: usize, mut sub_pools: Vec<Budget>) -> (federated: Self)
         requires
             sub_pools@.len() == 0,
@@ -234,6 +235,7 @@ impl FederatedBudget {
     }
 
     /// Delegate capacity by allocating the master and reserving the selected pool atomically.
+    #[expect(clippy::indexing_slicing, reason = "the name >= sub_pools.len() guard refuses before reading the selected pool")]
     pub fn allocate_sub_pool(&mut self, name: usize, amount: u64) -> (accepted: bool)
         requires old(self).inv(),
         ensures
@@ -286,6 +288,7 @@ impl FederatedBudget {
     }
 
     /// Consume delegated capacity through the selected pool's CommitReservation action.
+    #[expect(clippy::indexing_slicing, reason = "the name >= sub_pools.len() guard refuses before reading the selected pool")]
     pub fn allocate_from_sub_pool(&mut self, name: usize, amount: u64) -> (accepted: bool)
         requires old(self).inv(),
         ensures
@@ -328,6 +331,7 @@ impl FederatedBudget {
     }
 
     /// Return consumed capacity to reservation through the Budget eviction lifecycle.
+    #[expect(clippy::indexing_slicing, reason = "the name >= sub_pools.len() guard refuses before reading the selected pool")]
     pub fn release_from_sub_pool(&mut self, name: usize, amount: u64) -> (accepted: bool)
         requires old(self).inv(),
         ensures

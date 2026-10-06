@@ -13,12 +13,20 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
 }
 
 fn conserved(s: &StreamGraphFanout) -> bool {
-    s.ingested.value() as usize == s.left_queue.len() + s.left_emitted.value() as usize
-        && s.ingested.value() as usize
-            == s.right_queue.len() + s.right_emitted.value() as usize
+    let Ok(ingested) = usize::try_from(s.ingested.value()) else {
+        return false;
+    };
+    let Ok(left) = usize::try_from(s.left_emitted.value()) else {
+        return false;
+    };
+    let Ok(right) = usize::try_from(s.right_emitted.value()) else {
+        return false;
+    };
+    Some(ingested) == s.left_queue.len().checked_add(left)
+        && Some(ingested) == s.right_queue.len().checked_add(right)
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
     ok &= check("valid config", StreamGraphFanout::valid_config(2, 8), true);
     ok &= check(
@@ -62,8 +70,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (StreamGraph fan-out modality)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (StreamGraph fan-out modality)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

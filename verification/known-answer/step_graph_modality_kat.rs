@@ -1,7 +1,7 @@
 extern crate automation_structures;
 
-use automation_structures::modalities::step_graph::StepGraph;
 use automation_structures::StepState;
+use automation_structures::modalities::step_graph::StepGraph;
 
 fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     if got == want {
@@ -13,7 +13,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
     let mut d = StepGraph::new(4, vec![(0, 1), (0, 2), (1, 3), (2, 3)]);
     ok &= check(
@@ -77,8 +77,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (StepGraph modality)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (StepGraph modality)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

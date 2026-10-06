@@ -129,6 +129,7 @@ impl ConvergenceGovernorPhaseAware {
     }
 
     /// Executable transition.
+    #[expect(clippy::arithmetic_side_effects, reason = "the required threshold <= u64::MAX / 2 bound makes each threshold doubling representable")]
     pub fn next_state(s: GovState, avg: u64, new_peak: bool, threshold: u64, awaken: u64)
         -> (out: GovState)
         requires threshold <= u64::MAX / 2,
@@ -356,6 +357,9 @@ impl ConvergenceGovernorPhaseAware {
         avg
     }
 
+    #[expect(clippy::indexing_slicing, reason = "the history loop guards each index against the immutable retained window length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the history-length times max-delta precondition bounds every partial sum, and the loop bounds each cursor successor")]
+    #[expect(clippy::integer_division, reason = "the nonempty-window precondition supplies a positive denominator and the contract specifies the floor integer average")]
     fn history_average(history: &Vec<u64>, _max_delta: u64) -> (average: u64)
         requires
             history.len() >= 1,

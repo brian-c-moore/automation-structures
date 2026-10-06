@@ -12,7 +12,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut all_ok = true;
 
     let mut typed = AuditSink::with_summary(
@@ -60,46 +60,50 @@ fn main() {
     all_ok &= check("capacity rejection frames length", s.log.len(), 3);
     all_ok &= check("capacity rejection frames head", s.last_hash, before_hash);
 
-    let original_op = s.log[1].operation;
-    s.log[1].operation = 7;
+    let original_op = s.log.get(1).ok_or("missing mutation record")?.operation;
+    s.log.get_mut(1).ok_or("missing mutation record")?.operation = 7;
     all_ok &= check(
         "operation-only mutation fails recomputation",
         s.validate(),
         false,
     );
-    s.log[1].operation = original_op;
+    s.log.get_mut(1).ok_or("missing mutation record")?.operation = original_op;
     all_ok &= check("restored operation validates", s.validate(), true);
 
-    let original_prev = s.log[1].prev_hash;
-    s.log[1].prev_hash = original_prev + 1;
+    let original_prev = s.log.get(1).ok_or("missing mutation record")?.prev_hash;
+    s.log.get_mut(1).ok_or("missing mutation record")?.prev_hash = original_prev.wrapping_add(1);
     all_ok &= check(
         "link-only mutation fails recomputation",
         s.validate(),
         false,
     );
-    s.log[1].prev_hash = original_prev;
+    s.log.get_mut(1).ok_or("missing mutation record")?.prev_hash = original_prev;
 
-    let original_record_hash = s.log[1].hash;
-    s.log[1].hash = original_record_hash + 1;
+    let original_record_hash = s.log.get(1).ok_or("missing mutation record")?.hash;
+    s.log.get_mut(1).ok_or("missing mutation record")?.hash = original_record_hash.wrapping_add(1);
     all_ok &= check(
         "stored-hash-only mutation fails recomputation",
         s.validate(),
         false,
     );
-    s.log[1].hash = original_record_hash;
+    s.log.get_mut(1).ok_or("missing mutation record")?.hash = original_record_hash;
 
-    s.last_hash += 1;
+    s.last_hash = s.last_hash.wrapping_add(1);
     all_ok &= check(
         "head-only mutation fails recomputation",
         s.validate(),
         false,
     );
-    s.last_hash -= 1;
+    s.last_hash = s.last_hash.wrapping_sub(1);
     all_ok &= check("fully restored chain validates", s.validate(), true);
 
     let mut collision_demo = AuditSink::new(1);
     collision_demo.record(1);
-    collision_demo.log[0].operation = 101;
+    collision_demo
+        .log
+        .first_mut()
+        .ok_or("missing collision record")?
+        .operation = 101;
     all_ok &= check(
         "declared ceiling: concrete modulo-hash collision is not detected",
         collision_demo.validate(),
@@ -108,8 +112,9 @@ fn main() {
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (AuditSink structural chain; HashCR external)");
+        Ok(())
     } else {
         println!("KAT_RESULT: FAIL (AuditSink)");
-        std::process::exit(1);
+        Err("known-answer mismatch".into())
     }
 }

@@ -2,6 +2,7 @@
 
 use crate::api::values_within_max;
 use crate::compositions::allocation_snapshot::AllocationSnapshot as AllocationSnapshotCarrier;
+use crate::compositions::allocation_snapshot::CapturedAllocationSnapshot as CapturedAllocationSnapshotCarrier;
 use crate::compositions::bisection::Bisection as BisectionCarrier;
 use crate::compositions::equivalence_class::EquivalenceClass as EquivalenceClassCarrier;
 use crate::compositions::federated_budget::FederatedBudget as FederatedBudgetCarrier;
@@ -28,6 +29,8 @@ pub enum AllocationSnapshotError {
     ZeroCost,
     /// The node cost exceeds the remaining budget.
     InsufficientBudget,
+    /// Parallel node and cost inputs have different lengths.
+    InputLengthMismatch,
 }
 
 /// A reusable accepted-node snapshot coupled to one capacity budget.
@@ -55,6 +58,25 @@ impl AllocationSnapshot {
     /// Construct an empty snapshot.
     pub fn new(capacity: u64, num_nodes: u64) -> (snapshot: Self) {
         Self { inner: AllocationSnapshotCarrier::new(capacity, num_nodes) }
+    }
+
+    /// Consume this builder into an allocation with immutable membership and costs.
+    pub fn seal(self) -> CapturedAllocationSnapshot {
+        proof { use_type_invariant(&self); }
+        CapturedAllocationSnapshot { inner: self.inner.seal() }
+    }
+
+    /// Fold requests through the canonical admission action and seal the result.
+    /// Invalid, duplicate, zero-cost and unaffordable requests are skipped.
+    ///
+    /// # Errors
+    /// Returns [`AllocationSnapshotError::InputLengthMismatch`] for unequal inputs.
+    pub fn capture(capacity: u64, num_nodes: u64, nodes: &[u64], costs: &[u64])
+        -> Result<CapturedAllocationSnapshot, AllocationSnapshotError> {
+        if nodes.len() != costs.len() { return Err(AllocationSnapshotError::InputLengthMismatch); }
+        Ok(CapturedAllocationSnapshot {
+            inner: crate::compositions::allocation_snapshot::capture(capacity, num_nodes, nodes, costs),
+        })
     }
 
     /// Fixed capacity ceiling.
@@ -125,6 +147,51 @@ impl AllocationSnapshot {
     }
 }
 
+/// An allocation captured by a consuming seal, with read-only membership and costs.
+///
+/// ```rust
+/// use automation_structures::AllocationSnapshot;
+/// let captured = AllocationSnapshot::capture(10, 3, &[0, 1, 0, 2], &[3, 2, 1, 9])?;
+/// assert_eq!(captured.total_cost(), 5);
+/// assert_eq!(captured.accepted_entries().copied().collect::<Vec<_>>(), vec![(0, 3), (1, 2)]);
+/// # Ok::<(), automation_structures::AllocationSnapshotError>(())
+/// ```
+///
+/// ```compile_fail
+/// use automation_structures::AllocationSnapshot;
+/// let mut captured = AllocationSnapshot::capture(10, 3, &[0], &[3])?;
+/// captured.accept(1, 2);
+/// # Ok::<(), automation_structures::AllocationSnapshotError>(())
+/// ```
+pub struct CapturedAllocationSnapshot {
+    inner: CapturedAllocationSnapshotCarrier,
+}
+
+impl CapturedAllocationSnapshot {
+    #[verifier::type_invariant]
+    closed spec fn well_formed(&self) -> bool { self.inner.valid() }
+    /// Read the captured capacity.
+    pub fn capacity(&self) -> u64 { self.inner.capacity() }
+    /// Read the captured node universe.
+    pub fn num_nodes(&self) -> u64 { self.inner.num_nodes() }
+    /// Read the captured accepted cost.
+    pub fn total_cost(&self) -> u64 { self.inner.total_cost() }
+    /// Read the captured unconsumed capacity.
+    pub fn budget_remaining(&self) -> u64 {
+        proof { use_type_invariant(&*self); }
+        self.inner.budget_remaining()
+    }
+    /// Read the captured accepted-node count.
+    pub fn len(&self) -> usize { self.inner.accepted_entries().len() }
+    /// Whether the captured allocation is empty.
+    pub fn is_empty(&self) -> bool { self.inner.accepted_entries().is_empty() }
+    /// Observe membership through the retained Registry.
+    pub fn contains(&self, node: u64) -> bool {
+        proof { use_type_invariant(&*self); }
+        self.inner.contains(node)
+    }
+}
+
 /// A master capacity pool divided into reusable sub-pools.
 ///
 /// # Examples
@@ -164,6 +231,7 @@ impl FederatedBudget {
 
     /// Read one sub-pool capacity.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the pool index is in bounds")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the private federation invariant bounds each pool's allocated plus reserved sum by its u64 capacity")]
     pub fn pool_capacity(&self, pool: usize) -> Option<u64> {
         proof { use_type_invariant(&*self); }
         if pool < self.inner.sub_pools.len() {
@@ -301,6 +369,7 @@ impl Bisection {
     /// # Errors
     ///
     /// Returns [`BisectionError::AlreadyConverged`] when no further probe is enabled.
+    #[expect(clippy::arithmetic_side_effects, reason = "the private Bisection invariant proves lo <= hi before testing interval width")]
     pub fn probe(&mut self) -> (result: Result<(), BisectionError>) {
         proof { use_type_invariant(&*self); }
         if self.inner.hi - self.inner.lo < 2 { return Err(BisectionError::AlreadyConverged); }
@@ -624,22 +693,41 @@ impl RelationshipGraph {
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool { self.inner.inv() }
 
-    /// Construct an empty graph.
-    pub fn new(num_nodes: usize, max_weight: u64) -> (graph: Self) {
+    /// Weighted edge records, in their authored insertion order.
+    pub closed spec fn bindings(&self) -> Seq<crate::compositions::relationship_graph::EdgeBinding> {
+        self.inner.registry.entries@
+    }
+    /// Configured node universe.
+    pub closed spec fn node_universe(&self) -> usize { self.inner.num_nodes }
+    /// Configured inclusive weight ceiling.
+    pub closed spec fn weight_ceiling(&self) -> u64 { self.inner.max_weight }
+
+    /// Construct an empty graph with the declared node universe and weight ceiling.
+    pub fn new(num_nodes: usize, max_weight: u64) -> (graph: Self)
+        ensures graph.bindings() == Seq::empty(), graph.node_universe() == num_nodes,
+            graph.weight_ceiling() == max_weight,
+    {
         Self { inner: RelationshipGraphCarrier::new(num_nodes, max_weight) }
     }
 
     /// Number of nodes.
-    pub fn num_nodes(&self) -> usize { self.inner.num_nodes }
+    pub fn num_nodes(&self) -> (count: usize) ensures count == self.node_universe(),
+    { self.inner.num_nodes }
 
     /// Maximum admitted edge weight.
-    pub fn max_weight(&self) -> u64 { self.inner.max_weight }
+    pub fn max_weight(&self) -> (weight: u64) ensures weight == self.weight_ceiling(),
+    { self.inner.max_weight }
 
     /// Number of concrete weighted edges.
-    pub fn edge_count(&self) -> usize { self.inner.registry.entries.len() }
+    pub fn edge_count(&self) -> (count: usize) ensures count == self.bindings().len(),
+    { self.inner.registry.entries.len() }
 
     /// Read a concrete weighted edge by insertion order.
-    pub fn edge(&self, index: usize) -> Option<(usize, usize, u64)> {
+    #[expect(clippy::indexing_slicing, reason = "the runtime index guard checks the retained edge Registry length")]
+    pub fn edge(&self, index: usize) -> (edge: Option<(usize, usize, u64)>)
+        ensures index < self.bindings().len() ==> edge == Some(self.bindings()[index as int].0),
+            index >= self.bindings().len() ==> edge is None,
+    {
         if index < self.inner.registry.entries.len() {
             Some(self.inner.registry.entries[index].0)
         } else {
@@ -648,9 +736,65 @@ impl RelationshipGraph {
     }
 
     /// Whether any weighted edge exists for a source-destination pair.
-    pub fn contains(&self, source: usize, destination: usize) -> bool {
+    pub fn contains(&self, source: usize, destination: usize) -> (present: bool)
+        ensures present == crate::compositions::relationship_graph::has_edge(
+            self.bindings(), self.bindings().len() as int, source, destination),
+    {
         proof { use_type_invariant(&*self); }
         self.inner.contains_pair(source, destination)
+    }
+
+    /// Count weighted incident records matching a pure domain predicate.
+    /// Different weights on the same endpoint pair count separately.
+    ///
+    /// # Errors
+    /// Returns NodeOutOfRange for a node outside this graph's configured universe.
+    pub fn filtered_degree<P: crate::primitives::resource_registry::RegistryPredicate<
+        crate::compositions::relationship_graph::EdgeKey, ()>>(
+        &self, node: usize, direction: crate::compositions::relationship_graph::EdgeDirection,
+        predicate: &P,
+    ) -> (result: Result<usize, RelationshipGraphError>)
+        ensures result is Err <==> node >= self.node_universe(),
+            result is Err ==> result == Err(RelationshipGraphError::NodeOutOfRange),
+            result matches Ok(count) ==> count as int
+                == crate::compositions::relationship_graph::incident_count(self.bindings(),
+                    self.bindings().len() as int, node, direction, *predicate),
+    {
+        if node >= self.inner.num_nodes { return Err(RelationshipGraphError::NodeOutOfRange); }
+        Ok(self.inner.filtered_degree(node, direction, predicate))
+    }
+
+    /// Borrow an immutable authored-order adjacency view of this same graph owner.
+    pub fn frozen_adjacency<'a>(&'a self) -> (view: FrozenAdjacency<'a>)
+        ensures view.graph_spec() == *self,
+    { FrozenAdjacency { graph: self } }
+
+    /// Consume this graph into immutable typed outgoing and incoming spans.
+    /// Filtering changes span membership, while all authored weighted records
+    /// remain owned and resolvable. Equal-endpoint records retain authored order.
+    ///
+    /// # Errors
+    /// Returns the original graph, handle domain and predicate if the handle
+    /// universe, node-offset representation or any storage reservation is refused.
+    pub fn materialize<H: Copy + crate::value_eq::ValueEq,
+        D: crate::compositions::relationship_graph::EdgeHandleDomain<H>,
+        P: crate::primitives::resource_registry::RegistryPredicate<crate::compositions::relationship_graph::EdgeKey, ()>>(
+        self, domain: D, predicate: P,
+    ) -> (result: crate::compositions::relationship_graph::MaterializationResult<H, D, P>)
+        ensures result is Ok ==> result->Ok_0.inv()
+            && result->Ok_0.edges_spec() == self.bindings()
+            && result->Ok_0.node_universe() == self.node_universe()
+            && result->Ok_0.handle_domain_spec() == domain && result->Ok_0.predicate_spec() == predicate,
+            result matches Err((_, returned, returned_domain, returned_predicate)) ==>
+                returned.bindings() == self.bindings() && returned.node_universe() == self.node_universe()
+                && returned.weight_ceiling() == self.weight_ceiling()
+                && returned_domain == domain && returned_predicate == predicate,
+    {
+        proof { use_type_invariant(&self); }
+        match crate::compositions::relationship_graph::MaterializedAdjacency::try_new(self.inner, domain, predicate) {
+            Ok(view) => Ok(view),
+            Err((reason, inner, domain, predicate)) => Err((reason, Self { inner }, domain, predicate)),
+        }
     }
 
     /// Add one concrete weighted edge if it is not already present.
@@ -659,7 +803,19 @@ impl RelationshipGraph {
     ///
     /// Returns an error for an unknown endpoint, an excessive weight, or a self-loop.
     pub fn add_edge(&mut self, source: usize, destination: usize, weight: u64)
-        -> (result: Result<bool, RelationshipGraphError>) {
+        -> (result: Result<bool, RelationshipGraphError>)
+        ensures final(self).node_universe() == old(self).node_universe(),
+            final(self).weight_ceiling() == old(self).weight_ceiling(),
+            result is Err ==> final(self).bindings() == old(self).bindings(),
+            result matches Ok(added) ==> added
+                == !old(self).bindings().contains(((source, destination, weight), ())),
+            result matches Ok(true) ==> final(self).bindings()
+                == old(self).bindings().push(((source, destination, weight), ())),
+            result matches Ok(false) ==> final(self).bindings() == old(self).bindings(),
+            result is Err <==> (source >= old(self).node_universe()
+                || destination >= old(self).node_universe()
+                || weight > old(self).weight_ceiling() || source == destination),
+    {
         proof { use_type_invariant(&*self); }
         if source >= self.inner.num_nodes || destination >= self.inner.num_nodes {
             return Err(RelationshipGraphError::NodeOutOfRange);
@@ -681,6 +837,48 @@ impl RelationshipGraph {
         carrier.remove_edge(source, destination);
         core::mem::swap(&mut self.inner, &mut carrier);
     }
+}
+
+/// Immutable adjacency observations under a borrow of the checked graph owner.
+/// Source mutation and moving the graph are excluded while this view is used.
+/// No edges, degree cache or independent generation are retained.
+///
+/// ```compile_fail
+/// use automation_structures::RelationshipGraph;
+/// let mut graph = RelationshipGraph::new(3, 2);
+/// let view = graph.frozen_adjacency();
+/// graph.add_edge(0, 1, 1);
+/// let _edge = view.edge(0);
+/// ```
+pub struct FrozenAdjacency<'a> { graph: &'a RelationshipGraph }
+impl<'a> FrozenAdjacency<'a> {
+    /// The unchanged graph observed by this borrow.
+    pub closed spec fn graph_spec(&self) -> RelationshipGraph { *self.graph }
+    /// Number of retained weighted edges.
+    pub fn edge_count(&self) -> (count: usize)
+        ensures count == self.graph_spec().bindings().len(),
+    { self.graph.edge_count() }
+    /// Observe one edge in its owner's authored order.
+    pub fn edge(&self, index: usize) -> (edge: Option<(usize, usize, u64)>)
+        ensures index < self.graph_spec().bindings().len()
+            ==> edge == Some(self.graph_spec().bindings()[index as int].0),
+            index >= self.graph_spec().bindings().len() ==> edge is None,
+    { self.graph.edge(index) }
+    /// Delegate filtered incident degree to the same immutable graph and Registry.
+    ///
+    /// # Errors
+    /// Returns NodeOutOfRange for a node outside the borrowed graph's universe.
+    pub fn filtered_degree<P: crate::primitives::resource_registry::RegistryPredicate<
+        crate::compositions::relationship_graph::EdgeKey, ()>>(
+        &self, node: usize, direction: crate::compositions::relationship_graph::EdgeDirection,
+        predicate: &P,
+    ) -> (result: Result<usize, RelationshipGraphError>)
+        ensures result is Err <==> node >= self.graph_spec().node_universe(),
+            result is Err ==> result == Err(RelationshipGraphError::NodeOutOfRange),
+            result matches Ok(count) ==> count as int
+                == crate::compositions::relationship_graph::incident_count(self.graph_spec().bindings(),
+                    self.graph_spec().bindings().len() as int, node, direction, *predicate),
+    { self.graph.filtered_degree(node, direction, predicate) }
 }
 
 /// A disabled sampler transition.
@@ -717,6 +915,11 @@ impl Sampler {
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool { self.inner.inv() }
 
+    /// Cardinality ceiling observed from the same Budget owner.
+    pub closed spec fn sample_size_spec(&self) -> nat { self.inner.budget.capacity as nat }
+    /// Accepted cardinality observed from the same Budget owner.
+    pub closed spec fn selected_len_spec(&self) -> nat { self.inner.budget.allocated as nat }
+
     /// Construct an empty sample over a weight distribution.
     pub fn new(distribution: Vec<u64>, sample_size: usize) -> (sampler: Self) {
         Self { inner: SamplerCarrier::new(distribution, sample_size) }
@@ -729,10 +932,22 @@ impl Sampler {
     pub fn is_empty(&self) -> bool { self.inner.actuation.num_seats == 0 }
 
     /// Maximum selected cardinality.
-    pub fn sample_size(&self) -> usize { self.inner.budget.capacity as usize }
+    #[expect(clippy::cast_possible_truncation, reason = "the private Sampler invariant retains its usize constructor ceiling in Budget.capacity")]
+    pub fn sample_size(&self) -> (size: usize)
+        ensures size == self.sample_size_spec(),
+    {
+        proof { use_type_invariant(self); }
+        self.inner.budget.capacity as usize
+    }
 
     /// Number of selected items.
-    pub fn selected_len(&self) -> usize { self.inner.budget.allocated as usize }
+    #[expect(clippy::cast_possible_truncation, reason = "Budget.allocated is bounded by the Sampler's retained usize capacity")]
+    pub fn selected_len(&self) -> (length: usize)
+        ensures length == self.selected_len_spec(),
+    {
+        proof { use_type_invariant(self); }
+        self.inner.budget.allocated as usize
+    }
 
     /// Read one distribution weight.
     pub fn weight(&self, item: usize) -> Option<u64> {
@@ -957,6 +1172,10 @@ pub enum TraversalBuildError {
     NoNodes,
     /// The root is outside the node universe.
     RootOutOfRange,
+    /// A retained work owner's storage could not be reserved.
+    StorageUnavailable,
+    /// The task universe or its proved nonbinding work account cannot be represented.
+    WorkBudgetOverflow,
 }
 
 /// A disabled traversal-engine transition.
@@ -1008,6 +1227,17 @@ impl TraversalEngine {
         if num_nodes == 0 { return Err(TraversalBuildError::NoNodes); }
         if root >= num_nodes { return Err(TraversalBuildError::RootOutOfRange); }
         Ok(Self { inner: TraversalEngineCarrier::new(num_nodes, root, budget) })
+    }
+
+    /// Reserve topology, visited, accepted and frontier storage before initialization.
+    ///
+    /// # Errors
+    /// Returns the same configuration refusals as new, or StorageUnavailable before work publication.
+    pub fn try_new(num_nodes: usize, root: usize, budget: u64)
+        -> (result: Result<Self, TraversalBuildError>) {
+        match TraversalEngineCarrier::try_new(num_nodes, root, budget) {
+            Ok(inner) => Ok(Self { inner }), Err(error) => Err(error),
+        }
     }
 
     /// Number of nodes.
@@ -1357,6 +1587,13 @@ impl AllocationSnapshot {
     }
 }
 
+impl CapturedAllocationSnapshot {
+    /// Iterate over captured `(node, cost)` pairs in insertion order.
+    pub fn accepted_entries(&self) -> impl ExactSizeIterator<Item = &(u64, u64)> {
+        self.inner.accepted_entries().iter()
+    }
+}
+
 impl FederatedBudget {
     /// Master capacity not yet delegated to a sub-pool.
     pub fn master_available(&self) -> u64 {
@@ -1364,6 +1601,10 @@ impl FederatedBudget {
     }
 
     /// Iterate over `(delegated capacity, allocated capacity)` for each sub-pool.
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "every retained pool satisfies the private federation invariant bounding allocated plus reserved by capacity"
+    )]
     pub fn pools(&self) -> impl ExactSizeIterator<Item = (u64, u64)> + '_ {
         self.inner
             .sub_pools
@@ -1398,6 +1639,10 @@ impl Reduction {
     }
 
     /// Borrow the unprocessed suffix.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the private Reducer prefix binding proves its owner-reported processed length is at most source length"
+    )]
     pub fn remaining(&self) -> &[u64] {
         &self.inner.source[self.processed_len()..]
     }
@@ -1492,6 +1737,9 @@ impl SelectThenActuate {
     }
 }
 
+impl_observational_debug!(CapturedAllocationSnapshot, "CapturedAllocationSnapshot",
+    "capacity" => capacity, "num_nodes" => num_nodes, "total_cost" => total_cost,
+    "budget_remaining" => budget_remaining, "len" => len);
 impl_observational_debug!(AllocationSnapshot, "AllocationSnapshot",
     "capacity" => capacity,
     "num_nodes" => num_nodes,
@@ -1535,6 +1783,14 @@ impl_observational_debug!(RelationshipGraph, "RelationshipGraph",
     "max_weight" => max_weight,
     "edge_count" => edge_count,
 );
+impl core::fmt::Debug for FrozenAdjacency<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("FrozenAdjacency")
+            .field("edge_count", &self.edge_count())
+            .finish_non_exhaustive()
+    }
+}
 impl_observational_debug!(Sampler, "Sampler",
     "len" => len,
     "sample_size" => sample_size,
@@ -1565,6 +1821,7 @@ impl_public_error!(AllocationSnapshotError, {
     Self::NodeAlreadyAccepted => "node is already accepted",
     Self::ZeroCost => "accepted node cost must be positive",
     Self::InsufficientBudget => "node cost exceeds the remaining budget",
+    Self::InputLengthMismatch => "node and cost inputs have different lengths",
 });
 impl_public_error!(BisectionBuildError, {
     Self::DomainTooSmall => "bisection domain must contain at least two points",
@@ -1603,6 +1860,8 @@ impl_public_error!(SignalError, {
 impl_public_error!(TraversalBuildError, {
     Self::NoNodes => "traversal requires at least one node",
     Self::RootOutOfRange => "traversal root is outside the node universe",
+    Self::StorageUnavailable => "traversal work storage reservation failed",
+    Self::WorkBudgetOverflow => "traversal task universe or nonbinding work Budget overflows",
 });
 impl_public_error!(TraversalError, {
     Self::NodeOutOfRange => "traversal node is outside the configured universe",

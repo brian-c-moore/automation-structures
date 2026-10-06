@@ -176,6 +176,12 @@ impl ForkJoin {
     /// Whether no workers are configured.
     pub fn is_empty(&self) -> bool { self.inner.wstate.is_empty() }
 
+    /// Whether every worker has completed, as observed by the barrier owner.
+    pub fn all_complete(&self) -> bool {
+        proof { use_type_invariant(&*self); }
+        self.inner.all_complete_exec()
+    }
+
     /// Current global phase.
     pub fn phase(&self) -> ForkJoinPhase {
         self.inner.phase
@@ -317,6 +323,14 @@ impl StepGraph {
     /// Number of directed predecessor edges.
     pub fn edge_count(&self) -> usize { self.inner.edges.len() }
 
+    /// Observe the dependency owner's completion guard for a valid node.
+    /// Returns `None` when the node is outside the graph.
+    pub fn predecessors_complete(&self, node: usize) -> Option<bool> {
+        proof { use_type_invariant(&*self); }
+        if node >= self.inner.num_nodes { return None; }
+        Some(self.inner.predecessors_complete_exec(node))
+    }
+
     /// Read one directed predecessor edge.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the edge index is in bounds")]
     pub fn edge(&self, index: usize) -> Option<(usize, usize)> {
@@ -413,6 +427,11 @@ impl StreamGraph {
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool { self.inner.inv() }
 
+    /// Source occurrence count observed from the retained Counter.
+    pub closed spec fn ingested_spec(&self) -> nat { self.inner.ingested.value_spec() }
+    /// Sink occurrence count observed from the retained Counter.
+    pub closed spec fn emitted_spec(&self) -> nat { self.inner.emitted.value_spec() }
+
     /// Validate and construct an empty stream graph.
     ///
     /// # Errors
@@ -438,10 +457,22 @@ impl StreamGraph {
     pub fn capacity(&self) -> usize { self.inner.capacity() }
 
     /// Records admitted at the source.
-    pub fn ingested(&self) -> usize { self.inner.ingested.value() as usize }
+    #[expect(clippy::cast_possible_truncation, reason = "the private stream invariant bounds the source Counter by max_inputs: usize")]
+    pub fn ingested(&self) -> (count: usize)
+        ensures count == self.ingested_spec(),
+    {
+        proof { use_type_invariant(self); }
+        self.inner.ingested.value() as usize
+    }
 
     /// Records consumed at the sink.
-    pub fn emitted(&self) -> usize { self.inner.emitted.value() as usize }
+    #[expect(clippy::cast_possible_truncation, reason = "the private stream invariant bounds the sink Counter by max_inputs: usize")]
+    pub fn emitted(&self) -> (count: usize)
+        ensures count == self.emitted_spec(),
+    {
+        proof { use_type_invariant(self); }
+        self.inner.emitted.value() as usize
+    }
 
     /// Current depth of the first queue.
     pub fn first_queue_len(&self) -> usize { self.inner.q1.len() }

@@ -140,6 +140,13 @@ pub struct Buffer<T> {
 }
 
 impl<T> Buffer<T> {
+    /// Move an existing owned FIFO sequence into its canonical Buffer without copying.
+    /// The initial sequence length becomes its fixed admitted capacity.
+    pub fn from_values(values: Vec<T>) -> (buffer: Self)
+        ensures buffer.well_formed(), buffer.retained() == values@,
+            buffer.admitted_capacity() == values@.len(),
+    { Self { inner: BufferCarrier::from_values(values) } }
+
     /// Logical FIFO contents used by proof consumers.
     pub closed spec fn retained(&self) -> Seq<T> {
         self.inner.values@
@@ -224,6 +231,24 @@ impl<T> Buffer<T> {
         self.inner.is_full()
     }
 
+    /// Query the encoded-size total through the existing Buffer owner and Reduction.
+    ///
+    /// # Errors
+    /// Returns overflow exactly when the pure projected total exceeds usize::MAX.
+    pub fn projected_size<P: crate::connectives::buffer::BufferSizeProjection<T>>(
+        &self, projection: &P,
+    ) -> (result: Result<usize, crate::connectives::buffer::BufferSizeError>)
+        ensures
+            result matches Ok(total) ==> total as int
+                == crate::connectives::buffer::projected_size_to(self.retained(),
+                    self.retained().len() as int, *projection),
+            result is Err <==> crate::connectives::buffer::projected_size_to(
+                self.retained(), self.retained().len() as int, *projection) > usize::MAX as int,
+            result is Err ==> result == Err(crate::connectives::buffer::BufferSizeError::Overflow),
+    {
+        self.inner.projected_size(projection)
+    }
+
     /// Push one value, returning it unchanged when the FIFO is full.
     ///
     /// # Errors
@@ -234,6 +259,8 @@ impl<T> Buffer<T> {
         ensures
             final(self).well_formed(),
             final(self).admitted_capacity() == old(self).admitted_capacity(),
+            old(self).retained().len() < old(self).admitted_capacity() ==> result is Ok,
+            old(self).retained().len() >= old(self).admitted_capacity() ==> result == Err(value),
             old(self).retained().len() < old(self).admitted_capacity() ==>
                 final(self).retained() == old(self).retained().push(value),
             old(self).retained().len() >= old(self).admitted_capacity() ==>
@@ -248,6 +275,8 @@ impl<T> Buffer<T> {
         ensures
             final(self).well_formed(),
             final(self).admitted_capacity() == old(self).admitted_capacity(),
+            old(self).retained().len() == 0 ==> value is None,
+            old(self).retained().len() > 0 ==> value == Some(old(self).retained()[0]),
             old(self).retained().len() == 0 ==>
                 final(self).retained() == old(self).retained(),
             old(self).retained().len() > 0 ==>
@@ -324,6 +353,9 @@ impl Counter {
     /// Increment unless the `u64` representation is exhausted.
     #[must_use]
     pub fn try_increment(&mut self) -> bool { self.inner.try_increment() }
+
+    /// Preview the Counter's generation guard without changing its value.
+    pub fn can_increment(&self) -> bool { self.inner.can_increment() }
 
     /// Decrement when positive.
     #[must_use]
@@ -503,7 +535,7 @@ impl<T> IntoIterator for Buffer<T> {
     type IntoIter = std::vec::IntoIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.inner.values.into_iter()
+        self.inner.into_transfer()
     }
 }
 

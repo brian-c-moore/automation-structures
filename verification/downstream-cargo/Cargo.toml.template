@@ -7,3 +7,6 @@ publish = false
 
 [dependencies]
 automation-structures = { path = "../.." }
+vstd = "=0.0.0-2026-05-24-0157"
+
+[workspace]

@@ -287,7 +287,8 @@ impl ForkJoin {
 
     #[expect(clippy::indexing_slicing, reason = "Verus proves the completeness cursor remains in bounds")]
     #[expect(clippy::arithmetic_side_effects, reason = "Verus proves the completeness cursor increment remains in bounds")]
-    fn all_complete_exec(&self) -> (b: bool)
+    /// Observe the exact worker-completion predicate used by the barrier action.
+    pub fn all_complete_exec(&self) -> (b: bool)
         ensures b == self.all_complete(),
     {
         let mut i = 0;
@@ -415,6 +416,8 @@ impl ForkJoin {
     }
 
     /// Produce the stable output snapshot from joined worker values.
+    #[expect(clippy::indexing_slicing, reason = "the output loop guards each read by the worker-value length; the invariant equates output and worker lengths")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the output cursor advances only while strictly below worker-value length")]
     pub fn produce_output(&mut self) -> (accepted: bool)
         requires old(self).inv(),
         ensures

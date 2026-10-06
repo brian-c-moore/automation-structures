@@ -14,7 +14,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
 
     // Ranked Select: deterministic top-K by score then lowest candidate index.
@@ -104,8 +104,11 @@ fn main() {
     );
     ok &= check(
         "soft terminal normalization",
-        mutable_scores.weight_at(0) + mutable_scores.weight_at(1) + mutable_scores.weight_at(2),
-        12u64,
+        mutable_scores
+            .weight_at(0)
+            .checked_add(mutable_scores.weight_at(1))
+            .and_then(|total| total.checked_add(mutable_scores.weight_at(2))),
+        Some(12u64),
     );
 
     let equal = CompetitiveSelectionSoft::new(vec![1u64, 1, 1], 12, 1);
@@ -117,8 +120,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (CompetitiveSelection ranked/mutable-score soft)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (CompetitiveSelection ranked/mutable-score soft)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

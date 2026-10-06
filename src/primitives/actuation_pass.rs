@@ -124,6 +124,7 @@ impl ActuationPass {
         Ok(Self::initialize(allocation, num_seats, effects))
     }
 
+    #[expect(clippy::arithmetic_side_effects, reason = "the initialization cursor advances only while strictly below num_seats")]
     fn initialize(allocation: Vec<Option<u64>>, num_seats: usize, mut effects: Vec<Option<u64>>) -> (s: ActuationPass)
         requires
             effects@.len() == 0,
@@ -153,6 +154,7 @@ impl ActuationPass {
     // -- Executable admission predicates --------------------------------
 
     /// Whether an in-range seat holds an allocation.
+    #[expect(clippy::indexing_slicing, reason = "the accessor requires the seat to be below the allocation length")]
     pub fn is_allocated(&self, s: usize) -> (b: bool)
         requires
             s < self.allocation.len(),
@@ -166,6 +168,7 @@ impl ActuationPass {
     }
 
     /// Whether an in-range seat has committed its effect.
+    #[expect(clippy::indexing_slicing, reason = "the accessor requires the seat to be below the effect length")]
     pub fn is_actuated(&self, s: usize) -> (b: bool)
         requires
             s < self.effects.len(),
@@ -216,6 +219,7 @@ impl ActuationPass {
     }
 
     /// Whether every allocation has a committed effect and closure is enabled.
+    #[expect(clippy::arithmetic_side_effects, reason = "the closure-query cursor advances only while below the paired allocation/effect length")]
     pub fn ready_to_finish_exec(&self) -> (b: bool)
         requires
             self.type_invariant(),
@@ -312,6 +316,7 @@ impl ActuationPass {
 
     /// TLA+ `Actuate(s)`: read the live allocation and record the applied
     /// resource in the same mutable commit.
+    #[expect(clippy::indexing_slicing, reason = "the required ActuationPass invariant and enabled seat bound prove the live allocation read is in range")]
     pub fn actuate(&mut self, s: usize)
         requires
             old(self).invariant(),

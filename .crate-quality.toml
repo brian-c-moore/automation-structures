@@ -32,7 +32,6 @@ required_package_files = [
     "tests/public_api.rs",
     "verification/README.md",
     "verification/run_known_answer.sh",
-    "verification/run_dependency_boundary.sh",
     "verification/run_packaged_consumer.sh",
     "verification/run_verus_gate.sh",
     "verification/run_packaged_verus_consumer.sh",
@@ -49,6 +48,7 @@ minimum_doctests = 36
 name = "known-answer"
 command = ["{bash}", "--login", "verification/run_known_answer.sh"]
 profiles = ["full", "release"]
+environment = { KNOWN_ANSWER_CASE = "" }
 timeout_seconds = 900
 
 [[commands]]
@@ -84,7 +84,6 @@ command = [
     "{crate}/verification/prepare_path_consumer.sh",
     "{crate}/verification/run_downstream_verus.sh",
     "{crate}/verification/run_known_answer.sh",
-    "{crate}/verification/run_dependency_boundary.sh",
     "{crate}/verification/run_packaged_consumer.sh",
     "{crate}/verification/run_packaged_verus_consumer.sh",
     "{crate}/verification/run_verus_gate.sh",

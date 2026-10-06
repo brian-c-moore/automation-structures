@@ -116,6 +116,7 @@ impl RateLimit {
     /// one method: on an expired window, re-anchor AND grant in the same step
     /// (window_start' = clock, count' = 1); on headroom, grant (count' + 1);
     /// otherwise reject (UNCHANGED). Returns whether the acquire was granted.
+    #[expect(clippy::arithmetic_side_effects, reason = "WindowStartNotFuture requires window_start <= clock before computing elapsed time")]
     pub fn try_acquire(&mut self) -> (acquired: bool)
         requires
             old(self).type_invariant(),
@@ -230,6 +231,7 @@ impl RateLimit {
     /// Advance the runtime-given clock by one. Realises the TLA+ `Tick`
     /// action: its guard (clock < MaxClock) is a `requires`, so the action is
     /// callable exactly when the TLA+ action is enabled.
+    #[expect(clippy::arithmetic_side_effects, reason = "the enabled Tick precondition proves clock < max_clock <= u64::MAX before the successor")]
     pub fn tick(&mut self)
         requires
             old(self).type_invariant(),

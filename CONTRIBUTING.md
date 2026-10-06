@@ -33,6 +33,12 @@ cargo deny --all-features check
 
 CI checks actionlint and ShellCheck downloads against pinned checksums before running them.
 
+`Cargo.toml` declares the compiler and Clippy policy. Run Clippy explicitly: ordinary
+`cargo build` does not execute it. Production failures use typed outcomes. Source and tests
+must not use `unwrap` or `expect`; indexing, arithmetic and conversions need checked bounds.
+A scoped lint exception must explain the applicable guard or verified contract. Keep the
+exception narrow and rerun the affected source proof and public tests.
+
 Test changes through the public API. Changes to a verified carrier or its checked facade must also
 pass the formal verification workflow in [verification/README.md](verification/README.md), so update
 the public API tests for each changed behavior that a downstream consumer can observe.

@@ -71,8 +71,14 @@ impl Counter {
         self.value
     }
 
+    /// Preview the owner's generation guard without advancing it.
+    pub fn can_increment(&self) -> (admitted: bool)
+        ensures admitted == (self.value_spec() < u64::MAX as nat),
+    { self.value < u64::MAX }
+
     /// Increment unless the `u64` representation is exhausted.
     #[must_use]
+    #[expect(clippy::arithmetic_side_effects, reason = "the u64::MAX guard refuses the only overflowing successor")]
     pub fn try_increment(&mut self) -> (accepted: bool)
         ensures
             accepted == (old(self).value_spec() < u64::MAX as nat),
@@ -88,6 +94,7 @@ impl Counter {
 
     /// Decrement when positive.
     #[must_use]
+    #[expect(clippy::arithmetic_side_effects, reason = "the zero guard refuses the only underflowing predecessor")]
     pub fn try_decrement(&mut self) -> (accepted: bool)
         ensures
             accepted == (old(self).value_spec() > 0),

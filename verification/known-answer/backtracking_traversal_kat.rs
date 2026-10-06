@@ -12,7 +12,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut all_ok = true;
     let mut t = BacktrackingTraversal::new(2, 3, 0);
 
@@ -25,10 +25,18 @@ fn main() {
 
     t.descend(1, 2);
     all_ok &= check("first do applies delta 2", t.aux, 2);
-    all_ok &= check("first token saves pre-do value", t.ledger[0].saved, 0);
+    all_ok &= check(
+        "first token saves pre-do value",
+        t.ledger.first().map(|token| token.saved),
+        Some(0),
+    );
     t.descend(2, 2);
     all_ok &= check("second do wraps modulo 3", t.aux, 1);
-    all_ok &= check("second token saves held value", t.ledger[1].saved, 2);
+    all_ok &= check(
+        "second token saves held value",
+        t.ledger.get(1).map(|token| token.saved),
+        Some(2),
+    );
     t.descend(1, 1);
     all_ok &= check("leaf depth reached", t.is_leaf_exec(), true);
     all_ok &= check("leaf rejects further descent", t.can_descend(1, 1), false);
@@ -37,8 +45,8 @@ fn main() {
     t.visit();
     all_ok &= check(
         "visit records exact path",
-        t.visited[0].clone(),
-        vec![1, 2, 1],
+        t.visited.first().map(Vec::as_slice),
+        Some([1, 2, 1].as_slice()),
     );
     all_ok &= check("repeated visit rejected by set guard", t.can_visit(), false);
 
@@ -53,8 +61,9 @@ fn main() {
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (BacktrackingTraversalUndo)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (BacktrackingTraversalUndo)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

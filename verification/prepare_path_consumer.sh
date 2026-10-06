@@ -22,4 +22,11 @@ sed \
     "$source_root/Cargo.toml.template" \
     > "$consumer_root/Cargo.toml"
 
+# The consumer is another package, so Cargo cannot inherit dependency lints.
+# Bind both templates to the exact canonical policy being qualified.
+awk '
+    /^\[/ { copy = ($0 ~ /^\[lints\.(rust|clippy)\][[:space:]]*$/) }
+    copy { print }
+' "$dependency_root/Cargo.toml" >> "$consumer_root/Cargo.toml"
+
 cargo generate-lockfile --manifest-path "$consumer_root/Cargo.toml"

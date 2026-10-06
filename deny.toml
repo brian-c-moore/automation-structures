@@ -14,9 +14,8 @@ multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
 deny = []
-# The checksum-pinned Verus proc-macro closure requires these exact old versions.
-# run_dependency_boundary.sh rejects either version in the runtime dependency graph
-# and separately rejects all runtime duplicates. Other versions remain denied.
+# The checksum-pinned Verus procedural macro uses this older pair during macro
+# expansion. run_dependency_boundary.sh separately rejects runtime duplicates.
 skip = [
     { name = "hashbrown", version = "=0.12.3" },
     { name = "indexmap", version = "=1.9.3" },

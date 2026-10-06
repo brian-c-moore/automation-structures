@@ -37,6 +37,7 @@
 //     action. A proof equates its in-place removal to `without_key_sequence`;
 //     entries move without requiring Copy or rebuilding the backing vector.
 
+use crate::compositions::reduction::ReductionProjection;
 use vstd::prelude::*;
 
 mod registry_storage_seal {
@@ -612,25 +613,35 @@ pub trait RegistryStorage<K: KeyIdentity, V>: registry_storage_seal::Sealed + Vi
     fn is_empty(&self) -> (empty: bool)
         ensures empty == (self@.len() == 0),
     { self.len() == 0 }
+    /// Fallible physical reservation, with every logical binding preserved.
+    fn try_reserve_additional(&mut self, additional: usize) -> (reserved: bool)
+        ensures final(self)@ == old(self)@;
     /// Borrow one exact retained key.
-    fn key_at(&self, i: usize) -> (key: &K)
-        requires i < self@.len(), ensures *key == self@[i as int].0;
+    fn key_at(&self, i: usize) -> (key: Option<&K>)
+        ensures key is Some <==> i < self@.len(),
+            key matches Some(key) ==> *key == self@[i as int].0;
     /// Borrow one exact retained value.
-    fn value_at(&self, i: usize) -> (value: &V)
-        requires i < self@.len(), ensures *value == self@[i as int].1;
+    fn value_at(&self, i: usize) -> (value: Option<&V>)
+        ensures value is Some <==> i < self@.len(),
+            value matches Some(value) ==> *value == self@[i as int].1;
     /// Borrow only the retained value; key and every other binding remain fixed.
-    fn value_mut_at(&mut self, i: usize) -> (value: &mut V)
-        requires i < old(self)@.len(),
-        ensures *value == old(self)@[i as int].1,
-            final(self)@ == old(self)@.update(i as int, (old(self)@[i as int].0, *final(value)));
+    fn value_mut_at(&mut self, i: usize) -> (value: Option<&mut V>)
+        ensures value is Some <==> i < old(self)@.len(),
+            match value {
+                Some(value) => *value == old(self)@[i as int].1
+                    && final(self)@ == old(self)@.update(i as int, (old(self)@[i as int].0, *final(value))),
+                None => final(self)@ == old(self)@,
+            };
     /// Append an absent binding. The Registry owns the preceding admission/removal.
     fn push(&mut self, pair: (K, V))
         requires !has_key(identity_entries(old(self)@), old(self)@.len() as int, pair.0.identity()),
         ensures final(self)@ == old(self)@.push(pair);
     /// Order-preserving removal of one position.
-    fn remove(&mut self, i: usize) -> (pair: (K, V))
-        requires i < old(self)@.len(),
-        ensures pair == old(self)@[i as int], final(self)@ == old(self)@.remove(i as int);
+    fn remove(&mut self, i: usize) -> (pair: Option<(K, V)>)
+        ensures pair is Some <==> i < old(self)@.len(),
+            i < old(self)@.len() ==> pair == Some(old(self)@[i as int])
+                && final(self)@ == old(self)@.remove(i as int),
+            i >= old(self)@.len() ==> final(self)@ == old(self)@;
 }
 
 /// Sealed search capability; each probe is tied to the stored key's exact identity.
@@ -648,14 +659,30 @@ impl<K, V> registry_storage_seal::Sealed for Vec<(K, V)> {}
 impl<K, V, Q> registry_storage_seal::Search<K, V, Q> for Vec<(K, V)> {}
 impl<K: KeyIdentity, V> RegistryStorage<K, V> for Vec<(K, V)> {
     fn len(&self) -> (n: usize) { self.len() }
-    fn key_at(&self, i: usize) -> (key: &K) { &self[i].0 }
-    fn value_at(&self, i: usize) -> (value: &V) { &self[i].1 }
-    fn value_mut_at(&mut self, i: usize) -> (value: &mut V) { &mut self[i].1 }
+    fn try_reserve_additional(&mut self, additional: usize) -> (reserved: bool) {
+        self.try_reserve(additional).is_ok()
+    }
+    #[expect(clippy::indexing_slicing, reason = "the physical storage guard checks i < self.len() before borrowing the retained key")]
+    fn key_at(&self, i: usize) -> (key: Option<&K>) {
+        if i < self.len() { Some(&self[i].0) } else { None }
+    }
+    #[expect(clippy::indexing_slicing, reason = "the physical storage guard checks i < self.len() before borrowing the retained value")]
+    fn value_at(&self, i: usize) -> (value: Option<&V>) {
+        if i < self.len() { Some(&self[i].1) } else { None }
+    }
+    #[expect(clippy::indexing_slicing, reason = "the physical storage guard checks i < self.len() before borrowing the retained value mutably")]
+    fn value_mut_at(&mut self, i: usize) -> (value: Option<&mut V>) {
+        if i < self.len() { Some(&mut self[i].1) } else { None }
+    }
     fn push(&mut self, pair: (K, V)) { self.push(pair); }
-    fn remove(&mut self, i: usize) -> (pair: (K, V)) { self.remove(i) }
+    fn remove(&mut self, i: usize) -> (pair: Option<(K, V)>) {
+        if i < self.len() { Some(self.remove(i)) } else { None }
+    }
 }
 
 impl<K: KeyIdentity, V, Q: RegistryQuery<K>> RegistrySearch<K, V, Q> for Vec<(K, V)> {
+    #[expect(clippy::indexing_slicing, reason = "the search loop guards i < the unchanged physical storage length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the search cursor advances only while strictly below the unchanged storage length")]
     fn find_position(&self, query: &Q) -> (position: Option<usize>) {
         let len = self.len();
         let mut i: usize = 0;
@@ -710,23 +737,26 @@ impl<V> IndexedEntries<V> {
 impl<V> RegistryStorage<ByteKey, V> for IndexedEntries<V> {
     #[verifier::external_body]
     fn len(&self) -> (n: usize) { self.map.len() }
-    #[verifier::external_body]
-    fn key_at(&self, i: usize) -> (key: &ByteKey) {
-        self.map.get_index(i).expect("RegistryStorage index precondition").0
+    fn try_reserve_additional(&mut self, additional: usize) -> (reserved: bool) {
+        self.try_reserve(additional)
     }
     #[verifier::external_body]
-    fn value_at(&self, i: usize) -> (value: &V) {
-        self.map.get_index(i).expect("RegistryStorage index precondition").1
+    fn key_at(&self, i: usize) -> (key: Option<&ByteKey>) {
+        self.map.get_index(i).map(|(key, _)| key)
     }
     #[verifier::external_body]
-    fn value_mut_at(&mut self, i: usize) -> (value: &mut V) {
-        self.map.get_index_mut(i).expect("RegistryStorage index precondition").1
+    fn value_at(&self, i: usize) -> (value: Option<&V>) {
+        self.map.get_index(i).map(|(_, value)| value)
+    }
+    #[verifier::external_body]
+    fn value_mut_at(&mut self, i: usize) -> (value: Option<&mut V>) {
+        self.map.get_index_mut(i).map(|(_, value)| value)
     }
     #[verifier::external_body]
     fn push(&mut self, pair: (ByteKey, V)) { self.map.insert(pair.0, pair.1); }
     #[verifier::external_body]
-    fn remove(&mut self, i: usize) -> (pair: (ByteKey, V)) {
-        self.map.shift_remove_index(i).expect("RegistryStorage index precondition")
+    fn remove(&mut self, i: usize) -> (pair: Option<(ByteKey, V)>) {
+        self.map.shift_remove_index(i)
     }
 }
 
@@ -799,14 +829,19 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
     where S::Entries: RegistrySearch<K, V, K>,
 {
     /// Borrow the actual retained owner at a known position without replacing it.
-    pub fn value_mut_at(&mut self, i: usize) -> (value: &mut V)
-        requires old(self).unique_identities(), i < old(self).entries@.len(),
-        ensures *value == old(self).entries@[i as int].1,
-            final(self).entries@ == old(self).entries@.update(i as int,
-                (old(self).entries@[i as int].0, *final(value))),
+    pub fn value_mut_at(&mut self, i: usize) -> (value: Option<&mut V>)
+        requires old(self).unique_identities(),
+        ensures value is Some <==> i < old(self).entries@.len(),
+            match value {
+                Some(value) => *value == old(self).entries@[i as int].1
+                    && final(self).entries@ == old(self).entries@.update(i as int,
+                        (old(self).entries@[i as int].0, *final(value))),
+                None => final(self).entries@ == old(self).entries@,
+            },
             final(self).unique_identities(),
     {
         let ghost entries = self.entries@;
+        if i >= self.entries.len() { return None; }
         assert forall|updated: V| #[trigger] unique_mapping_entries(identity_entries(
             entries.update(i as int, (entries[i as int].0, updated)))) by {
             let changed = entries.update(i as int, (entries[i as int].0, updated));
@@ -845,7 +880,7 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
                         identity_entry_at(entries.update(i as int, (entries[i as int].0, updated)), i as int);
                     }
                 }
-                Some(self.value_mut_at(i))
+                self.value_mut_at(i)
             }
             None => None,
         }
@@ -858,9 +893,156 @@ pub struct ResourceRegistry<K, V, S: RegistryLayout<K, V> = LinearStorage> {
     pub entries: S::Entries,
 }
 
+/// Refusal of unique insertion; existing upsert is a separate operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegistryInsertError {
+    /// The exact logical key already has a retained binding.
+    DuplicateKey,
+    /// The physical representation could not reserve another entry.
+    StorageUnavailable,
+}
+
+/// Pure domain content for a Registry-owned Boolean query.
+pub trait RegistryPredicate<K, V> {
+    /// Mathematical selection of one retained key/value pair.
+    spec fn selected(&self, key: K, value: V) -> bool;
+    /// Evaluate that selection without retaining automation state.
+    fn test(&self, key: &K, value: &V) -> (selected: bool)
+        ensures selected == self.selected(*key, *value);
+}
+
+/// Mathematical selected count of an immutable retained prefix.
+pub open spec fn selected_count<K, V, P: RegistryPredicate<K, V>>(
+    entries: Seq<(K, V)>, length: int, predicate: P,
+) -> int
+    decreases length,
+{
+    if length <= 0 || length > entries.len() { 0 }
+    else { selected_count(entries, length - 1, predicate)
+        + if predicate.selected(entries[length - 1].0, entries[length - 1].1) { 1int } else { 0int } }
+}
+
+// Borrowed domain content only; the named Reduction retains all traversal state.
+struct RegistryMatchProjection<'a, K, V, S: RegistryLayout<K, V>, P: RegistryPredicate<K, V>> {
+    registry: &'a ResourceRegistry<K, V, S>,
+    predicate: &'a P,
+}
+
+impl<'a, K: KeyIdentity, V, S: RegistryLayout<K, V>, P: RegistryPredicate<K, V>>
+    ReductionProjection<crate::primitives::audit_sink::AdditiveChain>
+    for RegistryMatchProjection<'a, K, V, S, P>
+    where S::Entries: RegistryStorage<K, V>,
+{
+    closed spec fn domain_len(&self) -> nat { self.registry.entries@.len() }
+    closed spec fn item_spec(&self, position: int) -> u64 {
+        if self.predicate.selected(self.registry.entries@[position].0,
+            self.registry.entries@[position].1) { 1 } else { 0 }
+    }
+    fn len(&self) -> (length: usize) { self.registry.entries.len() }
+    fn item(&self, position: usize) -> (item: u64) {
+        let key = match self.registry.entries.key_at(position) {
+            Some(key) => key, None => { proof { assert(false); } return 0; },
+        };
+        let value = match self.registry.entries.value_at(position) {
+            Some(value) => value, None => { proof { assert(false); } return 0; },
+        };
+        if self.predicate.test(key, value) { 1 } else { 0 }
+    }
+}
+
+impl<'a, K: KeyIdentity, V, S: RegistryLayout<K, V>, P: RegistryPredicate<K, V>>
+    RegistryMatchProjection<'a, K, V, S, P>
+    where S::Entries: RegistryStorage<K, V>,
+{
+    proof fn prefix_correct(&self, end: int)
+        requires 0 <= end <= self.registry.entries@.len(),
+            self.registry.entries@.len() <= u64::MAX,
+        ensures
+            0 <= selected_count(self.registry.entries@, end, *self.predicate) <= end,
+            crate::compositions::reduction::projected_fold_to(*self,
+                crate::primitives::audit_sink::AdditiveChain, end) as int
+                == selected_count(self.registry.entries@, end, *self.predicate),
+            crate::compositions::reduction::projected_prefix_admitted(*self,
+                crate::primitives::audit_sink::AdditiveChain, end),
+        decreases end,
+    {
+        if end > 0 { self.prefix_correct(end - 1); }
+    }
+}
+
 impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
     where S::Entries: RegistrySearch<K, V, K>,
 {
+    /// Insert an absent key through the existing Register action after reservation.
+    ///
+    /// # Errors
+    /// Duplicate or allocation refusal returns the exact unconsumed key/value.
+    /// Every logical binding is unchanged. The allocator may retain spare capacity.
+    pub fn try_insert_unique(&mut self, key: K, value: V)
+        -> (result: Result<usize, (RegistryInsertError, K, V)>)
+        requires old(self).unique_identities(),
+        ensures final(self).unique_identities(),
+            result is Err ==> final(self).entries@ == old(self).entries@
+                && result.unwrap_err().1 == key && result.unwrap_err().2 == value,
+            result matches Err((RegistryInsertError::DuplicateKey, _, _))
+                <==> old(self).contains_key_identity(key),
+            result matches Ok(position) ==> position == old(self).entries@.len()
+                && final(self).entries@ == old(self).entries@.push((key, value))
+                && final(self).maps_key(key, value),
+    {
+        if let Some(position) = self.find_key(&key) {
+            let _ = position;
+            proof {
+                identity_entry_at(self.entries@, position as int);
+                assert(identity_entries(self.entries@)[position as int].0 == key.identity());
+                assert(self.contains_key_identity(key));
+            }
+            return Err((RegistryInsertError::DuplicateKey, key, value));
+        }
+        if !self.entries.try_reserve_additional(1) {
+            return Err((RegistryInsertError::StorageUnavailable, key, value));
+        }
+        let position = self.entries.len();
+        self.register_key(key, value);
+        Ok(position)
+    }
+
+    /// Count selected entries through the named Reduction, under this immutable borrow.
+    /// AuditSink owns both traversal position and carried result; no aggregate is cached.
+    #[expect(clippy::cast_possible_truncation, reason = "the exact boolean Reduction result is bounded by the Registry's usize entry length")]
+    pub fn count_matching<P: RegistryPredicate<K, V>>(&self, predicate: &P) -> (count: usize)
+        ensures count as int == selected_count(self.entries@, self.entries@.len() as int, *predicate),
+            count <= self.entries@.len(),
+    {
+        use crate::compositions::reduction::IncrementalReduction;
+        use crate::primitives::audit_sink::AdditiveChain;
+        let length = self.entries.len();
+        let mut reduction = IncrementalReduction::new(length, AdditiveChain);
+        let source = RegistryMatchProjection { registry: self, predicate };
+        let _folded = reduction.try_fold_projection(&source);
+        proof {
+            source.prefix_correct(reduction.processed_spec() as int);
+            if _folded is Err {
+                assert(source.item_spec(reduction.processed_spec() as int) <= 1u64);
+                assert(false);
+            }
+            source.prefix_correct(length as int);
+        }
+        reduction.result() as usize
+    }
+
+    /// Whether at least one retained entry satisfies the domain predicate.
+    pub fn any_matching<P: RegistryPredicate<K, V>>(&self, predicate: &P) -> (any: bool)
+        ensures any == (selected_count(self.entries@, self.entries@.len() as int, *predicate) > 0),
+    { self.count_matching(predicate) > 0 }
+
+    /// Whether every retained entry satisfies the predicate; true for an empty Registry.
+    pub fn all_matching<P: RegistryPredicate<K, V>>(&self, predicate: &P) -> (all: bool)
+        ensures all == (selected_count(self.entries@, self.entries@.len() as int, *predicate)
+            == self.entries@.len()),
+    { self.count_matching(predicate) == self.entries.len() }
+
     // ── Specifications ──────────────────────────────────────────────────
 
     /// TLA+ `UniqueMapping`: no two distinct entries share a key.
@@ -956,8 +1138,55 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
         match self.find_key(query) {
             Some(i) => {
                 proof { identity_entry_at(self.entries@, i as int); }
-                Some(self.entries.value_at(i))
+                self.entries.value_at(i)
             }
+            None => None,
+        }
+    }
+
+    /// Take an owned binding through the same identity search and Deregister action.
+    /// Absent queries preserve every entry; no payload cloning or allocation occurs.
+    pub fn take_query<Q: RegistryQuery<K>>(&mut self, query: &Q) -> (removed: Option<(K, V)>)
+        where S::Entries: RegistrySearch<K, V, Q>,
+        requires old(self).unique_identities(),
+        ensures final(self).unique_identities(),
+            (removed is None) == !old(self).contains_identity(query.query_identity()),
+            removed is None ==> final(self).entries@ == old(self).entries@,
+            removed matches Some((key, value)) ==> key.identity() == query.query_identity()
+                && old(self).maps_identity(query.query_identity(), value)
+                && !final(self).contains_identity(query.query_identity())
+                && final(self).entries@.len() + 1 == old(self).entries@.len()
+                && final(self).entries@ == without_identity_sequence(old(self).entries@, key),
+            forall|key: K, value: V| key.identity() != query.query_identity() ==>
+                (#[trigger] final(self).maps_key(key, value) == old(self).maps_key(key, value)),
+    {
+        match self.find_key(query) {
+            Some(index) => {
+                let ghost before = *self;
+                let ghost entry = self.entries@[index as int];
+                proof {
+                    identity_entry_at(self.entries@, index as int);
+                    assert(before.maps_identity(query.query_identity(), entry.1));
+                }
+                let removed = self.deregister_identity_at(index);
+                assert(removed == Some(entry));
+                proof {
+                    without_identity_to_remove_unique(before.entries@, entry.0,
+                        before.entries@.len() as int, index as int);
+                }
+                assert(!self.contains_identity(query.query_identity())) by {
+                    if self.contains_identity(query.query_identity()) {
+                        let remaining = choose|remaining: int| 0 <= remaining < self.entries@.len()
+                            && self.entries@[remaining].0.identity() == query.query_identity();
+                        identity_entry_at(self.entries@, remaining);
+                        let retained = self.entries@[remaining];
+                        assert(self.maps_key(retained.0, retained.1));
+                        assert(retained.0.identity() == entry.0.identity());
+                        assert(false);
+                    }
+                }
+                removed
+            },
             None => None,
         }
     }
@@ -1123,18 +1352,18 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
     /// This is the positional form of `Deregister`: callers that discover a key while scanning
     /// the registry can remove that binding without rebuilding or replacing registry
     /// storage outside this owner.
-    pub fn deregister_identity_at(&mut self, index: usize) -> (removed: (K, V))
+    pub fn deregister_identity_at(&mut self, index: usize) -> (removed: Option<(K, V)>)
         requires
             old(self).unique_identities(),
             index < old(self).entries@.len(),
         ensures
-            removed == old(self).entries@[index as int],
+            removed == Some(old(self).entries@[index as int]),
             final(self).entries@ == old(self).entries@.remove(index as int),
             final(self).entries@.len() + 1 == old(self).entries@.len(),
             final(self).unique_identities(),
             forall|key: K, value: V|
                 #[trigger] final(self).maps_key(key, value)
-                    == (old(self).maps_key(key, value) && key.identity() != removed.0.identity()),
+                    == (old(self).maps_key(key, value) && key.identity() != old(self).entries@[index as int].0.identity()),
     {
         let ghost before = self.entries@;
         proof { identity_entries_remove(before, index as int); }
@@ -1162,7 +1391,7 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
         }
         assert forall|key: K, value: V|
             #[trigger] self.maps_key(key, value)
-                == (old(self).maps_key(key, value) && key.identity() != removed.0.identity()) by {
+                == (old(self).maps_key(key, value) && key.identity() != old(self).entries@[index as int].0.identity()) by {
             has_pair_remove_unique(identity_entries(before), index as int, key.identity(), value);
         }
         removed
@@ -1353,25 +1582,26 @@ impl<K: RegistryKey, V> ResourceRegistry<K, V> {
     }
 
     /// Preserve the exact-key positional removal contract on the same owner action.
-    pub fn deregister_at(&mut self, index: usize) -> (removed: (K, V))
+    pub fn deregister_at(&mut self, index: usize) -> (removed: Option<(K, V)>)
         requires
             old(self).unique_mapping(),
             index < old(self).entries@.len(),
         ensures
-            removed == old(self).entries@[index as int],
+            removed == Some(old(self).entries@[index as int]),
             final(self).entries@ == old(self).entries@.remove(index as int),
             final(self).entries@.len() + 1 == old(self).entries@.len(),
             final(self).unique_mapping(),
             forall|key: K, value: V|
                 #[trigger] final(self).maps_to(key, value)
-                    == (old(self).maps_to(key, value) && key != removed.0),
+                    == (old(self).maps_to(key, value) && key != old(self).entries@[index as int].0),
     {
         proof { identity_entries_are_exact(self.entries@); }
         let removed = self.deregister_identity_at(index);
         proof { identity_entries_are_exact(self.entries@); }
         assert forall|key: K, value: V|
-            #[trigger] self.maps_to(key, value) == (old(self).maps_to(key, value) && key != removed.0) by {
-            assert(self.maps_key(key, value) == (old(self).maps_key(key, value) && key.identity() != removed.0.identity()));
+            #[trigger] self.maps_to(key, value) == (old(self).maps_to(key, value) && key != old(self).entries@[index as int].0) by {
+            assert(self.maps_key(key, value) == (old(self).maps_key(key, value)
+                && key.identity() != old(self).entries@[index as int].0.identity()));
         }
         removed
     }

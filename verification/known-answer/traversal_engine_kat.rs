@@ -13,14 +13,22 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
 }
 
 fn visited_view(engine: &TraversalEngine) -> Vec<bool> {
-    engine.visited.iter().map(|marker| marker.is_marked()).collect()
+    engine
+        .visited
+        .iter()
+        .map(|marker| marker.is_marked())
+        .collect()
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut all_ok = true;
 
     let mut walk = TraversalEngine::new(4, 0, 6);
-    all_ok &= check("Init queues exactly root", walk.queue.values.clone(), vec![0]);
+    all_ok &= check(
+        "Init queues exactly root",
+        walk.queue.values.clone(),
+        vec![0],
+    );
     all_ok &= check(
         "Visit admission accepts queued root",
         walk.can_visit(0),
@@ -54,20 +62,28 @@ fn main() {
     all_ok &= check("root cost charged", walk.budget_remaining(), 4);
     all_ok &= check(
         "root charged cost equals accepted count times node cost",
-        walk.budget.allocated,
-        walk.accepted.len() as u64 * 2,
+        Some(walk.budget.allocated),
+        u64::try_from(walk.accepted.len())
+            .ok()
+            .and_then(|count| count.checked_mul(2)),
     );
     all_ok &= check("duplicate visit disabled", walk.can_visit(0), false);
 
     walk.visit_node(1);
     all_ok &= check("child removed from queue", walk.queue_contains(1), false);
-    all_ok &= check("leaf adds no children", walk.queue.values.clone(), vec![2, 3]);
+    all_ok &= check(
+        "leaf adds no children",
+        walk.queue.values.clone(),
+        vec![2, 3],
+    );
     all_ok &= check("child accepted", walk.accepted_contains(1), true);
     all_ok &= check("second cost charged", walk.budget_remaining(), 2);
     all_ok &= check(
         "second charged cost equals accepted count times node cost",
-        walk.budget.allocated,
-        walk.accepted.len() as u64 * 2,
+        Some(walk.budget.allocated),
+        u64::try_from(walk.accepted.len())
+            .ok()
+            .and_then(|count| count.checked_mul(2)),
     );
 
     let mut exhausted = TraversalEngine::new(2, 0, 2);
@@ -90,8 +106,10 @@ fn main() {
     );
     all_ok &= check(
         "unaffordable visit preserves accepted-cost accounting",
-        exhausted.budget.allocated,
-        exhausted.accepted.len() as u64 * 2,
+        Some(exhausted.budget.allocated),
+        u64::try_from(exhausted.accepted.len())
+            .ok()
+            .and_then(|count| count.checked_mul(2)),
     );
     all_ok &= check(
         "unaffordable visit removes queue member",
@@ -156,8 +174,9 @@ fn main() {
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (TraversalEngine action correspondence)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (TraversalEngine action correspondence)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

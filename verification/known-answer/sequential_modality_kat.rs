@@ -12,7 +12,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
     let mut s = Sequential::new(2, 4, 0);
     ok &= check("Init cursor", s.pc, 0);
@@ -46,7 +46,11 @@ fn main() {
     ok &= check("second BeginStep admitted", s.begin_step(), true);
     ok &= check("second completion admitted", s.complete_step(3), true);
     ok &= check("terminal cursor bounded", s.pc, 2);
-    ok &= check("history agrees with execution position", s.history.clone(), vec![2, 3]);
+    ok &= check(
+        "history agrees with execution position",
+        s.history.clone(),
+        vec![2, 3],
+    );
     ok &= check("BeginStep rejected at step bound", s.begin_step(), false);
     let before = (s.pc, s.value, s.active, s.history.clone());
     ok &= check("terminal stutter enabled", s.done_stuttering(), true);
@@ -58,8 +62,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (Sequential modality)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (Sequential modality)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

@@ -107,6 +107,21 @@ impl QualityHierarchy {
                 self.parent@[self.edges@[e].1 as int] == self.edges@[e].0
     }
 
+    /// Reachable implementation property: every non-root parent pointer has its edge.
+    /// This is additional to the frozen model's edge-to-parent invariant.
+    pub open spec fn parent_has_edge(&self) -> bool {
+        forall|node: int| 0 <= node < self.num_nodes
+            && #[trigger] self.parent@[node] < self.num_nodes ==>
+                self.edge_exists(self.parent@[node], node as usize)
+    }
+
+    /// Export the retained edge for one non-root parent pointer.
+    pub proof fn expose_parent_edge(&self, node: usize)
+        requires self.parent_has_edge(), node < self.num_nodes,
+            self.parent@[node as int] < self.num_nodes,
+        ensures self.edge_exists(self.parent@[node as int], node),
+    {}
+
     /// TLA+ `CostMonotonicity`: for every parent->child edge, the parent's cost
     /// does not exceed the child's. Checked by `QualityHierarchy.cfg`.
     pub open spec fn cost_monotonicity(&self) -> bool {
@@ -138,14 +153,49 @@ impl QualityHierarchy {
             h.type_invariant(),
             h.strict_level_descent(),
             h.parent_edge_agreement(),
+            h.parent_has_edge(),
             h.cost_monotonicity(),
             forall|n: int| 0 <= n < num_nodes ==> h.level@[n] == 0,
             forall|n: int| 0 <= n < num_nodes ==> h.cost@[n] == 0,
             forall|n: int| 0 <= n < num_nodes ==> h.parent@[n] == num_nodes,
     {
-        let mut level: Vec<u64> = Vec::new();
-        let mut cost: Vec<u64> = Vec::new();
-        let mut parent: Vec<usize> = Vec::new();
+        Self::initialize(num_nodes, max_level, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    }
+
+    /// Reserve the existing node-property and edge owners before initialization.
+    ///
+    /// # Errors
+    /// Returns storage refusal before exposing any hierarchy.
+    pub fn try_new(num_nodes: usize, max_level: u64)
+        -> (result: Result<Self, std::collections::TryReserveError>)
+        ensures result matches Ok(h) ==> h.num_nodes == num_nodes && h.max_level == max_level
+            && h.edges@.len() == 0 && h.type_invariant() && h.strict_level_descent()
+            && h.parent_edge_agreement() && h.parent_has_edge() && h.cost_monotonicity()
+            && forall|n: int| 0 <= n < num_nodes ==> h.level@[n] == 0
+                && h.cost@[n] == 0 && h.parent@[n] == num_nodes,
+    {
+        let mut level = Vec::new();
+        level.try_reserve(num_nodes)?;
+        let mut cost = Vec::new();
+        cost.try_reserve(num_nodes)?;
+        let mut parent = Vec::new();
+        parent.try_reserve(num_nodes)?;
+        let mut edges = Vec::new();
+        edges.try_reserve(num_nodes)?;
+        Ok(Self::initialize(num_nodes, max_level, level, cost, parent, edges))
+    }
+
+    #[expect(clippy::arithmetic_side_effects, reason = "the initialization cursor advances only while strictly below num_nodes")]
+    fn initialize(num_nodes: usize, max_level: u64, mut level: Vec<u64>,
+        mut cost: Vec<u64>, mut parent: Vec<usize>, edges: Vec<(usize, usize)>) -> (h: Self)
+        requires level@.len() == 0, cost@.len() == 0, parent@.len() == 0, edges@.len() == 0,
+        ensures h.num_nodes == num_nodes, h.max_level == max_level, h.edges@.len() == 0,
+            h.type_invariant(), h.strict_level_descent(), h.parent_edge_agreement(),
+            h.parent_has_edge(), h.cost_monotonicity(),
+            forall|n: int| 0 <= n < num_nodes ==> h.level@[n] == 0,
+            forall|n: int| 0 <= n < num_nodes ==> h.cost@[n] == 0,
+            forall|n: int| 0 <= n < num_nodes ==> h.parent@[n] == num_nodes,
+    {
         let mut i: usize = 0;
         while i < num_nodes
             invariant
@@ -163,12 +213,13 @@ impl QualityHierarchy {
             parent.push(num_nodes);
             i = i + 1;
         }
-        QualityHierarchy { num_nodes, max_level, level, cost, parent, edges: Vec::new() }
+        QualityHierarchy { num_nodes, max_level, level, cost, parent, edges }
     }
 
     // ── Accessors / executable guards ───────────────────────────────────
 
     /// `level[n]` (executable).
+    #[expect(clippy::indexing_slicing, reason = "lengths_ok and n < num_nodes require an in-range level index")]
     pub fn level_of(&self, n: usize) -> (l: u64)
         requires self.lengths_ok(), n < self.num_nodes,
         ensures l == self.level@[n as int],
@@ -177,6 +228,7 @@ impl QualityHierarchy {
     }
 
     /// `cost[n]` (executable).
+    #[expect(clippy::indexing_slicing, reason = "lengths_ok and n < num_nodes require an in-range cost index")]
     pub fn cost_of(&self, n: usize) -> (c: u64)
         requires self.lengths_ok(), n < self.num_nodes,
         ensures c == self.cost@[n as int],
@@ -185,6 +237,7 @@ impl QualityHierarchy {
     }
 
     /// `parent[n]` (executable); returns the sentinel `num_nodes` for NULL.
+    #[expect(clippy::indexing_slicing, reason = "lengths_ok and n < num_nodes require an in-range parent index")]
     pub fn parent_of(&self, n: usize) -> (p: usize)
         requires self.lengths_ok(), n < self.num_nodes,
         ensures p == self.parent@[n as int],
@@ -194,6 +247,8 @@ impl QualityHierarchy {
 
     /// Whether `n` is anyone's parent in the edge list (`children[n] != {}`).
     /// Used to discharge the SetNodeProperties guard `children[n] = {}`.
+    #[expect(clippy::indexing_slicing, reason = "the child-query loop guards its index against the unchanged edge length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the child-query cursor advances only while strictly below edge length")]
     pub fn has_children(&self, n: usize) -> (b: bool)
         ensures b == (exists|e: int|
             #![trigger self.edges@[e]] 0 <= e < self.edges.len() && self.edges@[e].0 == n),
@@ -260,6 +315,8 @@ impl QualityHierarchy {
     }
 
     /// Whether the exact parent-child edge is present.
+    #[expect(clippy::indexing_slicing, reason = "the edge-query loop guards its index against the unchanged edge length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the edge-query cursor advances only while strictly below edge length")]
     pub fn has_edge(&self, p: usize, c: usize) -> (b: bool)
         ensures b == self.edge_exists(p, c),
     {
@@ -311,8 +368,12 @@ impl QualityHierarchy {
             final(self).type_invariant(),
             final(self).strict_level_descent(),
             final(self).parent_edge_agreement(),
+            old(self).parent_has_edge() ==> final(self).parent_has_edge(),
             final(self).cost_monotonicity(),
     {
+        let ghost prior_parent = self.parent@;
+        let ghost prior_edges = self.edges@;
+        let ghost had_parent_edges = self.parent_has_edge();
         // Key fact: no existing edge has `c` as its child. If some edge (x, c)
         // existed, ParentEdgeAgreement would force parent[c] = x with x a node
         // (x < num_nodes by edges_wf), contradicting parent[c] = NULL (=num_nodes).
@@ -323,6 +384,20 @@ impl QualityHierarchy {
         }
         self.edges.push((p, c));
         self.parent.set(c, p);
+        proof { if had_parent_edges {
+            assert forall|node: int| 0 <= node < self.num_nodes
+                && #[trigger] self.parent@[node] < self.num_nodes implies
+                    self.edge_exists(self.parent@[node], node as usize) by {
+                if node == c as int {
+                    assert(self.edges@[prior_edges.len() as int] == (p, c));
+                } else {
+                    assert(self.parent@[node] == prior_parent[node]);
+                    let edge = choose|edge: int| 0 <= edge < prior_edges.len()
+                        && #[trigger] prior_edges[edge] == (prior_parent[node], node as usize);
+                    assert(self.edges@[edge] == prior_edges[edge]);
+                }
+            }
+        } }
     }
 
     // ── SetNodeProperties (TLA+ SetNodeProperties) ──────────────────────
@@ -353,8 +428,12 @@ impl QualityHierarchy {
             final(self).type_invariant(),
             final(self).strict_level_descent(),
             final(self).parent_edge_agreement(),
+            old(self).parent_has_edge() ==> final(self).parent_has_edge(),
             final(self).cost_monotonicity(),
     {
+        let ghost prior_parent = self.parent@;
+        let ghost prior_edges = self.edges@;
+        let ghost had_parent_edges = self.parent_has_edge();
         // n is in no edge: it is no one's parent (precondition) and, since
         // parent[n] = NULL, no one's child (ParentEdgeAgreement + edges_wf, as in
         // add_child). So neither endpoint of any edge equals n, and changing
@@ -366,6 +445,16 @@ impl QualityHierarchy {
         }
         self.level.set(n, l);
         self.cost.set(n, c);
+        proof { if had_parent_edges {
+            assert forall|node: int| 0 <= node < self.num_nodes
+                && #[trigger] self.parent@[node] < self.num_nodes implies
+                    self.edge_exists(self.parent@[node], node as usize) by {
+                assert(self.parent@[node] == prior_parent[node]);
+                let edge = choose|edge: int| 0 <= edge < prior_edges.len()
+                    && #[trigger] prior_edges[edge] == (prior_parent[node], node as usize);
+                assert(self.edges@[edge] == prior_edges[edge]);
+            }
+        } }
     }
 }
 

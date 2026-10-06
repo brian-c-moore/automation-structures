@@ -87,10 +87,12 @@ impl ChainOperation for AdditiveChain {
         (previous + operation) as u64
     }
 
+    #[expect(clippy::arithmetic_side_effects, reason = "previous is a u64, so u64::MAX - previous is always representable")]
     fn enabled_exec(&self, previous: u64, operation: u64) -> (enabled: bool) {
         operation <= u64::MAX - previous
     }
 
+    #[expect(clippy::arithmetic_side_effects, reason = "ChainOperation requires the enabled additive guard, proving the sum is at most u64::MAX")]
     fn combine(&self, previous: u64, operation: u64) -> (result: u64) {
         previous + operation
     }
@@ -180,13 +182,25 @@ impl TypedChainOperation for CheckedSignedAdd {
         (previous as int + operation as int) as i64
     }
     fn initial(&self) -> (result: i64) { 0 }
+    #[expect(clippy::arithmetic_side_effects, reason = "each sign branch makes its i64 limit minus operation representable before testing the proposed sum")]
     fn accepts_exec(&self, previous: i64, operation: i64) -> (yes: bool) {
         if operation >= 0 { previous <= i64::MAX - operation }
         else { previous >= i64::MIN - operation }
     }
+    #[expect(clippy::arithmetic_side_effects, reason = "TypedChainOperation requires the accepts guard, proving the signed sum is representable")]
     fn combine_typed(&self, previous: i64, operation: i64) -> (result: i64) {
         previous + operation
     }
+}
+
+/// Reason an AuditSink Record cannot be prepared without changing its owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordRefusal {
+    /// The fixed lifetime record ceiling is exhausted.
+    Capacity,
+    /// The ordered domain operation is undefined for the current carry and item.
+    Domain,
 }
 
 /// Nullable checked sum/count data operation; null consumes input without contributing.
@@ -225,6 +239,7 @@ impl TypedChainOperation for CheckedSignedSumCount {
             NullableSigned::Value(value) => previous.count < u64::MAX && CheckedSignedAdd.accepts_exec(previous.sum, value),
         }
     }
+    #[expect(clippy::arithmetic_side_effects, reason = "the accepted nonnull operation requires count < u64::MAX before its successor")]
     fn combine_typed(&self, previous: SignedSumCount, operation: NullableSigned) -> (result: SignedSumCount) {
         match operation {
             NullableSigned::Missing => previous,
@@ -261,6 +276,8 @@ impl<I: Copy, C: Copy> AuditStorage<I, C> for Vec<AuditEntry<I, C>> {
     open spec fn storage_valid(&self) -> bool { true }
     fn record_count(&self) -> (count: usize) { self.len() }
     fn append_record(&mut self, entry: AuditEntry<I, C>) { self.push(entry); }
+    #[expect(clippy::indexing_slicing, reason = "the nonempty branch proves len - 1 is a retained record index")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the empty-history branch returns before computing len - 1")]
     fn latest_operation(&self) -> (latest: Option<I>) {
         if self.len() == 0 { None } else { Some(self[self.len() - 1].operation) }
     }
@@ -278,7 +295,9 @@ impl<I: Copy, C: Copy> SummaryHistory<I, C> {
     fn empty() -> (storage: Self)
         ensures storage.storage_valid(), storage.records().len() == 0,
     {
-        Self { count: Counter::new(0), latest: None, history: Ghost(Seq::empty()) }
+        #[expect(clippy::unreachable, reason = "pinned Verus erasure supplies an uncalled type-inference closure to Ghost's PhantomData constructor")]
+        let history = Ghost(Seq::empty());
+        Self { count: Counter::new(0), latest: None, history }
     }
 }
 impl<I: Copy, C: Copy> AuditStorage<I, C> for SummaryHistory<I, C> {
@@ -289,6 +308,7 @@ impl<I: Copy, C: Copy> AuditStorage<I, C> for SummaryHistory<I, C> {
         &&& self.latest == if self.history@.len() == 0 { None }
             else { Some(self.history@[self.history@.len() - 1].operation) }
     }
+    #[expect(clippy::cast_possible_truncation, reason = "storage_valid binds Counter.value to the retained history length and bounds that length by usize::MAX")]
     fn record_count(&self) -> (count: usize) { self.count.value() as usize }
     fn append_record(&mut self, entry: AuditEntry<I, C>) {
         let accepted = self.count.try_increment();
@@ -334,27 +354,41 @@ impl<O: TypedChainOperation, S: AuditStorage<O::Item, O::Carry>> AuditSink<O, S>
         ensures latest == if self.history_spec().len() == 0 { None }
             else { Some(self.history_spec()[self.history_spec().len() - 1].operation) },
     { self.log.latest_operation() }
-    /// One shared Record commit. Capacity or undefined domain arithmetic refuses unchanged.
-    pub fn record_typed(&mut self, operation: O::Item) -> (accepted: bool)
-        requires old(self).chain_valid(),
+
+    /// Check the one Record guard and compute its domain result without publication.
+    pub(crate) fn prepare_record(&self, operation: O::Item)
+        -> (result: Result<O::Carry, RecordRefusal>)
+        requires self.chain_valid(),
         ensures
-            final(self).chain_valid(),
+            match result {
+                Ok(carry) => self.history_spec().len() < self.max_log_len
+                    && self.operator.accepts(self.last_hash, operation)
+                    && carry == self.operator.combined(self.last_hash, operation),
+                Err(RecordRefusal::Capacity) => self.history_spec().len() >= self.max_log_len,
+                Err(RecordRefusal::Domain) => self.history_spec().len() < self.max_log_len
+                    && !self.operator.accepts(self.last_hash, operation),
+            },
+    {
+        if self.log.record_count() >= self.max_log_len { return Err(RecordRefusal::Capacity); }
+        if !self.operator.accepts_exec(self.last_hash, operation) { return Err(RecordRefusal::Domain); }
+        Ok(self.operator.combine_typed(self.last_hash, operation))
+    }
+
+    /// Commit the exact precomputed Record under its owner guard.
+    pub(crate) fn commit_record(&mut self, operation: O::Item, new_hash: O::Carry)
+        requires old(self).chain_valid(),
+            old(self).history_spec().len() < old(self).max_log_len,
+            old(self).operator.accepts(old(self).last_hash, operation),
+            new_hash == old(self).operator.combined(old(self).last_hash, operation),
+        ensures final(self).chain_valid(),
             final(self).operator == old(self).operator,
             final(self).max_log_len == old(self).max_log_len,
-            accepted == (old(self).history_spec().len() < old(self).max_log_len
-                && old(self).operator.accepts(old(self).last_hash, operation)),
-            !accepted ==> *final(self) == *old(self),
-            accepted ==> final(self).history_spec() == old(self).history_spec().push(AuditEntry {
-                operation, prev_hash: old(self).last_hash,
-                hash: old(self).operator.combined(old(self).last_hash, operation),
+            final(self).history_spec() == old(self).history_spec().push(AuditEntry {
+                operation, prev_hash: old(self).last_hash, hash: new_hash,
             }),
-            accepted ==> final(self).last_hash
-                == old(self).operator.combined(old(self).last_hash, operation),
+            final(self).last_hash == new_hash,
     {
-        if self.log.record_count() >= self.max_log_len { return false; }
-        if !self.operator.accepts_exec(self.last_hash, operation) { return false; }
         let ghost previous = self.history_spec();
-        let new_hash = self.operator.combine_typed(self.last_hash, operation);
         let entry = AuditEntry { operation, prev_hash: self.last_hash, hash: new_hash };
         self.log.append_record(entry);
         self.last_hash = new_hash;
@@ -374,7 +408,28 @@ impl<O: TypedChainOperation, S: AuditStorage<O::Item, O::Carry>> AuditSink<O, S>
                 if i < previous.len() {} else { assert(i == previous.len()); }
             }
         }
-        true
+    }
+    /// One shared Record commit. Capacity or undefined domain arithmetic refuses unchanged.
+    pub fn record_typed(&mut self, operation: O::Item) -> (accepted: bool)
+        requires old(self).chain_valid(),
+        ensures
+            final(self).chain_valid(),
+            final(self).operator == old(self).operator,
+            final(self).max_log_len == old(self).max_log_len,
+            accepted == (old(self).history_spec().len() < old(self).max_log_len
+                && old(self).operator.accepts(old(self).last_hash, operation)),
+            !accepted ==> *final(self) == *old(self),
+            accepted ==> final(self).history_spec() == old(self).history_spec().push(AuditEntry {
+                operation, prev_hash: old(self).last_hash,
+                hash: old(self).operator.combined(old(self).last_hash, operation),
+            }),
+            accepted ==> final(self).last_hash
+                == old(self).operator.combined(old(self).last_hash, operation),
+    {
+        match self.prepare_record(operation) {
+            Ok(carry) => { self.commit_record(operation, carry); true },
+            Err(_) => false,
+        }
     }
 }
 
@@ -424,6 +479,7 @@ impl AuditSink<BoundedHash> {
     }
 
     /// Execute the public bounded hash instance.
+    #[expect(clippy::arithmetic_side_effects, reason = "reducing both inputs modulo 100 bounds the intermediate sum by 397")]
     pub fn hash_exec(previous: u64, operation: u64) -> (result: u64)
         ensures
             result as int == Self::hash_spec(previous, operation),
@@ -552,6 +608,8 @@ impl<O: ChainOperation> AuditSink<O> {
     }
 
     /// Recompute the entire configured chain from the zero genesis.
+    #[expect(clippy::indexing_slicing, reason = "the validation loop guards every record read by the unchanged log length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the validation cursor advances only while strictly below log length")]
     pub fn validate(&self) -> (valid: bool)
         ensures valid == self.inv(),
     {

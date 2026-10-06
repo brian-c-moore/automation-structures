@@ -19,8 +19,8 @@ pub fn run() -> bool {
     let mut ap = ActuationPass::new(alloc, 4);
     all_ok &= check(
         "ActuationPass Init: seat 0 has no effect",
-        ap.effects[0],
-        None,
+        ap.effects.first().copied(),
+        Some(None),
     );
     all_ok &= check(
         "ActuationPass rejection: NULL seat cannot actuate",
@@ -36,21 +36,21 @@ pub fn run() -> bool {
     ap.allocate(1, 20);
     all_ok &= check(
         "ActuationPass Allocate: seat 1 gets resource 20",
-        ap.allocation[1],
-        Some(20),
+        ap.allocation.get(1).copied(),
+        Some(Some(20)),
     );
     ap.deallocate(1);
     all_ok &= check(
         "ActuationPass Deallocate: unapplied seat 1 returns to NULL",
-        ap.allocation[1],
-        None,
+        ap.allocation.get(1).copied(),
+        Some(None),
     );
 
     ap.actuate(0);
     all_ok &= check(
         "ActuationPass Actuate: effect records resource 10",
-        ap.effects[0],
-        Some(10),
+        ap.effects.first().copied(),
+        Some(Some(10)),
     );
     all_ok &= check(
         "ActuationPass ownership: applied seat cannot deallocate",
@@ -67,8 +67,8 @@ pub fn run() -> bool {
     ap.actuate(3);
     all_ok &= check(
         "ActuationPass frame: NULL seat 1 remains unapplied",
-        ap.effects[1],
-        None,
+        ap.effects.get(1).copied(),
+        Some(None),
     );
     all_ok &= check(
         "ActuationPass completeness guard accepts finished work",

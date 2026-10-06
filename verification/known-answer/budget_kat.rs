@@ -13,7 +13,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
     let mut budget = Budget::new(100);
 
@@ -37,8 +37,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (Budget)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

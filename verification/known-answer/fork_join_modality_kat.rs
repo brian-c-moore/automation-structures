@@ -1,7 +1,7 @@
 extern crate automation_structures;
 
-use automation_structures::modalities::fork_join::ForkJoin;
 use automation_structures::ForkJoinPhase;
+use automation_structures::modalities::fork_join::ForkJoin;
 
 fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     if got == want {
@@ -13,7 +13,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
     let mut f = ForkJoin::new(3, 10, 0);
     ok &= check("initial fork phase", f.phase, ForkJoinPhase::Fork);
@@ -63,8 +63,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (ForkJoin modality)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (ForkJoin modality)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

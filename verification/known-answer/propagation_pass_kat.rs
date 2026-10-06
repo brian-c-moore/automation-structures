@@ -20,7 +20,7 @@ fn run_round(pass: &mut PropagationPass, order: &[usize]) {
     pass.end_round();
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
 
     // Path 0 -> 1 -> 2. Updating 1 before 2 distinguishes a shared snapshot
@@ -44,9 +44,13 @@ fn main() {
     ok &= check("start round", pass.round, Round::Running);
     ok &= check("start snapshot", pass.snapshot.clone(), vec![0u64, 2, 3]);
     pass.update_node(1);
-    ok &= check("local update node 1", pass.values[1], 1);
+    ok &= check("local update node 1", pass.values.get(1).copied(), Some(1));
     pass.update_node(2);
-    ok &= check("snapshot isolation node 2", pass.values[2], 2);
+    ok &= check(
+        "snapshot isolation node 2",
+        pass.values.get(2).copied(),
+        Some(2),
+    );
     ok &= check("partial coverage", pass.all_nodes_updated(), false);
     pass.update_node(0);
     ok &= check("complete coverage", pass.all_nodes_updated(), true);
@@ -82,8 +86,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (PropagationPass)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (PropagationPass)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

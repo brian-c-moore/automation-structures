@@ -12,7 +12,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut all_ok = true;
     let mut f = FederatedBudget::new(6, 2);
 
@@ -45,13 +45,17 @@ fn main() {
     all_ok &= check("capacity commit moves master", f.master.allocated, 4);
     all_ok &= check(
         "capacity commit moves named pool",
-        f.sub_pools[0].allocated + f.sub_pools[0].reserved,
-        4,
+        f.sub_pools
+            .first()
+            .and_then(|pool| pool.allocated.checked_add(pool.reserved)),
+        Some(4),
     );
     all_ok &= check(
         "capacity commit frames other pool",
-        f.sub_pools[1].allocated + f.sub_pools[1].reserved,
-        0,
+        f.sub_pools
+            .get(1)
+            .and_then(|pool| pool.allocated.checked_add(pool.reserved)),
+        Some(0),
     );
     all_ok &= check(
         "master overspend rejected",
@@ -65,11 +69,17 @@ fn main() {
     );
     all_ok &= check(
         "master equals finite capacity sum",
-        f.master.allocated,
-        f.sub_pools[0].allocated
-            + f.sub_pools[0].reserved
-            + f.sub_pools[1].allocated
-            + f.sub_pools[1].reserved,
+        Some(f.master.allocated),
+        f.sub_pools
+            .first()
+            .zip(f.sub_pools.get(1))
+            .and_then(|(first, second)| {
+                first
+                    .allocated
+                    .checked_add(first.reserved)
+                    .and_then(|total| total.checked_add(second.allocated))
+                    .and_then(|total| total.checked_add(second.reserved))
+            }),
     );
 
     all_ok &= check(
@@ -89,13 +99,13 @@ fn main() {
     );
     all_ok &= check(
         "consumption commit moves named pool",
-        f.sub_pools[0].allocated,
-        3,
+        f.sub_pools.first().map(|pool| pool.allocated),
+        Some(3),
     );
     all_ok &= check(
         "consumption commit frames other pool",
-        f.sub_pools[1].allocated,
-        0,
+        f.sub_pools.get(1).map(|pool| pool.allocated),
+        Some(0),
     );
     all_ok &= check(
         "sub-pool overspend rejected",
@@ -104,8 +114,8 @@ fn main() {
     );
     all_ok &= check(
         "overspend rejection frames allocation",
-        f.sub_pools[0].allocated,
-        3,
+        f.sub_pools.first().map(|pool| pool.allocated),
+        Some(3),
     );
 
     all_ok &= check(
@@ -130,24 +140,27 @@ fn main() {
     );
     all_ok &= check(
         "release exact named-pool effect",
-        f.sub_pools[0].allocated,
-        2,
+        f.sub_pools.first().map(|pool| pool.allocated),
+        Some(2),
     );
     all_ok &= check(
         "release frames capacity",
-        f.sub_pools[0].allocated + f.sub_pools[0].reserved,
-        4,
+        f.sub_pools
+            .first()
+            .and_then(|pool| pool.allocated.checked_add(pool.reserved)),
+        Some(4),
     );
     all_ok &= check(
         "release frames other allocation",
-        f.sub_pools[1].allocated,
-        0,
+        f.sub_pools.get(1).map(|pool| pool.allocated),
+        Some(0),
     );
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (FederatedBudget)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (FederatedBudget)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

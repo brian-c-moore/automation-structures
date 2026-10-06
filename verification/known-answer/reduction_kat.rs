@@ -1,6 +1,6 @@
 extern crate automation_structures;
 
-use automation_structures::compositions::reduction::{reduce_max, reduce_sum, Reducer};
+use automation_structures::compositions::reduction::{Reducer, reduce_max, reduce_sum};
 
 fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     if got == want {
@@ -12,7 +12,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut all_ok = true;
 
     all_ok &= check("sum empty identity", reduce_sum(&[]), 0);
@@ -36,8 +36,8 @@ fn main() {
     all_ok &= check("consume first exact prefix", consumed, vec![3]);
     all_ok &= check(
         "consume first exact suffix",
-        r.source[r.position()..].to_vec(),
-        vec![1, 2],
+        r.source.get(r.position()..),
+        Some([1, 2].as_slice()),
     );
     r.process();
     all_ok &= check("consume second updates fold", r.result(), 4);
@@ -50,8 +50,9 @@ fn main() {
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (ReductionStream instances)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (ReductionStream instances)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

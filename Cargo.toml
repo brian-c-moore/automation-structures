@@ -1,6 +1,6 @@
 [package]
 name = "automation-structures"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Brian Moore"]
@@ -57,8 +57,37 @@ all-features = true
 [lints.rust]
 warnings = "deny"
 unsafe_code = "forbid"
+unused_must_use = "forbid"
 
 [lints.clippy]
+# Failure paths preserve typed outcomes and caller-owned resources.
+unwrap_used = "deny"
+expect_used = "deny"
+unwrap_in_result = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+exit = "deny"
+fallible_impl_from = "deny"
+dbg_macro = "deny"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+clone_on_ref_ptr = "deny"
+large_enum_variant = "deny"
+unnecessary_box_returns = "deny"
+# Checked data access, representation and arithmetic boundaries.
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+integer_division = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"
 # These source spellings are part of the Verus proof and mutation-control
 # boundary. Ordinary-Rust style rewrites must not silently change that source.
 assign_op_pattern = "allow"
@@ -71,8 +100,3 @@ new_without_default = "allow"
 ptr_arg = "allow"
 redundant_pattern_matching = "allow"
 vec_init_then_push = "allow"
-
-[[example]]
-name = "registry_index_probe"
-path = "verification/known-answer/registry_index_probe.rs"
-required-features = ["proof-api"]

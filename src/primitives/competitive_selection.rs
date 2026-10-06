@@ -22,9 +22,217 @@
 //
 // Each mode discharges its checked invariants under its TLA+ actions.
 
+use crate::compositions::reduction::ReductionProjection;
+use crate::connectives::ordering_pass::{ArrangementError, IndexArrangement, PositionOrder};
 use vstd::prelude::*;
 
 verus! {
+
+/// Exact stable equal-minimum prefix of an admitted arrangement.
+pub open spec fn minimum_prefix<C: PositionOrder>(
+    positions: Seq<usize>, order: C, end: int,
+) -> Seq<usize>
+    decreases end,
+{
+    if end <= 0 || end > positions.len() { Seq::empty() }
+    else {
+        let previous = minimum_prefix(positions, order, end - 1);
+        let item = positions[end - 1];
+        if order.key_le(item, positions[0]) && order.key_le(positions[0], item) {
+            previous.push(item)
+        } else { previous }
+    }
+}
+
+/// Prefix membership is exactly equivalence with the arranged minimum.
+pub proof fn minimum_prefix_membership<C: PositionOrder>(
+    positions: Seq<usize>, order: C, end: int, item: usize,
+)
+    requires 0 <= end <= positions.len(),
+    ensures minimum_prefix(positions, order, end).contains(item) <==>
+        (exists|rank: int| 0 <= rank < end && #[trigger] positions[rank] == item
+            && order.key_le(item, positions[0]) && order.key_le(positions[0], item)),
+    decreases end,
+{
+    if end > 0 {
+        reveal_with_fuel(minimum_prefix, 2);
+        minimum_prefix_membership(positions, order, end - 1, item);
+        let previous = minimum_prefix(positions, order, end - 1);
+        let last = positions[end - 1];
+        let tied = order.key_le(last, positions[0]) && order.key_le(positions[0], last);
+        if tied {
+            assert(minimum_prefix(positions, order, end) == previous.push(last));
+            vstd::seq_lib::lemma_seq_contains_after_push(previous, last, item);
+            assert(previous.push(last).contains(item) == (previous.contains(item) || last == item));
+        } else { assert(minimum_prefix(positions, order, end) == previous); }
+        if minimum_prefix(positions, order, end).contains(item) {
+            if minimum_prefix(positions, order, end - 1).contains(item) {
+                let rank = choose|rank: int| 0 <= rank < end - 1 && #[trigger] positions[rank] == item
+                    && order.key_le(item, positions[0]) && order.key_le(positions[0], item);
+                assert(0 <= rank < end);
+            } else {
+                assert(tied && last == item);
+                assert(0 <= end - 1 < end && positions[end - 1] == item
+                    && order.key_le(item, positions[0]) && order.key_le(positions[0], item));
+            }
+        }
+        if exists|rank: int| 0 <= rank < end && #[trigger] positions[rank] == item
+            && order.key_le(item, positions[0]) && order.key_le(positions[0], item) {
+            let rank = choose|rank: int| 0 <= rank < end && #[trigger] positions[rank] == item
+                && order.key_le(item, positions[0]) && order.key_le(positions[0], item);
+            if rank < end - 1 {
+                assert(minimum_prefix(positions, order, end - 1).contains(item));
+                assert(minimum_prefix(positions, order, end).contains(item));
+            } else {
+                assert(rank == end - 1 && last == item && tied);
+                assert(minimum_prefix(positions, order, end).contains(item));
+            }
+        }
+    } else {
+        assert(minimum_prefix(positions, order, end) == Seq::<usize>::empty());
+    }
+}
+
+/// Complete finite minimum selection, without a route-slot or tie quota.
+/// The comparator supplies immutable content and a total preorder; canonical
+/// OrderingPass, Cursor and Buffer own arrangement, visitation and result.
+pub struct CompetitiveSelectionMinimum<C: PositionOrder> {
+    order: C,
+    arrangement: IndexArrangement,
+    selected: crate::connectives::buffer::Buffer<usize>,
+}
+
+impl<C: PositionOrder> CompetitiveSelectionMinimum<C> {
+    /// Immutable source comparator identity.
+    pub closed spec fn order_spec(&self) -> C { self.order }
+    /// Complete stable source arrangement.
+    pub closed spec fn arranged_spec(&self) -> Seq<usize> { self.arrangement.positions_spec() }
+    /// The immutable arrangement's original-position inverse.
+    pub closed spec fn inverse_spec(&self) -> Seq<usize> { self.arrangement.inverse_spec() }
+    /// The actual Buffer-owned selected positions.
+    pub closed spec fn selected_spec(&self) -> Seq<usize> { self.selected.values@ }
+    /// Exact complete minimum set, with no mutable owner escape.
+    pub closed spec fn inv(&self) -> bool {
+        &&& self.arrangement.inv()
+        &&& crate::connectives::ordering_pass::inverse_permutation(
+            self.arranged_spec(), self.arrangement.inverse_spec())
+        &&& self.arranged_spec().len() == self.order.domain_len()
+        &&& crate::connectives::ordering_pass::arranged(self.arranged_spec(), &self.order)
+        &&& crate::connectives::ordering_pass::total_preorder(&self.order)
+        &&& self.selected.well_formed()
+        &&& self.selected.capacity == self.order.domain_len()
+        &&& self.selected_spec() == minimum_prefix(self.arranged_spec(), self.order,
+            self.arranged_spec().len() as int)
+    }
+
+    /// Arrange the whole domain and retain every equal minimum in stable order.
+    ///
+    /// # Errors
+    /// Returns storage refusal with the original comparator/context before
+    /// exposing a selection. No winner-count parameter is accepted.
+    #[expect(clippy::indexing_slicing, reason = "the arrangement Cursor is below the complete nonempty positions length for both reads")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the arrangement Cursor advances only while strictly below the admitted count")]
+    pub fn try_new(order: C) -> (result: Result<Self, (ArrangementError, C)>)
+        ensures result matches Ok(owner) ==> owner.inv() && owner.order_spec() == order,
+            result matches Err((_, returned)) ==> returned == order,
+    {
+        let count = order.len();
+        proof { order.establish(); }
+        let arrangement = match IndexArrangement::try_new(count, &order) {
+            Ok(arrangement) => arrangement,
+            Err(reason) => return Err((reason, order)),
+        };
+        let mut selected = match crate::connectives::buffer::Buffer::try_new(count) {
+            Ok(selected) => selected,
+            Err(_) => return Err((ArrangementError::Allocation, order)),
+        };
+        let mut cursor = crate::connectives::cursor::Cursor::new(0);
+        while cursor.position < count
+            invariant cursor.position <= count, count == order.domain_len(),
+                arrangement.inv(),
+                crate::connectives::ordering_pass::inverse_permutation(
+                    arrangement.positions_spec(), arrangement.inverse_spec()),
+                arrangement.positions_spec().len() == count,
+                crate::connectives::ordering_pass::arranged(arrangement.positions_spec(), &order),
+                crate::connectives::ordering_pass::total_preorder(&order),
+                selected.well_formed(), selected.capacity == count,
+                selected.values@.len() <= cursor.position,
+                selected.values@ == minimum_prefix(arrangement.positions_spec(), order, cursor.position as int),
+            decreases count - cursor.position,
+        {
+            let positions = arrangement.positions();
+            let item = positions[cursor.position];
+            let minimum = positions[0];
+            if order.compare(item, minimum) == 0 {
+                let _pushed = selected.push(item);
+                assert(_pushed is Ok);
+            }
+            cursor.advance_to(cursor.position + 1);
+        }
+        Ok(Self { order, arrangement, selected })
+    }
+
+    /// Export complete minimum membership through the retained arrangement.
+    pub proof fn expose_arrangement(&self)
+        requires self.inv(),
+        ensures crate::connectives::ordering_pass::inverse_permutation(
+                self.arranged_spec(), self.inverse_spec()),
+            crate::connectives::ordering_pass::arranged(self.arranged_spec(), &self.order_spec()),
+            self.arranged_spec().len() == self.order_spec().domain_len(),
+            self.selected_spec() == minimum_prefix(self.arranged_spec(), self.order_spec(),
+                self.arranged_spec().len() as int),
+    {}
+
+    /// Export complete minimum membership through the retained arrangement.
+    pub proof fn expose_minima(&self)
+        requires self.inv(),
+        ensures forall|item: usize| self.selected_spec().contains(item) <==>
+            (item < self.order_spec().domain_len()
+                && forall|other: usize| other < self.order_spec().domain_len()
+                    ==> #[trigger] self.order_spec().key_le(item, other)),
+    {
+        self.arrangement.expose_certificate();
+        let positions = self.arranged_spec();
+        assert forall|item: usize| self.selected_spec().contains(item) <==>
+            (item < self.order.domain_len()
+                && forall|other: usize| other < self.order.domain_len()
+                    ==> #[trigger] self.order.key_le(item, other)) by {
+            minimum_prefix_membership(positions, self.order, positions.len() as int, item);
+            if self.selected_spec().contains(item) {
+                let rank = choose|rank: int| 0 <= rank < positions.len() && #[trigger] positions[rank] == item
+                    && self.order.key_le(item, positions[0]) && self.order.key_le(positions[0], item);
+                assert forall|other: usize| other < self.order.domain_len() implies
+                    #[trigger] self.order.key_le(item, other) by {
+                    assert(positions.contains(other));
+                    let index = choose|index: int| 0 <= index < positions.len() && positions[index] == other;
+                    if index > 0 { assert(self.order.key_le(positions[0], other)); }
+                    else { assert(positions[0] == other); }
+                }
+            }
+            if item < self.order.domain_len()
+                && forall|other: usize| other < self.order.domain_len() ==> #[trigger] self.order.key_le(item, other) {
+                assert(positions.contains(item));
+                let rank = choose|rank: int| 0 <= rank < positions.len() && positions[rank] == item;
+                if rank > 0 { assert(self.order.key_le(positions[0], item)); }
+                assert(self.order.key_le(item, positions[0]));
+                assert(self.selected_spec().contains(item));
+            }
+        }
+    }
+
+    /// Borrow every selected original position; ties preserve authored order.
+    pub fn selected(&self) -> (positions: &[usize])
+        requires self.inv(), ensures positions@ == self.selected_spec(),
+    { self.selected.values.as_slice() }
+    /// Observe the Buffer-owned selected length without a caller fold.
+    pub fn len(&self) -> (length: usize)
+        requires self.inv(), ensures length == self.selected_spec().len(),
+    { self.selected.len() }
+    /// Whether the complete admitted domain has no winner.
+    pub fn is_empty(&self) -> (empty: bool)
+        requires self.inv(), ensures empty == (self.selected_spec().len() == 0),
+    { self.selected.is_empty() }
+}
 
 // ── shared recursive sum (for Soft's Normalization) ─────────────────────
 
@@ -209,6 +417,7 @@ impl CompetitiveSelectionHard {
         Ok(Self::initialize(num_candidates, scores))
     }
 
+    #[expect(clippy::arithmetic_side_effects, reason = "the score initialization cursor advances only while strictly below num_candidates")]
     fn initialize(num_candidates: usize, mut scores: Vec<u64>) -> (h: CompetitiveSelectionHard)
         requires scores@.len() == 0,
         ensures
@@ -233,6 +442,8 @@ impl CompetitiveSelectionHard {
 
     /// Evaluate: allocate the seat to the highest-scoring candidate (argmax).
     /// Realises the TLA+ Evaluate action; re-establishes WinnerOptimality.
+    #[expect(clippy::indexing_slicing, reason = "the nonempty-score precondition and best < cursor < scores.len() loop bounds prove both score reads")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the argmax cursor advances only while strictly below score length")]
     pub fn evaluate(&mut self)
         requires old(self).scores.len() >= 1,
         ensures
@@ -358,6 +569,7 @@ impl CompetitiveSelectionHardExclusive {
     }
 
     /// Construct empty allocations and zero scores for every seat.
+    #[expect(clippy::arithmetic_side_effects, reason = "both score and seat initialization cursors advance only while strictly below their declared usize universes")]
     pub fn new(
         num_seats: usize,
         num_candidates: usize,
@@ -420,6 +632,7 @@ impl CompetitiveSelectionHardExclusive {
     }
 
     /// Read one in-range seat-candidate score.
+    #[expect(clippy::indexing_slicing, reason = "the accessor requires both the seat bound and its exact retained row's candidate bound")]
     pub fn score_at(&self, s: usize, c: usize) -> (v: u64)
         requires
             s < self.scores.len(),
@@ -430,6 +643,8 @@ impl CompetitiveSelectionHardExclusive {
     }
 
     /// Executable Available(s) membership check.
+    #[expect(clippy::indexing_slicing, reason = "the representation invariant binds allocation length to the guarded seat universe")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the availability cursor advances only while strictly below num_seats")]
     pub fn candidate_available(&self, s: usize, c: usize) -> (available: bool)
         requires
             self.type_invariant(),
@@ -457,6 +672,7 @@ impl CompetitiveSelectionHardExclusive {
     }
 
     /// Executable guard for `Available(s) /= {}`.
+    #[expect(clippy::arithmetic_side_effects, reason = "the available-candidate cursor advances only while strictly below num_candidates")]
     pub fn has_available(&self, s: usize) -> (available: bool)
         requires
             self.type_invariant(),
@@ -483,6 +699,7 @@ impl CompetitiveSelectionHardExclusive {
 
     /// TLA+ Evaluate(s): atomically select the lowest-index argmax from the
     /// candidates not held by another seat.
+    #[expect(clippy::arithmetic_side_effects, reason = "the exclusive argmax cursor advances only while strictly below num_candidates")]
     pub fn evaluate(&mut self, s: usize)
         requires
             old(self).inv(),
@@ -654,6 +871,8 @@ impl CompetitiveSelectionHardExclusive {
 
     /// TLA+ UpdateScore(s,c,v): update one score and invalidate every seat in
     /// the same commit because availability couples their optimality.
+    #[expect(clippy::indexing_slicing, reason = "the required enabled seat bound and representation invariant prove the retained score-row read")]
+    #[expect(clippy::arithmetic_side_effects, reason = "score-row and invalidation cursors advance only while strictly below their fixed row and seat lengths")]
     pub fn update_score(&mut self, s: usize, c: usize, v: u64)
         requires
             old(self).inv(),
@@ -1049,6 +1268,8 @@ impl CompetitiveSelectionSoft {
     }
 
     /// Executable accessor for the derived weight (`1 + extra[i]`).
+    #[expect(clippy::indexing_slicing, reason = "the accessor requires i below the retained extra length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "bounded requires every extra <= weight_total <= 1_000_000_000 before adding its reserved unit")]
     pub fn weight_at(&self, i: usize) -> (w: u64)
         requires i < self.extra.len(), self.bounded(),
         ensures w as int == self.weight(i as int),
@@ -1057,6 +1278,8 @@ impl CompetitiveSelectionSoft {
     }
 
     /// Number of units currently assigned, including one reserved unit per candidate.
+    #[expect(clippy::indexing_slicing, reason = "the assigned-weight loop guards each extra read by the immutable vector length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the mutable-score invariant bounds every partial assigned sum by weight_total and the loop bounds the cursor successor")]
     pub fn assigned_weight(&self) -> (total: u64)
         requires self.mutable_score_inv(),
         ensures
@@ -1098,6 +1321,7 @@ impl CompetitiveSelectionSoft {
     /// TLA+ `Init`: scores are mutable state and every candidate begins with only
     /// its reserved unit. Unlike `new`, this does not run the award process to
     /// Terminal; it exposes the action-level carrier state.
+    #[expect(clippy::arithmetic_side_effects, reason = "the reserved-floor initialization cursor advances only while strictly below score length")]
     pub fn init(scores: Vec<u64>, weight_total: u64, max_score: u64) -> (s: CompetitiveSelectionSoft)
         requires
             scores.len() >= 1,
@@ -1150,6 +1374,8 @@ impl CompetitiveSelectionSoft {
     /// `scores`: one reserved unit per candidate, then Pool further units
     /// awarded one at a time to the current highest-priority candidate.
     /// Mirrors CompetitiveSelectionSoft.tla's Init + AssignNext exactly.
+    #[expect(clippy::indexing_slicing, reason = "the award loop preserves equal score/extra lengths and best < comparison cursor < their common length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "constructor bounds admit pool subtraction, scores and extras <= 1e9 bound priority products, and all cursors and awards stay below their ceilings")]
     pub fn new(scores: Vec<u64>, weight_total: u64, max_score: u64) -> (s: CompetitiveSelectionSoft)
         requires
             scores.len() >= 1,
@@ -1436,6 +1662,8 @@ impl CompetitiveSelectionSoft {
     /// every invariant that holds at every reachable state (ScoreOrderPreservation,
     /// TieBoundedness, UniversalContribution); Normalization only holds once
     /// the pool is exhausted, matching the TLA+ construction exactly.
+    #[expect(clippy::indexing_slicing, reason = "the enabled award requires the mutable-score invariant and its comparison loop proves best and candidate indices in the equal score/extra universe")]
+    #[expect(clippy::arithmetic_side_effects, reason = "scores and extras <= 1e9 bound all priority products and the admitted remaining unit bounds the awarded extra successor")]
     pub fn assign_next(&mut self) -> (winner: usize)
         requires
             old(self).mutable_score_inv(),
@@ -1662,6 +1890,7 @@ impl CompetitiveSelectionSoft {
     /// CompetitiveSelectionSoftMutableScores `UpdateScore(c,v)`: update one mutable score
     /// and invalidate the partial apportionment in the same commit by resetting
     /// every extra award to the reserved floor.
+    #[expect(clippy::arithmetic_side_effects, reason = "the invalidation cursor advances only while strictly below retained extra length")]
     pub fn update_score(&mut self, c: usize, v: u64)
         requires
             old(self).mutable_score_inv(),
@@ -1806,7 +2035,63 @@ pub struct CompetitiveSelectionRanked {
     pub max_score: u64,
 }
 
+// Immutable domain content for the named Reduction; membership stays with selection.
+struct SelectedMembershipProjection<'a> { selected: &'a Vec<bool> }
+
+impl<'a> ReductionProjection<crate::primitives::audit_sink::AdditiveChain>
+    for SelectedMembershipProjection<'a>
+{
+    closed spec fn domain_len(&self) -> nat { self.selected@.len() }
+    closed spec fn item_spec(&self, position: int) -> u64 {
+        if self.selected@[position] { 1 } else { 0 }
+    }
+    fn len(&self) -> (length: usize) { self.selected.len() }
+    #[expect(clippy::indexing_slicing, reason = "ReductionProjection::item requires position below domain_len, the actual selected membership length")]
+    fn item(&self, position: usize) -> (item: u64) {
+        if self.selected[position] { 1 } else { 0 }
+    }
+}
+
+impl<'a> SelectedMembershipProjection<'a> {
+    proof fn prefix_correct(&self, end: int)
+        requires 0 <= end <= self.selected@.len(), self.selected@.len() <= u64::MAX,
+        ensures
+            0 <= count_true(self.selected@, end) <= end,
+            crate::compositions::reduction::projected_fold_to(*self,
+                crate::primitives::audit_sink::AdditiveChain, end) as int
+                == count_true(self.selected@, end),
+            crate::compositions::reduction::projected_prefix_admitted(*self,
+                crate::primitives::audit_sink::AdditiveChain, end),
+        decreases end,
+    {
+        if end > 0 { self.prefix_correct(end - 1); }
+    }
+}
+
 impl CompetitiveSelectionRanked {
+    /// Observe current membership through the existing named Reduction.
+    #[expect(clippy::cast_possible_truncation, reason = "the verified boolean fold count is at most the actual Vec length, which fits usize")]
+    pub fn selected_len(&self) -> (count: usize)
+        ensures count as int == count_true(self.selected@, self.selected@.len() as int),
+            count <= self.selected@.len(),
+    {
+        use crate::compositions::reduction::IncrementalReduction;
+        use crate::primitives::audit_sink::AdditiveChain;
+        let length = self.selected.len();
+        let source = SelectedMembershipProjection { selected: &self.selected };
+        let mut reduction = IncrementalReduction::new(length, AdditiveChain);
+        let _folded = reduction.try_fold_projection(&source);
+        proof {
+            source.prefix_correct(reduction.processed_spec() as int);
+            if _folded is Err {
+                assert(source.item_spec(reduction.processed_spec() as int) <= 1u64);
+                assert(false);
+            }
+            source.prefix_correct(length as int);
+        }
+        reduction.result() as usize
+    }
+
     /// selected and scores share the Candidates domain.
     pub open spec fn type_invariant(&self) -> bool {
         self.selected.len() == self.scores.len()
@@ -1848,6 +2133,7 @@ impl CompetitiveSelectionRanked {
     }
 
     /// Construct from scores; nothing selected yet (TLA+ Init).
+    #[expect(clippy::arithmetic_side_effects, reason = "the ranked initialization cursor advances only while strictly below score length")]
     pub fn new(scores: Vec<u64>, k: usize, max_score: u64) -> (r: CompetitiveSelectionRanked)
         requires
             forall|i: int| 0 <= i < scores.len() ==> #[trigger] scores@[i] <= max_score,
@@ -1877,6 +2163,8 @@ impl CompetitiveSelectionRanked {
     }
 
     /// The unselected candidate with the highest score, or None if all selected.
+    #[expect(clippy::indexing_slicing, reason = "the ranked argmax invariant equates score/marker lengths and bounds each marker, candidate and retained best index")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the ranked argmax cursor advances only while strictly below score length")]
     fn find_max_unselected(&self) -> (r: Option<usize>)
         requires self.type_invariant(),
         ensures
@@ -1924,6 +2212,7 @@ impl CompetitiveSelectionRanked {
 
     /// Select the top-K (TLA+ Select): mark up to K highest-scoring candidates,
     /// re-establishing BoundedMultiplicity and ThresholdOptimality.
+    #[expect(clippy::arithmetic_side_effects, reason = "the reset cursor stays below selected length and an award round advances only while strictly below k")]
     pub fn select(&mut self)
         requires old(self).type_invariant(),
         ensures
@@ -2050,6 +2339,7 @@ impl CompetitiveSelectionRanked {
     }
 
     /// Replace the scores and clear the selection (TLA+ UpdateScores).
+    #[expect(clippy::arithmetic_side_effects, reason = "the ranked reset cursor advances only while strictly below the unchanged score/marker length")]
     pub fn update_scores(&mut self, new_scores: Vec<u64>)
         requires
             old(self).type_invariant(),

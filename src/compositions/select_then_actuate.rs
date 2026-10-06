@@ -90,6 +90,7 @@ impl SelectThenActuate {
 
     /// Construct one empty CompetitiveSelectionHard owner per seat and one empty
     /// ActuationPass over the same seat universe.
+    #[expect(clippy::arithmetic_side_effects, reason = "the initialization cursor advances only while strictly below num_seats")]
     pub fn new(num_seats: usize, num_candidates: usize) -> (composition: Self)
         requires num_candidates >= 1,
         ensures
@@ -148,6 +149,7 @@ impl SelectThenActuate {
     }
 
     /// Read one seat-local candidate score.
+    #[expect(clippy::indexing_slicing, reason = "the invariant binds each selection row to num_candidates and the accessor requires both seat and candidate bounds")]
     pub fn score_at(&self, seat: usize, candidate: usize) -> (score: u64)
         requires
             self.inv(),
@@ -159,6 +161,7 @@ impl SelectThenActuate {
     }
 
     /// Read one seat's selected candidate.
+    #[expect(clippy::indexing_slicing, reason = "the accessor requires seat < the actual retained selection-owner length")]
     pub fn allocation_at(&self, seat: usize) -> (allocation: Option<usize>)
         requires self.inv(), seat < self.selections.len(),
         ensures allocation == self.selections@[seat as int].allocation,

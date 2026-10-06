@@ -200,6 +200,8 @@ impl<T: Copy + ValueEq, D: PropagationDomain<T>> PropagationPass<T, D> {
         Ok(Self::initialize(num_nodes, max_iterations, max_value, edges, init_values, snapshot, updated))
     }
 
+    #[expect(clippy::indexing_slicing, reason = "the required input length equals num_nodes and the initialization loop guards every source read")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the initialization cursor advances only while strictly below num_nodes")]
     fn initialize(num_nodes: usize, max_iterations: u64, max_value: D,
         edges: Vec<(usize,usize)>, init_values: Vec<T>, mut snapshot: Vec<T>, mut updated: Vec<bool>) -> (p: Self)
         requires init_values.len() == num_nodes, valid_input(&max_value, edges@, init_values@),
@@ -224,6 +226,7 @@ impl<T: Copy + ValueEq, D: PropagationDomain<T>> PropagationPass<T, D> {
     }
 
     /// Commit one eligible node from the immutable round snapshot, or refuse unchanged.
+    #[expect(clippy::indexing_slicing, reason = "the node guard and representation invariant bound the updated-marker read")]
     pub fn try_update_node(&mut self, n: usize) -> (accepted: bool)
         requires old(self).inv(),
         ensures final(self).inv(),
@@ -263,6 +266,8 @@ impl<T: Copy + ValueEq, D: PropagationDomain<T>> PropagationPass<T, D> {
     // -- Executable queries ---------------------------------------------
 
     /// Whether every node committed its update in the current round.
+    #[expect(clippy::indexing_slicing, reason = "the coverage loop guards each marker read by the retained updated length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the coverage cursor advances only while strictly below updated length")]
     pub fn all_nodes_updated(&self) -> (b: bool)
         requires self.type_invariant(),
         ensures b == self.all_updated(),
@@ -289,6 +294,8 @@ impl<T: Copy + ValueEq, D: PropagationDomain<T>> PropagationPass<T, D> {
     // -- Round actions ---------------------------------------------------
 
     /// TLA+ `StartRound`: capture the common snapshot and clear the update set.
+    #[expect(clippy::indexing_slicing, reason = "the representation invariant equates values, snapshot and marker lengths with the guarded node universe")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the round-start cursor advances only while strictly below num_nodes")]
     pub fn start_round(&mut self)
         requires
             old(self).inv(),
@@ -333,6 +340,7 @@ impl<T: Copy + ValueEq, D: PropagationDomain<T>> PropagationPass<T, D> {
     }
 
     /// TLA+ `EndRound`: require full coverage, detect movement, and charge once.
+    #[expect(clippy::arithmetic_side_effects, reason = "a Running round requires iteration < max_iterations, proving the completed-round successor is representable")]
     pub fn end_round(&mut self)
         requires
             old(self).inv(),
@@ -452,6 +460,8 @@ impl PropagationPass {
 
 }
 
+#[expect(clippy::indexing_slicing, reason = "the input contract bounds every edge endpoint and node in the immutable snapshot; the edge loop guards each edge read")]
+#[expect(clippy::arithmetic_side_effects, reason = "a strictly smaller neighbor proves the node value is positive before decrement, and the edge loop bounds each successor")]
 fn default_combine(_ceiling: u64, edges: &Vec<(usize,usize)>, snapshot: &Vec<u64>, n: usize) -> (value: u64)
     requires ((forall|i: int| 0 <= i < snapshot.len() ==> #[trigger] snapshot@[i] <= _ceiling)
                     && (forall|i: int| 0 <= i < edges.len() ==> #[trigger] edges@[i].0 < snapshot.len() && edges@[i].1 < snapshot.len())), n < snapshot.len(),
@@ -485,6 +495,8 @@ fn default_combine(_ceiling: u64, edges: &Vec<(usize,usize)>, snapshot: &Vec<u64
     }
 
 
+#[expect(clippy::indexing_slicing, reason = "equal-length preconditions and the comparison loop guard both retained value reads")]
+#[expect(clippy::arithmetic_side_effects, reason = "the comparison cursor advances only while strictly below the equal vector lengths")]
 fn vectors_equal<T: Copy + ValueEq>(a: &Vec<T>, b: &Vec<T>) -> (same: bool)
     requires a.len() == b.len(),
     ensures same == (a@ == b@),

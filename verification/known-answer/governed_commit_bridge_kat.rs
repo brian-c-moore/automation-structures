@@ -2,7 +2,7 @@ extern crate automation_structures;
 
 use automation_structures::integration::governed_commit::{CommitPhase, GovernedCommit};
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut direct = GovernedCommit::new(41, 1, 2);
     let direct_ok = direct.admit();
     direct.propagate();
@@ -63,15 +63,15 @@ fn main() {
         && rejected_for_capacity
         && exhausted_admitted
         && terminal_failure
-        && retry_exhaustion.attempt_budget.allocated
-            == retry_exhaustion.attempt_budget.capacity
+        && retry_exhaustion.attempt_budget.allocated == retry_exhaustion.attempt_budget.capacity
         && retry_exhaustion.phase == CommitPhase::Rejected
         && !retry_exhaustion.effect_applied;
 
     if ok {
         println!("KAT_RESULT: SUCCESS (six-role governed-commit bridge)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (six-role governed-commit bridge)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

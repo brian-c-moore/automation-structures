@@ -162,6 +162,7 @@ impl Bisection {
     }
 
     /// Whether the interval has been narrowed to a point (TLA+ Converged guard).
+    #[expect(clippy::arithmetic_side_effects, reason = "the required Bisection invariant proves lo <= hi")]
     pub fn converged(&self) -> (c: bool)
         requires
             self.invariant(),
@@ -175,6 +176,8 @@ impl Bisection {
     /// ProbeLeft / ProbeRight). Maintains MonotonicityPreservation, at least
     /// halves the interval (the Halving property), and strictly decreases its
     /// width (the loop-termination measure).
+    #[expect(clippy::arithmetic_side_effects, reason = "the interval and Budget invariants prove ordered endpoints, remaining credit, an interior midpoint and bounded successor")]
+    #[expect(clippy::integer_division, reason = "floor(width / 2) is the specified midpoint and exact halving bound for this discrete interval")]
     pub fn probe(&mut self)
         requires
             old(self).hi - old(self).lo >= 2,
@@ -249,6 +252,7 @@ impl Bisection {
     /// halts, and on exit the interval is a point (hi - lo < 2) that still
     /// straddles the threshold. When probe selection is delegated to an external scheduler,
     /// temporal convergence instead depends on the corresponding scheduling fairness rely.
+    #[expect(clippy::arithmetic_side_effects, reason = "every iteration preserves the required lo <= hi interval invariant")]
     pub fn bisect(&mut self)
         requires
             old(self).invariant(),
@@ -283,6 +287,9 @@ pub open spec fn is_sorted(s: Seq<u64>) -> bool {
 /// target index is found, or return `sorted.len()` if absent. The interval
 /// invariants are carried by the `Bisection` machine above. `decreases hi - lo`
 /// states that each probe strictly shrinks the interval.
+#[expect(clippy::arithmetic_side_effects, reason = "the loop proves 0 <= lo <= hi <= slice length and lo <= midpoint < hi before either successor")]
+#[expect(clippy::integer_division, reason = "floor((hi - lo) / 2) selects the discrete interior midpoint without adding the endpoints")]
+#[expect(clippy::indexing_slicing, reason = "the search loop proves midpoint < hi <= sorted.len() before the read")]
 pub fn bisection_find(sorted: &[u64], target: u64) -> (idx: usize)
     requires
         is_sorted(sorted@),

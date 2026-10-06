@@ -7,14 +7,20 @@
 // evidence, not proof or exhaustive input coverage.
 extern crate automation_structures;
 mod actuation_pass_vectors;
+use automation_structures::compositions::allocation_snapshot::{AllocationSnapshot, capture};
+use automation_structures::compositions::bisection::{Bisection, bisection_find};
+use automation_structures::compositions::equivalence_class::EquivalenceClass;
+use automation_structures::compositions::federated_budget::FederatedBudget;
 use automation_structures::compositions::rate_limit::RateLimit;
+use automation_structures::compositions::reduction::{Reducer, reduce_max, reduce_sum};
+use automation_structures::compositions::relationship_graph::RelationshipGraph;
+use automation_structures::compositions::sampler::Sampler;
 use automation_structures::compositions::select_then_actuate::SelectThenActuate;
 use automation_structures::compositions::signal::Signal;
 use automation_structures::compositions::traversal_budget_composition::TraversalBudgetComposition;
-use automation_structures::compositions::allocation_snapshot::{capture, AllocationSnapshot};
+use automation_structures::compositions::traversal_engine::TraversalEngine;
 use automation_structures::primitives::audit_sink::AuditSink;
 use automation_structures::primitives::backtracking_traversal::BacktrackingTraversal;
-use automation_structures::compositions::bisection::{bisection_find, Bisection};
 use automation_structures::primitives::budget::Budget;
 use automation_structures::primitives::competitive_selection::{
     CompetitiveSelectionHard, CompetitiveSelectionHardExclusive, CompetitiveSelectionRanked,
@@ -23,15 +29,9 @@ use automation_structures::primitives::competitive_selection::{
 use automation_structures::primitives::convergence_governor_phase_aware::{
     ConvergenceGovernorPhaseAware, GovState, Phase,
 };
-use automation_structures::compositions::equivalence_class::EquivalenceClass;
-use automation_structures::compositions::federated_budget::FederatedBudget;
 use automation_structures::primitives::propagation_pass::{PropagationPass, Round};
 use automation_structures::primitives::quality_hierarchy::QualityHierarchy;
-use automation_structures::compositions::reduction::{reduce_max, reduce_sum, Reducer};
-use automation_structures::compositions::relationship_graph::RelationshipGraph;
 use automation_structures::primitives::resource_registry::ResourceRegistry;
-use automation_structures::compositions::sampler::Sampler;
-use automation_structures::compositions::traversal_engine::TraversalEngine;
 
 fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     if got == want {
@@ -69,23 +69,37 @@ impl Lcg {
         self.0
     }
     /// A value in `0..m`, taken from the high bits.
-    fn below(&mut self, m: u32) -> u32 {
-        (self.next_u32() >> 16) % m
+    fn below(&mut self, m: u32) -> Result<u32, &'static str> {
+        (self.next_u32() >> 16)
+            .checked_rem(m)
+            .ok_or("empty draw universe")
     }
 }
 
 /// Pearson chi-squared of `obs` against expected counts proportional to
 /// `weights`, conditioned on the total number of observations.
-fn chi_squared(obs: &[u64], weights: &[u64]) -> f64 {
-    let total_obs: u64 = obs.iter().sum();
-    let total_w: u64 = weights.iter().sum();
+fn chi_squared(obs: &[u64], weights: &[u64]) -> Result<f64, &'static str> {
+    if obs.len() != weights.len() || weights.contains(&0) {
+        return Err("invalid Pearson fixture shape or weight");
+    }
+    let total_obs = obs
+        .iter()
+        .try_fold(0u64, |total, value| total.checked_add(*value))
+        .ok_or("observation total overflow")?;
+    let total_w = weights
+        .iter()
+        .try_fold(0u64, |total, value| total.checked_add(*value))
+        .ok_or("weight total overflow")?;
+    if total_obs == 0 || total_w == 0 {
+        return Err("empty Pearson fixture");
+    }
     let mut x2 = 0.0f64;
-    for k in 0..obs.len() {
-        let expected = total_obs as f64 * weights[k] as f64 / total_w as f64;
-        let d = obs[k] as f64 - expected;
+    for (observed, weight) in obs.iter().zip(weights) {
+        let expected = total_obs as f64 * *weight as f64 / total_w as f64;
+        let d = *observed as f64 - expected;
         x2 += d * d / expected;
     }
-    x2
+    Ok(x2)
 }
 
 /// Run `trials` single draws, each from a fresh Sampler, and return the
@@ -96,34 +110,43 @@ fn draw_frequencies(
     trials: u32,
     weighted: bool,
     seed: u32,
-) -> Vec<u64> {
+) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
     let n = weights.len();
     let mut counts = vec![0u64; n];
     let mut rng = Lcg(seed);
     for _ in 0..trials {
         let mut s = Sampler::new(weights.to_vec(), 1);
-        let i = rng.below(n as u32) as usize;
-        let r = rng.below(max_prob as u32) as u64;
+        let i = usize::try_from(rng.below(u32::try_from(n)?)?)?;
+        let r = u64::from(rng.below(u32::try_from(max_prob)?)?);
         let accepted = if weighted {
             s.draw_weighted(i, r)
         } else {
             s.draw_uniform(i)
         };
         if accepted {
-            counts[i] += 1;
+            let count = counts.get_mut(i).ok_or("draw outside counter universe")?;
+            *count = count.checked_add(1).ok_or("draw count overflow")?;
         }
     }
-    counts
+    Ok(counts)
 }
 
-fn main() {
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "assertions are native correspondence oracles; fallible setup propagates typed errors"
+)]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Constructor allocation and owned FIFO behavior through the Verus-compiled carrier.
-    let mut reserved = automation_structures::connectives::buffer::Buffer::<String>::try_new(1)
-        .expect("one reserved slot");
+    let mut reserved = automation_structures::connectives::buffer::Buffer::<String>::try_new(1)?;
     assert_eq!(reserved.push(String::from("payload")), Ok(()));
-    assert_eq!(reserved.push(String::from("full")), Err(String::from("full")));
+    assert_eq!(
+        reserved.push(String::from("full")),
+        Err(String::from("full"))
+    );
     assert_eq!(reserved.pop().as_deref(), Some("payload"));
-    assert!(automation_structures::connectives::buffer::Buffer::<u64>::try_new(usize::MAX).is_err());
+    assert!(
+        automation_structures::connectives::buffer::Buffer::<u64>::try_new(usize::MAX).is_err()
+    );
     println!("Catalog primitive and composition KAT cross-check");
     let mut all_ok = true;
 
@@ -186,11 +209,7 @@ fn main() {
         red.remaining_len(),
         3,
     );
-    all_ok &= check(
-        "Reduction Reducer new: processed empty",
-        red.position(),
-        0,
-    );
+    all_ok &= check("Reduction Reducer new: processed empty", red.position(), 0);
     red.process(); // fold 10
     all_ok &= check("Reduction Reducer step 1: result 10", red.result(), 10);
     all_ok &= check(
@@ -220,24 +239,72 @@ fn main() {
 
     // Exact bytes use the same registry owner with a borrowed representation query.
     let mut byte_registry = ResourceRegistry::new();
-    byte_registry.register_key(automation_structures::primitives::resource_registry::ByteKey::from_bytes(vec![1, 0]), 7u64);
-    byte_registry.register_key(automation_structures::primitives::resource_registry::ByteKey::from_bytes(vec![1, 0]), 9u64);
-    all_ok &= check("ResourceRegistry equal byte allocations upsert once", byte_registry.entries.len(), 1);
-    all_ok &= check("ResourceRegistry borrowed byte probe", byte_registry.lookup_query(&&[1u8, 0][..]), Some(&9));
-    all_ok &= check("ResourceRegistry unequal prefix is absent", byte_registry.lookup_query(&&[1u8][..]), None);
+    byte_registry.register_key(
+        automation_structures::primitives::resource_registry::ByteKey::from_bytes(vec![1, 0]),
+        7u64,
+    );
+    byte_registry.register_key(
+        automation_structures::primitives::resource_registry::ByteKey::from_bytes(vec![1, 0]),
+        9u64,
+    );
+    all_ok &= check(
+        "ResourceRegistry equal byte allocations upsert once",
+        byte_registry.entries.len(),
+        1,
+    );
+    all_ok &= check(
+        "ResourceRegistry borrowed byte probe",
+        byte_registry.lookup_query(&&[1u8, 0][..]),
+        Some(&9),
+    );
+    all_ok &= check(
+        "ResourceRegistry unequal prefix is absent",
+        byte_registry.lookup_query(&&[1u8][..]),
+        None,
+    );
 
     all_ok &= check("fallible selection admits fixed scores", automation_structures::primitives::competitive_selection::CompetitiveSelectionHard::try_new(3).is_ok(), true);
     all_ok &= check("fallible selection refuses oversized scores", automation_structures::primitives::competitive_selection::CompetitiveSelectionHard::try_new(usize::MAX).is_err(), true);
-    all_ok &= check("fallible step graph admits dependencies", automation_structures::modalities::step_graph::StepGraph::try_new(2, vec![(0,1)]).is_ok(), true);
-    all_ok &= check("fallible step graph refuses oversized state", automation_structures::modalities::step_graph::StepGraph::try_new(usize::MAX, vec![(0,1)]).is_err(), true);
-    all_ok &= check("fallible actuation admits assignments", automation_structures::primitives::actuation_pass::ActuationPass::try_new(vec![Some(7)],1).is_ok(), true);
+    all_ok &= check(
+        "fallible step graph admits dependencies",
+        automation_structures::modalities::step_graph::StepGraph::try_new(2, vec![(0, 1)]).is_ok(),
+        true,
+    );
+    all_ok &= check(
+        "fallible step graph refuses oversized state",
+        automation_structures::modalities::step_graph::StepGraph::try_new(usize::MAX, vec![(0, 1)])
+            .is_err(),
+        true,
+    );
+    all_ok &= check(
+        "fallible actuation admits assignments",
+        automation_structures::primitives::actuation_pass::ActuationPass::try_new(vec![Some(7)], 1)
+            .is_ok(),
+        true,
+    );
 
     let mut reserved_registry = ResourceRegistry::<u64, Vec<u8>>::new();
     reserved_registry.register(7, vec![3, 1]);
-    all_ok &= check("Registry linear preflight succeeds", reserved_registry.try_reserve_entries(2).is_ok(), true);
-    all_ok &= check("Registry linear preflight preserves owned value", reserved_registry.lookup_ref(&7), Some(&vec![3, 1]));
-    all_ok &= check("Registry linear oversized preflight refuses", reserved_registry.try_reserve_entries(usize::MAX).is_err(), true);
-    all_ok &= check("Registry linear refusal preserves owned value", reserved_registry.lookup_ref(&7), Some(&vec![3, 1]));
+    all_ok &= check(
+        "Registry linear preflight succeeds",
+        reserved_registry.try_reserve_entries(2).is_ok(),
+        true,
+    );
+    all_ok &= check(
+        "Registry linear preflight preserves owned value",
+        reserved_registry.lookup_ref(&7),
+        Some(&vec![3, 1]),
+    );
+    all_ok &= check(
+        "Registry linear oversized preflight refuses",
+        reserved_registry.try_reserve_entries(usize::MAX).is_err(),
+        true,
+    );
+    all_ok &= check(
+        "Registry linear refusal preserves owned value",
+        reserved_registry.lookup_ref(&7),
+        Some(&vec![3, 1]),
+    );
 
     // ResourceRegistry ResourceRegistry: unique key->value mapping (TLA+ Register/Deregister).
     let mut reg: ResourceRegistry<u64, u64> = ResourceRegistry::new();
@@ -292,7 +359,7 @@ fn main() {
     );
     all_ok &= check(
         "TraversalEngine TraversalEngine new: queue = {root}",
-        te.queue.values[0],
+        *te.queue.values.first().ok_or("missing traversal root")?,
         0,
     );
     te.visit_node(0); // visit root: accept, spend NodeCost 2, enqueue {1,2,3}
@@ -303,7 +370,10 @@ fn main() {
     );
     all_ok &= check(
         "TraversalEngine after visit root: root accepted",
-        te.accepted.accumulated[0],
+        *te.accepted
+            .accumulated
+            .first()
+            .ok_or("missing accepted root")?,
         0,
     );
     all_ok &= check(
@@ -392,7 +462,11 @@ fn main() {
     let mut bx = Bisection::new(0, 16, 5, 16, 4);
     all_ok &= check("Bisection Bisection new: lo 0", bx.lo, 0);
     all_ok &= check("Bisection Bisection new: hi 16", bx.hi, 16);
-    all_ok &= check("Bisection Bisection new: max probes 4", bx.budget.capacity, 4);
+    all_ok &= check(
+        "Bisection Bisection new: max probes 4",
+        bx.budget.capacity,
+        4,
+    );
     all_ok &= check("Bisection Bisection new: probes 0", bx.budget.allocated, 0);
     all_ok &= check(
         "Bisection Bisection new: threshold bracketed",
@@ -401,7 +475,11 @@ fn main() {
     );
     bx.probe(); // mid = 8 >= 5 -> hi' = 8 (width 16 halved to 8)
     all_ok &= check("Bisection Bisection probe 1: hi 8 (halved)", bx.hi, 8);
-    all_ok &= check("Bisection Bisection probe 1: probes 1", bx.budget.allocated, 1);
+    all_ok &= check(
+        "Bisection Bisection probe 1: probes 1",
+        bx.budget.allocated,
+        1,
+    );
     all_ok &= check(
         "Bisection Bisection probe 1: threshold still bracketed",
         bx.lo <= bx.threshold && bx.threshold <= bx.hi,
@@ -410,12 +488,19 @@ fn main() {
     bx.probe(); // mid = 4 < 5 -> lo' = 5 (interval 0..8 -> 5..8)
     all_ok &= check("Bisection Bisection probe 2: lo 5", bx.lo, 5);
     all_ok &= check("Bisection Bisection probe 2: hi 8 (width 3)", bx.hi, 8);
-    all_ok &= check("Bisection Bisection probe 2: probes 2", bx.budget.allocated, 2);
+    all_ok &= check(
+        "Bisection Bisection probe 2: probes 2",
+        bx.budget.allocated,
+        2,
+    );
     let mut by = Bisection::new(0, 16, 5, 16, 4);
     by.bisect(); // (0,16) -> (0,8) -> (5,8) -> (5,6): converged
     all_ok &= check(
         "Bisection Bisection bisect: converged (hi-lo<2)",
-        by.hi - by.lo < 2,
+        by.hi
+            .checked_sub(by.lo)
+            .ok_or("reversed bisection interval")?
+            < 2,
         true,
     );
     all_ok &= check(
@@ -434,7 +519,10 @@ fn main() {
     bz.bisect();
     all_ok &= check(
         "Bisection Bisection exact budget: converged",
-        bz.hi - bz.lo < 2,
+        bz.hi
+            .checked_sub(bz.lo)
+            .ok_or("reversed bisection interval")?
+            < 2,
         true,
     );
     all_ok &= check(
@@ -448,10 +536,18 @@ fn main() {
     // probability), sample_size 2.
     let mut smp = Sampler::new(vec![3u64, 0, 5, 2], 2);
     all_ok &= check("Sampler Sampler new: num_items", smp.actuation.num_seats, 4);
-    all_ok &= check("Sampler Sampler new: selected empty", smp.budget.allocated, 0);
+    all_ok &= check(
+        "Sampler Sampler new: selected empty",
+        smp.budget.allocated,
+        0,
+    );
     smp.sample(0); // distribution[0] = 3 > 0 (in support)
     all_ok &= check("Sampler sample(0): selected len 1", smp.budget.allocated, 1);
-    all_ok &= check("Sampler sample(0): item 0 selected", smp.contains_exec(0), true);
+    all_ok &= check(
+        "Sampler sample(0): item 0 selected",
+        smp.contains_exec(0),
+        true,
+    );
     smp.sample(2); // distribution[2] = 5 > 0
     all_ok &= check(
         "Sampler sample(2): selected len 2 (BoundedSample == SampleSize)",
@@ -488,12 +584,12 @@ fn main() {
     let trials: u32 = 200_000;
     let crit_3df_001 = 16.266f64;
 
-    let f_weighted = draw_frequencies(&w_dist, 4, trials, true, 12345);
-    let f_uniform = draw_frequencies(&w_dist, 4, trials, false, 12345);
+    let f_weighted = draw_frequencies(&w_dist, 4, trials, true, 12345)?;
+    let f_uniform = draw_frequencies(&w_dist, 4, trials, false, 12345)?;
 
-    let x2_w_vs_w = chi_squared(&f_weighted, &w_dist);
-    let x2_u_vs_u = chi_squared(&f_uniform, &w_unif);
-    let x2_u_vs_w = chi_squared(&f_uniform, &w_dist);
+    let x2_w_vs_w = chi_squared(&f_weighted, &w_dist)?;
+    let x2_u_vs_u = chi_squared(&f_uniform, &w_unif)?;
+    let x2_u_vs_w = chi_squared(&f_uniform, &w_dist)?;
 
     println!(
         "  distributional weighted-draw counts {:?}  chi2 vs weighted = {:.2}",
@@ -529,20 +625,22 @@ fn main() {
     // costs=[3,4,5,1,2]): accept 0(3),1(4); skip 2 (cost 5 > rem 3); accept
     // 3(1),4(2) -> total=10, rem=0, |accepted|=4.
     let a1 = capture(10, 5, &[0u64, 1, 2, 3, 4], &[3u64, 4, 5, 1, 2]);
-    all_ok &= check("AllocSnap capture(10,..).total_cost", a1.budget.allocated, 10);
+    all_ok &= check("AllocSnap capture(10,..).total_cost", a1.total_cost(), 10);
     all_ok &= check(
         "AllocSnap capture(10,..).budget_remaining",
-        a1.budget.capacity - a1.budget.allocated,
+        a1.budget_remaining(),
         0,
     );
     all_ok &= check(
         "AllocSnap capture(10,..).accepted.len()",
-        a1.registry.entries.len(),
+        a1.accepted_entries().len(),
         4,
     );
     all_ok &= check(
         "AllocSnap capture(10,..) BudgetConsistency",
-        a1.budget.allocated + (a1.budget.capacity - a1.budget.allocated),
+        a1.total_cost()
+            .checked_add(a1.budget_remaining())
+            .ok_or("allocation oracle total overflow")?,
         10,
     );
 
@@ -551,15 +649,15 @@ fn main() {
     //   accept 0; skip 0 (dup); accept 1; skip 5 (>= num_nodes); accept 2
     //   -> total=15, rem=5, |accepted|=3.
     let a2 = capture(20, 3, &[0u64, 0, 1, 5, 2], &[5u64, 5, 5, 5, 5]);
-    all_ok &= check("AllocSnap capture(dup/oob).total_cost", a2.budget.allocated, 15);
+    all_ok &= check("AllocSnap capture(dup/oob).total_cost", a2.total_cost(), 15);
     all_ok &= check(
         "AllocSnap capture(dup/oob).budget_remaining",
-        a2.budget.capacity - a2.budget.allocated,
+        a2.budget_remaining(),
         5,
     );
     all_ok &= check(
         "AllocSnap capture(dup/oob).accepted.len()",
-        a2.registry.entries.len(),
+        a2.accepted_entries().len(),
         3,
     );
 
@@ -567,15 +665,15 @@ fn main() {
     // nodes=[0,1,2], costs=[10,2,2]): skip 0 (10 > 5); accept 1(2),2(2)
     //   -> total=4, rem=1, |accepted|=2.
     let a3 = capture(5, 10, &[0u64, 1, 2], &[10u64, 2, 2]);
-    all_ok &= check("AllocSnap capture(exhaust).total_cost", a3.budget.allocated, 4);
+    all_ok &= check("AllocSnap capture(exhaust).total_cost", a3.total_cost(), 4);
     all_ok &= check(
         "AllocSnap capture(exhaust).budget_remaining",
-        a3.budget.capacity - a3.budget.allocated,
+        a3.budget_remaining(),
         1,
     );
     all_ok &= check(
         "AllocSnap capture(exhaust).accepted.len()",
-        a3.registry.entries.len(),
+        a3.accepted_entries().len(),
         2,
     );
 
@@ -585,7 +683,10 @@ fn main() {
     all_ok &= check("AllocSnap new(100,3).total_cost", a4.budget.allocated, 0);
     all_ok &= check(
         "AllocSnap new(100,3).budget_remaining",
-        a4.budget.capacity - a4.budget.allocated,
+        a4.budget
+            .capacity
+            .checked_sub(a4.budget.allocated)
+            .ok_or("invalid allocation ledger")?,
         100,
     );
     a4.accept_node(0, 30);
@@ -597,7 +698,10 @@ fn main() {
     );
     all_ok &= check(
         "AllocSnap after accept 30,50: budget_remaining",
-        a4.budget.capacity - a4.budget.allocated,
+        a4.budget
+            .capacity
+            .checked_sub(a4.budget.allocated)
+            .ok_or("invalid allocation ledger")?,
         20,
     );
     all_ok &= check(
@@ -669,24 +773,52 @@ fn main() {
     all_ok &= check("QHier new(4,5): edges empty", h.edges.len(), 0);
     all_ok &= check(
         "QHier new(4,5): parent[0] == NULL (num_nodes)",
-        h.parent[0],
+        *h.parent.first().ok_or("missing hierarchy root")?,
         4,
     );
-    all_ok &= check("QHier new(4,5): level[0] == 0", h.level[0], 0);
+    all_ok &= check(
+        "QHier new(4,5): level[0] == 0",
+        *h.level.first().ok_or("missing hierarchy root")?,
+        0,
+    );
     h.set_node_properties(0, 3, 1);
     h.set_node_properties(1, 2, 2);
     h.set_node_properties(2, 2, 3);
     h.set_node_properties(3, 1, 4);
-    all_ok &= check("QHier set_node_properties: level[0]", h.level[0], 3);
-    all_ok &= check("QHier set_node_properties: cost[3]", h.cost[3], 4);
+    all_ok &= check(
+        "QHier set_node_properties: level[0]",
+        *h.level.first().ok_or("missing hierarchy root")?,
+        3,
+    );
+    all_ok &= check(
+        "QHier set_node_properties: cost[3]",
+        *h.cost.get(3).ok_or("missing hierarchy node")?,
+        4,
+    );
     h.add_child(0, 1);
     h.add_child(0, 2);
     h.add_child(1, 3);
     all_ok &= check("QHier edges.len() after 3 add_child", h.edges.len(), 3);
-    all_ok &= check("QHier parent[1] == 0", h.parent[1], 0);
-    all_ok &= check("QHier parent[2] == 0", h.parent[2], 0);
-    all_ok &= check("QHier parent[3] == 1", h.parent[3], 1);
-    all_ok &= check("QHier parent[0] still NULL", h.parent[0], 4);
+    all_ok &= check(
+        "QHier parent[1] == 0",
+        *h.parent.get(1).ok_or("missing hierarchy node")?,
+        0,
+    );
+    all_ok &= check(
+        "QHier parent[2] == 0",
+        *h.parent.get(2).ok_or("missing hierarchy node")?,
+        0,
+    );
+    all_ok &= check(
+        "QHier parent[3] == 1",
+        *h.parent.get(3).ok_or("missing hierarchy node")?,
+        1,
+    );
+    all_ok &= check(
+        "QHier parent[0] still NULL",
+        *h.parent.first().ok_or("missing hierarchy root")?,
+        4,
+    );
     all_ok &= check("QHier has_children(0) (two kids)", h.has_children(0), true);
     all_ok &= check("QHier has_children(1) (one kid)", h.has_children(1), true);
     all_ok &= check("QHier has_children(2) (leaf)", h.has_children(2), false);
@@ -694,12 +826,20 @@ fn main() {
     // StrictLevelDescent spot-check: each edge has parent level > child level.
     all_ok &= check(
         "QHier edge 0->1 level 3>2",
-        h.level[h.edges[0].0] > h.level[h.edges[0].1],
+        h.level
+            .get(h.edges.first().ok_or("missing hierarchy edge")?.0)
+            .ok_or("missing parent level")?
+            > h.level
+                .get(h.edges.first().ok_or("missing hierarchy edge")?.1)
+                .ok_or("missing child level")?,
         true,
     );
     all_ok &= check(
         "QHier edge 1->3 levels (2,1)",
-        (h.level[1], h.level[3]),
+        (
+            *h.level.get(1).ok_or("missing hierarchy level")?,
+            *h.level.get(3).ok_or("missing hierarchy level")?,
+        ),
         (2, 1),
     );
 
@@ -714,35 +854,43 @@ fn main() {
     all_ok &= check("AuditSink after rec1: last_hash", s.last_hash, 2);
     all_ok &= check(
         "AuditSink after rec1: log[0].prev_hash",
-        s.log[0].prev_hash,
+        s.log.first().ok_or("missing audit record")?.prev_hash,
         0,
     );
-    all_ok &= check("AuditSink after rec1: log[0].hash", s.log[0].hash, 2);
+    all_ok &= check(
+        "AuditSink after rec1: log[0].hash",
+        s.log.first().ok_or("missing audit record")?.hash,
+        2,
+    );
     all_ok &= check(
         "AuditSink after rec1: log[0].operation",
-        s.log[0].operation,
+        s.log.first().ok_or("missing audit record")?.operation,
         1,
     );
     s.record(2); // Hash(2,2) = 9
     all_ok &= check("AuditSink after rec2: last_hash", s.last_hash, 9);
     all_ok &= check(
         "AuditSink after rec2: log[1].prev_hash chains to log[0].hash",
-        s.log[1].prev_hash,
+        s.log.get(1).ok_or("missing audit record")?.prev_hash,
         2,
     );
-    all_ok &= check("AuditSink after rec2: log[1].hash", s.log[1].hash, 9);
+    all_ok &= check(
+        "AuditSink after rec2: log[1].hash",
+        s.log.get(1).ok_or("missing audit record")?.hash,
+        9,
+    );
     s.record(3); // Hash(9,3) = 31
     all_ok &= check("AuditSink after rec3: last_hash", s.last_hash, 31);
     all_ok &= check(
         "AuditSink after rec3: log[2].prev_hash",
-        s.log[2].prev_hash,
+        s.log.get(2).ok_or("missing audit record")?.prev_hash,
         9,
     );
     s.record(1); // Hash(31,1) = 95, log now full (len 4)
     all_ok &= check("AuditSink after rec4: last_hash", s.last_hash, 95);
     all_ok &= check(
         "AuditSink after rec4: log[3].prev_hash",
-        s.log[3].prev_hash,
+        s.log.get(3).ok_or("missing audit record")?.prev_hash,
         31,
     );
     all_ok &= check("AuditSink after rec4: log.len()", s.log.len(), 4);
@@ -761,12 +909,14 @@ fn main() {
     // ChainIntegrity spot-check: each prev_hash equals the previous hash.
     all_ok &= check(
         "AuditSink chain log[1].prev==log[0].hash",
-        s.log[1].prev_hash == s.log[0].hash,
+        s.log.get(1).ok_or("missing audit record")?.prev_hash
+            == s.log.first().ok_or("missing audit record")?.hash,
         true,
     );
     all_ok &= check(
         "AuditSink chain log[3].prev==log[2].hash",
-        s.log[3].prev_hash == s.log[2].hash,
+        s.log.get(3).ok_or("missing audit record")?.prev_hash
+            == s.log.get(2).ok_or("missing audit record")?.hash,
         true,
     );
     // HashBindsContent: the hash depends on op — from last_hash 0, op=1 -> 2 but
@@ -796,7 +946,17 @@ fn main() {
     );
     all_ok &= check(
         "FedBudget new(6,2): sub_capacities[0]",
-        fb.sub_pools[0].allocated + fb.sub_pools[0].reserved,
+        fb.sub_pools
+            .first()
+            .ok_or("missing federated pool")?
+            .allocated
+            .checked_add(
+                fb.sub_pools
+                    .first()
+                    .ok_or("missing federated pool")?
+                    .reserved,
+            )
+            .ok_or("pool oracle total overflow")?,
         0,
     );
     let f1 = fb.allocate_sub_pool(0, 4); // master 0+4 <= 6
@@ -808,7 +968,17 @@ fn main() {
     );
     all_ok &= check(
         "FedBudget after alloc(0,4): sub_capacities[0]",
-        fb.sub_pools[0].allocated + fb.sub_pools[0].reserved,
+        fb.sub_pools
+            .first()
+            .ok_or("missing federated pool")?
+            .allocated
+            .checked_add(
+                fb.sub_pools
+                    .first()
+                    .ok_or("missing federated pool")?
+                    .reserved,
+            )
+            .ok_or("pool oracle total overflow")?,
         4,
     );
     let f2 = fb.allocate_sub_pool(1, 3); // master 4+3 = 7 > 6 -> reject
@@ -831,24 +1001,47 @@ fn main() {
     );
     all_ok &= check(
         "FedBudget after alloc(1,2): sub_capacities[1]",
-        fb.sub_pools[1].allocated + fb.sub_pools[1].reserved,
+        fb.sub_pools
+            .get(1)
+            .ok_or("missing federated pool")?
+            .allocated
+            .checked_add(
+                fb.sub_pools
+                    .get(1)
+                    .ok_or("missing federated pool")?
+                    .reserved,
+            )
+            .ok_or("pool oracle total overflow")?,
         2,
     );
     // CapacityConservation spot-check.
     all_ok &= check(
         "FedBudget consistency master==sum(caps)",
         fb.master.allocated
-            == fb.sub_pools[0].allocated
-                + fb.sub_pools[0].reserved
-                + fb.sub_pools[1].allocated
-                + fb.sub_pools[1].reserved,
+            == fb
+                .sub_pools
+                .first()
+                .ok_or("missing federated pool")?
+                .allocated
+                .checked_add(
+                    fb.sub_pools
+                        .first()
+                        .ok_or("missing federated pool")?
+                        .reserved,
+                )
+                .and_then(|total| total.checked_add(fb.sub_pools.get(1)?.allocated))
+                .and_then(|total| total.checked_add(fb.sub_pools.get(1)?.reserved))
+                .ok_or("pool oracle total overflow or missing pool")?,
         true,
     );
     let g1 = fb.allocate_from_sub_pool(0, 3); // sub_alloc[0] 0+3 <= cap 4
     all_ok &= check("FedBudget allocate_from_sub_pool(0,3) accepted", g1, true);
     all_ok &= check(
         "FedBudget after from(0,3): sub_allocated[0]",
-        fb.sub_pools[0].allocated,
+        fb.sub_pools
+            .first()
+            .ok_or("missing federated pool")?
+            .allocated,
         3,
     );
     let g2 = fb.allocate_from_sub_pool(0, 2); // 3+2 = 5 > cap 4 -> reject
@@ -859,34 +1052,64 @@ fn main() {
     );
     all_ok &= check(
         "FedBudget after from reject: sub_allocated[0] unchanged",
-        fb.sub_pools[0].allocated,
+        fb.sub_pools
+            .first()
+            .ok_or("missing federated pool")?
+            .allocated,
         3,
     );
     fb.release_from_sub_pool(0, 1); // sub_alloc[0] 3 -> 2
     all_ok &= check(
         "FedBudget after release(0,1): sub_allocated[0]",
-        fb.sub_pools[0].allocated,
+        fb.sub_pools
+            .first()
+            .ok_or("missing federated pool")?
+            .allocated,
         2,
     );
 
     // RelationshipGraph: weighted graph with adjacency projected from the
     // ResourceRegistry owner. Remove 0->1 and retain the other pairs.
     let mut g = RelationshipGraph::new(3, 2);
-    all_ok &= check("RelGraph new(3,2): edges empty", g.registry.entries.len(), 0);
-    all_ok &= check("RelGraph new(3,2): pair 0->1 absent", g.contains_pair(0, 1), false);
+    all_ok &= check(
+        "RelGraph new(3,2): edges empty",
+        g.registry.entries.len(),
+        0,
+    );
+    all_ok &= check(
+        "RelGraph new(3,2): pair 0->1 absent",
+        g.contains_pair(0, 1),
+        false,
+    );
     g.add_edge(0, 1, 2);
-    all_ok &= check("RelGraph after add(0,1,2): edges.len()", g.registry.entries.len(), 1);
+    all_ok &= check(
+        "RelGraph after add(0,1,2): edges.len()",
+        g.registry.entries.len(),
+        1,
+    );
     all_ok &= check(
         "RelGraph after add(0,1,2): pair present",
         g.contains_pair(0, 1),
         true,
     );
-    all_ok &= check("RelGraph after add(0,1,2): exact edge present", g.contains_exact_edge(0, 1, 2), true);
+    all_ok &= check(
+        "RelGraph after add(0,1,2): exact edge present",
+        g.contains_exact_edge(0, 1, 2),
+        true,
+    );
     g.add_edge(1, 2, 1);
     g.add_edge(0, 2, 0);
-    all_ok &= check("RelGraph after 3 adds: edges.len()", g.registry.entries.len(), 3);
+    all_ok &= check(
+        "RelGraph after 3 adds: edges.len()",
+        g.registry.entries.len(),
+        3,
+    );
     g.remove_edge(0, 1);
-    all_ok &= check("RelGraph after remove(0,1): edges.len()", g.registry.entries.len(), 2);
+    all_ok &= check(
+        "RelGraph after remove(0,1): edges.len()",
+        g.registry.entries.len(),
+        2,
+    );
     all_ok &= check(
         "RelGraph after remove(0,1): removed pair absent",
         g.contains_pair(0, 1),
@@ -916,12 +1139,28 @@ fn main() {
     all_ok &= check("PropPass new: round idle", pp.round, Round::Idle);
     all_ok &= check("PropPass new: iteration", pp.iteration, 0);
     pp.start_round();
-    all_ok &= check("PropPass start: snapshot[1]", pp.snapshot[1], 2);
-    all_ok &= check("PropPass start: updated[1] false", pp.updated[1], false);
+    all_ok &= check(
+        "PropPass start: snapshot[1]",
+        *pp.snapshot.get(1).ok_or("missing propagation node")?,
+        2,
+    );
+    all_ok &= check(
+        "PropPass start: updated[1] false",
+        *pp.updated.get(1).ok_or("missing propagation node")?,
+        false,
+    );
     pp.update_node(1);
-    all_ok &= check("PropPass update node 1: value", pp.values[1], 1);
+    all_ok &= check(
+        "PropPass update node 1: value",
+        *pp.values.get(1).ok_or("missing propagation node")?,
+        1,
+    );
     pp.update_node(2);
-    all_ok &= check("PropPass snapshot isolation at node 2", pp.values[2], 2);
+    all_ok &= check(
+        "PropPass snapshot isolation at node 2",
+        *pp.values.get(2).ok_or("missing propagation node")?,
+        2,
+    );
     pp.update_node(0);
     all_ok &= check("PropPass full round coverage", pp.all_nodes_updated(), true);
     pp.end_round();
@@ -971,7 +1210,7 @@ fn main() {
     // several steps.
     let mut pg2 = ConvergenceGovernorPhaseAware::new(10, 30, 3, 50);
     pg2.update(12); // window <<12>>, avg 12; delta>=threshold -> peak; WARMING;
-                        // avg 12 < 2*threshold(20) and peak -> COOLING
+    // avg 12 < 2*threshold(20) and peak -> COOLING
     all_ok &= check("PhaseGov2 warm: COOLING", pg2.state, GovState::Cooling);
     all_ok &= check(
         "PhaseGov2 warm: WARMING",
@@ -987,7 +1226,7 @@ fn main() {
         Phase::Declining,
     );
     pg2.update(10); // window <<12,2,10>>, avg 24/3 = 8; peak && delta>=threshold
-                       // -> ACTIVE_LEARNING; 8 not > awaken(30) -> stays CONVERGED
+    // -> ACTIVE_LEARNING; 8 not > awaken(30) -> stays CONVERGED
     all_ok &= check(
         "PhaseGov2: ACTIVE_LEARNING phase",
         pg2.gradient_phase,
@@ -1088,28 +1327,29 @@ fn main() {
     che.evaluate(1);
     all_ok &= check(
         "CompSel HardExclusive seat 0 winner",
-        che.allocation[0],
+        *che.allocation.first().ok_or("missing selection seat")?,
         Some(0u64),
     );
     all_ok &= check(
         "CompSel HardExclusive seat 1 best available",
-        che.allocation[1],
+        *che.allocation.get(1).ok_or("missing selection seat")?,
         Some(1u64),
     );
     all_ok &= check(
         "CompSel HardExclusive mutual exclusion",
-        che.allocation[0] != che.allocation[1],
+        che.allocation.first().ok_or("missing selection seat")?
+            != che.allocation.get(1).ok_or("missing selection seat")?,
         true,
     );
     che.update_score(0, 2, 10);
     all_ok &= check(
         "CompSel HardExclusive score update clears seat 0",
-        che.allocation[0],
+        *che.allocation.first().ok_or("missing selection seat")?,
         None,
     );
     all_ok &= check(
         "CompSel HardExclusive score update clears coupled seat 1",
-        che.allocation[1],
+        *che.allocation.get(1).ok_or("missing selection seat")?,
         None,
     );
 
@@ -1165,7 +1405,7 @@ fn main() {
     csl.update_score(0, 4);
     all_ok &= check(
         "CompSel mutable scores UpdateScore: score committed",
-        csl.scores[0],
+        *csl.scores.first().ok_or("missing candidate score")?,
         4u64,
     );
     all_ok &= check(
@@ -1184,7 +1424,10 @@ fn main() {
     );
     all_ok &= check(
         "CompSel mutable scores terminal normalization",
-        csl.weight_at(0) + csl.weight_at(1) + csl.weight_at(2),
+        csl.weight_at(0)
+            .checked_add(csl.weight_at(1))
+            .and_then(|total| total.checked_add(csl.weight_at(2)))
+            .ok_or("selection oracle total overflow")?,
         12u64,
     );
 
@@ -1193,22 +1436,22 @@ fn main() {
     cr.select();
     all_ok &= check(
         "CompSel Ranked: candidate 2 selected (score 4)",
-        cr.selected[2],
+        *cr.selected.get(2).ok_or("missing selection candidate")?,
         true,
     );
     all_ok &= check(
         "CompSel Ranked: candidate 0 selected (score 3)",
-        cr.selected[0],
+        *cr.selected.first().ok_or("missing selection candidate")?,
         true,
     );
     all_ok &= check(
         "CompSel Ranked: candidate 1 not selected (score 1)",
-        cr.selected[1],
+        *cr.selected.get(1).ok_or("missing selection candidate")?,
         false,
     );
     all_ok &= check(
         "CompSel Ranked: candidate 3 not selected (score 2)",
-        cr.selected[3],
+        *cr.selected.get(3).ok_or("missing selection candidate")?,
         false,
     );
 
@@ -1224,12 +1467,12 @@ fn main() {
     crt.select();
     all_ok &= check(
         "CompSel Ranked tie-break: 1,2 tie at 3; lower index 1 selected",
-        crt.selected[1],
+        *crt.selected.get(1).ok_or("missing selection candidate")?,
         true,
     );
     all_ok &= check(
         "CompSel Ranked tie-break: 1,2 tie at 3; higher index 2 excluded",
-        crt.selected[2],
+        *crt.selected.get(2).ok_or("missing selection candidate")?,
         false,
     );
 
@@ -1240,8 +1483,16 @@ fn main() {
     all_ok &= check("Backtrack new: depth 0", bt.path.len(), 0);
     bt.descend(1, 2); // depth 1, aux 2, save 0
     all_ok &= check("Backtrack after descend(1,2): aux == 2", bt.aux, 2);
-    all_ok &= check("Backtrack token[0] saved 0", bt.ledger[0].saved, 0);
-    all_ok &= check("Backtrack token[0] delta 2", bt.ledger[0].delta, 2);
+    all_ok &= check(
+        "Backtrack token[0] saved 0",
+        bt.ledger.first().ok_or("missing backtracking token")?.saved,
+        0,
+    );
+    all_ok &= check(
+        "Backtrack token[0] delta 2",
+        bt.ledger.first().ok_or("missing backtracking token")?.delta,
+        2,
+    );
     bt.descend(2, 2); // depth 2, aux 1, save 2
     all_ok &= check("Backtrack after second delta 2: aux == 1", bt.aux, 1);
     bt.descend(1, 1); // depth 3 (leaf), aux 2, save 1
@@ -1251,11 +1502,27 @@ fn main() {
     all_ok &= check("Backtrack after visit: visited.len()", bt.visited.len(), 1);
     all_ok &= check(
         "Backtrack visited path is full depth",
-        bt.visited[0].len(),
+        bt.visited.first().ok_or("missing visited path")?.len(),
         3,
     );
-    all_ok &= check("Backtrack visited path[0]", bt.visited[0][0], 1);
-    all_ok &= check("Backtrack visited path[1]", bt.visited[0][1], 2);
+    all_ok &= check(
+        "Backtrack visited path[0]",
+        *bt.visited
+            .first()
+            .ok_or("missing visited path")?
+            .first()
+            .ok_or("missing path node")?,
+        1,
+    );
+    all_ok &= check(
+        "Backtrack visited path[1]",
+        *bt.visited
+            .first()
+            .ok_or("missing visited path")?
+            .get(1)
+            .ok_or("missing path node")?,
+        2,
+    );
     bt.ascend(); // undo delta 1: restore saved 1
     all_ok &= check(
         "Backtrack after ascend: aux restored to token saved 1",
@@ -1286,7 +1553,11 @@ fn main() {
     // l1), notified' = {}. Checking BOTH listeners rules out a
     // partial-pending construction that skips listener 0 (index off-by-one
     // starting at 1) or stops one short of the last listener.
-    all_ok &= check("Signal set_value(1): enabled (guard 1 /= 0)", sig.can_set_value(1), true);
+    all_ok &= check(
+        "Signal set_value(1): enabled (guard 1 /= 0)",
+        sig.can_set_value(1),
+        true,
+    );
     sig.set_value(1);
     all_ok &= check(
         "Signal after set_value(1): current_value 1",
@@ -1342,7 +1613,11 @@ fn main() {
     // filter-drop construction (the exact SignalFromAuditSink_NEG break: a
     // Signal that fires on a non-change) -- that construction would refill
     // pending (l0 back to pending) and reset notified (l0 dropped).
-    all_ok &= check("Signal set_value(1) same value: filter disables action", sig.can_set_value(1), false);
+    all_ok &= check(
+        "Signal set_value(1) same value: filter disables action",
+        sig.can_set_value(1),
+        false,
+    );
     all_ok &= check(
         "Signal after rejected set: l0 still not pending (unchanged)",
         sig.is_pending(0),
@@ -1382,7 +1657,11 @@ fn main() {
     // keeps notified) -- that construction would leave l0/l1 in notified
     // while pending refills: the pending ∩ notified /= {} state that
     // PendingNotifiedDisjointness forbids.
-    all_ok &= check("Signal set_value(2): enabled (guard 2 /= 1)", sig.can_set_value(2), true);
+    all_ok &= check(
+        "Signal set_value(2): enabled (guard 2 /= 1)",
+        sig.can_set_value(2),
+        true,
+    );
     sig.set_value(2);
     all_ok &= check(
         "Signal after set_value(2): l0 notified reset",
@@ -1424,7 +1703,11 @@ fn main() {
         rl.try_acquire(),
         true,
     );
-    all_ok &= check("RateLimit after 3 acquires: count 3", rl.budget.allocated, 3);
+    all_ok &= check(
+        "RateLimit after 3 acquires: count 3",
+        rl.budget.allocated,
+        3,
+    );
     all_ok &= check(
         "RateLimit acquire 4: REJECTED at ceiling",
         rl.try_acquire(),
@@ -1486,7 +1769,11 @@ fn main() {
         rl.try_acquire(),
         false,
     );
-    all_ok &= check("RateLimit fresh window at ceiling: count 3", rl.budget.allocated, 3);
+    all_ok &= check(
+        "RateLimit fresh window at ceiling: count 3",
+        rl.budget.allocated,
+        3,
+    );
 
     // Advance to clock 9: elapsed 9-5 = 4 < WindowDuration 5 -- the window is
     // NOT yet expired, so an acquire at the ceiling must still be rejected.
@@ -1502,7 +1789,11 @@ fn main() {
         rl.try_acquire(),
         false,
     );
-    all_ok &= check("RateLimit no early rollover: count still 3", rl.budget.allocated, 3);
+    all_ok &= check(
+        "RateLimit no early rollover: count still 3",
+        rl.budget.allocated,
+        3,
+    );
     all_ok &= check(
         "RateLimit no early rollover: window_start still 5",
         rl.window_start,
@@ -1723,13 +2014,21 @@ fn main() {
         tbc.traversal.visited_count(),
         2,
     );
-    all_ok &= check("TraversalBudgetComposition after skip_unaffordable(1): accepted len STILL 1 (accepted proper subset)", tbc.traversal.accepted.len(), 1);
+    all_ok &= check(
+        "TraversalBudgetComposition after skip_unaffordable(1): accepted len STILL 1 (accepted proper subset)",
+        tbc.traversal.accepted.len(),
+        1,
+    );
     all_ok &= check(
         "TraversalBudgetComposition after skip_unaffordable(1): total_cost STILL 2 (no deduction)",
         tbc.total_cost(),
         2,
     );
-    all_ok &= check("TraversalBudgetComposition after skip_unaffordable(1): budget_remaining STILL 1 (no deduction)", tbc.budget_remaining(), 1);
+    all_ok &= check(
+        "TraversalBudgetComposition after skip_unaffordable(1): budget_remaining STILL 1 (no deduction)",
+        tbc.budget_remaining(),
+        1,
+    );
     all_ok &= check(
         "TraversalBudgetComposition after skip_unaffordable(1): child 1 removed",
         tbc.queue_contains(1),
@@ -1772,9 +2071,9 @@ fn main() {
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (catalog primitives + compositions)");
-        std::process::exit(0);
+        Ok(())
     } else {
         println!("KAT_RESULT: FAIL");
-        std::process::exit(1);
+        Err("catalog known-answer mismatch".into())
     }
 }

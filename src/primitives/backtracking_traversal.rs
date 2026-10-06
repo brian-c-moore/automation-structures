@@ -256,6 +256,8 @@ impl<T: Copy, D: TraversalDomain<T>> BacktrackingTraversal<T, D> {
     }
 
     /// Whether a path occurs in the visited-leaf ledger.
+    #[expect(clippy::indexing_slicing, reason = "the visited-ledger query guards each index by the unchanged ledger length")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the visited-ledger cursor advances only while strictly below ledger length")]
     pub fn has_visited(&self, p: &Vec<u64>) -> (b: bool)
         ensures b == self.visited_contains(p@),
     {
@@ -434,6 +436,8 @@ impl<T: Copy, D: TraversalDomain<T>> BacktrackingTraversal<T, D> {
     }
 
     /// `Ascend`: apply the recorded inverse, then pop token and path.
+    #[expect(clippy::indexing_slicing, reason = "the enabled ascent requires a nonempty path and the invariant equates path and undo-ledger lengths")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the enabled ascent requires depth >= 1 before computing the latest token position")]
     pub fn ascend(&mut self)
         requires old(self).inv(), old(self).path.len() >= 1,
         ensures
@@ -502,6 +506,8 @@ impl<T: Copy, D: TraversalDomain<T>> BacktrackingTraversal<T, D> {
     }
 }
 
+#[expect(clippy::indexing_slicing, reason = "the unequal-length branch returns and the comparison loop guards both equal-length reads")]
+#[expect(clippy::arithmetic_side_effects, reason = "the path-comparison cursor advances only while strictly below paired path length")]
 fn paths_equal(a: &Vec<u64>, b: &Vec<u64>) -> (same: bool)
     ensures same == (a@ == b@),
 {
@@ -531,6 +537,8 @@ fn clone_path(p: &Vec<u64>) -> (out: Vec<u64>)
     ensures out@ == p@,
 { copy_path(p, Vec::new()) }
 
+#[expect(clippy::indexing_slicing, reason = "the copy loop guards each read by the immutable source path length")]
+#[expect(clippy::arithmetic_side_effects, reason = "the path-copy cursor advances only while strictly below source length")]
 fn copy_path(p: &Vec<u64>, mut out: Vec<u64>) -> (copied: Vec<u64>)
     requires out.len() == 0,
     ensures copied@ == p@,
@@ -564,6 +572,7 @@ spec fn modulo_undo_spec(v: u64, d: u64) -> int {
     }
 
     /// Apply the modulo-three auxiliary mutation.
+#[expect(clippy::arithmetic_side_effects, reason = "the modulo-three preconditions and wrap branches admit addition only for v <= 1 and subtraction only for v >= 1")]
 fn modulo_mutate_exec(v: u64, d: u64) -> (out: u64)
         requires v < 3, 1 <= d <= 2,
         ensures out < 3, out as int == modulo_mutate_spec(v, d),
@@ -576,6 +585,7 @@ fn modulo_mutate_exec(v: u64, d: u64) -> (out: u64)
     }
 
     /// Apply the inverse modulo-three auxiliary mutation.
+#[expect(clippy::arithmetic_side_effects, reason = "the modulo-three preconditions and wrap branches admit addition only for v <= 1 and subtraction only for v >= 1")]
 fn modulo_undo_exec(v: u64, d: u64) -> (out: u64)
         requires v < 3, 1 <= d <= 2,
         ensures out < 3, out as int == modulo_undo_spec(v, d),

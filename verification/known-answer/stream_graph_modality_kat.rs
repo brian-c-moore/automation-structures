@@ -14,14 +14,22 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
 
 fn conserved(s: &StreamGraph) -> bool {
     let queued = if s.chain_length == 3 {
-        s.q1.len() + s.q2.len()
+        s.q1.len().checked_add(s.q2.len())
     } else {
-        s.q1.len() + s.q2.len() + s.q3.len()
+        s.q1.len()
+            .checked_add(s.q2.len())
+            .and_then(|total| total.checked_add(s.q3.len()))
     };
-    s.ingested.value() as usize == queued + s.emitted.value() as usize
+    let Ok(ingested) = usize::try_from(s.ingested.value()) else {
+        return false;
+    };
+    let Ok(emitted) = usize::try_from(s.emitted.value()) else {
+        return false;
+    };
+    Some(ingested) == queued.and_then(|total| total.checked_add(emitted))
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut ok = true;
     ok &= check(
         "three-node config accepted",
@@ -118,8 +126,9 @@ fn main() {
 
     if ok {
         println!("KAT_RESULT: SUCCESS (StreamGraph modality)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (StreamGraph modality)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

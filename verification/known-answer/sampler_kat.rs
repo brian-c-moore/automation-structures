@@ -12,7 +12,7 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut all_ok = true;
 
     let mut singleton = Sampler::new(vec![5], 1);
@@ -31,11 +31,7 @@ fn main() {
         singleton.zero(0),
         false,
     );
-    all_ok &= check(
-        "selected weight remains framed",
-        singleton.weight(0),
-        5,
-    );
+    all_ok &= check("selected weight remains framed", singleton.weight(0), 5);
 
     let mut live = Sampler::new(vec![3, 0, 5], 2);
     all_ok &= check(
@@ -94,8 +90,9 @@ fn main() {
 
     if all_ok {
         println!("KAT_RESULT: SUCCESS (Sampler safety/support)");
+        std::process::ExitCode::SUCCESS
     } else {
         println!("KAT_RESULT: FAIL (Sampler safety/support)");
-        std::process::exit(1);
+        std::process::ExitCode::FAILURE
     }
 }

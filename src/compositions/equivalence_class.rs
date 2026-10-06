@@ -469,6 +469,7 @@ impl EquivalenceClass {
     }
 
     /// Attach equal-rank roots and raise the surviving root's rank.
+    #[expect(clippy::arithmetic_side_effects, reason = "the enabled merge requires rank < Budget.allocated <= u64::MAX before incrementing the survivor rank")]
     fn attach_equal(&mut self, lower: usize, higher: usize, rank: u64)
         requires
             old(self).inv(),

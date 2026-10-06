@@ -3,13 +3,14 @@
 use std::error::Error;
 
 use automation_structures::{
-    Accumulator, ActuationPass, AllocationSnapshot, AuditSink, BacktrackingTraversal, Bisection,
-    Budget, Buffer, CompetitiveSelectionHard, CompetitiveSelectionHardExclusive,
-    CompetitiveSelectionRanked, CompetitiveSelectionSoft, ConvergenceGovernor, Counter, Cursor,
-    EquivalenceClass, FederatedBudget, ForkJoin, Marker, PropagationPass, QualityHierarchy,
-    RateLimit, Reduction, RelationshipGraph, ResourceRegistry, Sampler, SelectThenActuate,
-    Sequential, Signal, StepGraph, StreamGraph, TraversalEngine, projection_consistent,
-    strictly_before,
+    Accumulator, ActuationPass, AllEdges, AllocationSnapshot, AuditSink, BacktrackingTraversal,
+    Bisection, Budget, Buffer, CheckedSignedAdd, CompetitiveSelectionHard,
+    CompetitiveSelectionHardExclusive, CompetitiveSelectionRanked, CompetitiveSelectionSoft,
+    ConvergenceGovernor, Counter, Cursor, EdgeDirection, EquivalenceClass, FederatedBudget,
+    ForkJoin, IncrementalReduction, Marker, PositionalEdgeHandles, PropagationPass,
+    QualityHierarchy, RateLimit, Reduction, ReductionColumns, RelationshipGraph, ResourceRegistry,
+    Sampler, SelectThenActuate, Sequential, Signal, StepGraph, StreamGraph, TraversalEngine,
+    projection_consistent, strictly_before,
 };
 
 macro_rules! assert_debuggable {
@@ -18,8 +19,39 @@ macro_rules! assert_debuggable {
     };
 }
 
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "catalog assertions check documented example outcomes; operation failures propagate typed errors"
+)]
 fn main() -> Result<(), Box<dyn Error>> {
     // Primitives.
+    let mut latest = automation_structures::SummarySignal::new(1, 0u64, 1, 2);
+    let listener = latest.register()?;
+    assert_eq!(latest.set_value(7), Ok(true));
+    assert_eq!(latest.notify(listener)?.value, 7);
+    assert!(!latest.notify(listener)?.changed);
+    latest.remove(listener)?;
+    let mut typed = automation_structures::TypedStream::try_new(2, 2, 8)?;
+    typed
+        .publish(String::from("sample"), 6)
+        .map_err(|refusal| refusal.error)?;
+    typed.close_input();
+    assert_eq!(typed.receive()?.value, "sample");
+    assert!(typed.is_drained());
+    let mut shared = automation_structures::TypedFanout::try_new(3, 1, 8)?;
+    shared
+        .publish(String::from("sample"), 6)
+        .map_err(|refusal| refusal.error)?;
+    shared.close_input();
+    for branch in [
+        automation_structures::FanoutBranch::Left,
+        automation_structures::FanoutBranch::Right,
+    ] {
+        let observation = shared.observe(branch)?;
+        assert_eq!(observation.value, "sample");
+        shared.consume(observation.token)?;
+    }
+    assert!(shared.is_drained());
     let mut budget = Budget::new(8);
     assert!(budget.try_reserve(3));
     budget.commit_reservation(3)?;
@@ -50,6 +82,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     ranked.select();
     assert_eq!(ranked.is_selected(0), Some(true));
 
+    let route_metrics = vec![
+        automation_structures::NullableSigned::Value(3),
+        automation_structures::NullableSigned::Value(1),
+        automation_structures::NullableSigned::Value(1),
+    ];
+    let minimum = automation_structures::CompetitiveSelectionMinimum::try_new(
+        automation_structures::SignedRowOrder {
+            values: &route_metrics,
+            descending: false,
+            nulls_first: false,
+        },
+    )
+    .map_err(|(reason, _)| reason)?;
+    assert_eq!(minimum.selected(), [1, 2]);
+
     let mut actuation = ActuationPass::new(vec![Some(7)]);
     actuation.actuate(0)?;
     actuation.finish()?;
@@ -73,6 +120,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Named compositions.
     let mut snapshot = AllocationSnapshot::new(3, 1);
     snapshot.accept(0, 3)?;
+    let snapshot = snapshot.seal();
+    assert_eq!(snapshot.total_cost(), 3);
 
     let mut federated = FederatedBudget::new(4, 1);
     assert!(federated.try_delegate(0, 4));
@@ -91,8 +140,37 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut reduction = Reduction::new(vec![2, 3])?;
     reduction.process_next()?;
 
+    let mut incremental = IncrementalReduction::new(2, CheckedSignedAdd);
+    incremental
+        .prepare(7)
+        .map_err(|(error, _input)| error)?
+        .commit();
+    incremental
+        .prepare(-4)
+        .map_err(|(error, _input)| error)?
+        .commit();
+    assert_eq!((incremental.processed_len(), incremental.result()), (2, 3));
+    let mut columns = ReductionColumns::try_new(&vec![CheckedSignedAdd; 2], 1)?;
+    columns.prepare_row(&vec![7, -4])?.commit();
+    assert_eq!(columns.column_result(0), Some(7));
+    assert_eq!(columns.column_result(1), Some(-4));
+
     let mut graph = RelationshipGraph::new(2, 1);
     assert!(graph.add_edge(0, 1, 1)?);
+    let adjacency = graph
+        .materialize(PositionalEdgeHandles { count: 1 }, AllEdges)
+        .map_err(|(reason, _, _, _)| reason)?;
+    assert_eq!(adjacency.edge_count(), 1);
+    assert_eq!(adjacency.edge(&0), Some((0, 1, 1)));
+    assert_eq!(
+        adjacency.incident(0, EdgeDirection::Outgoing),
+        Some([0].as_slice())
+    );
+    assert_eq!(
+        adjacency.incident(1, EdgeDirection::Incoming),
+        Some([0].as_slice())
+    );
+    assert_eq!(adjacency.rank_of(&0, EdgeDirection::Incoming), Some(0));
 
     let mut sampler = Sampler::new(vec![1, 1], 1);
     sampler.sample(0)?;
@@ -172,7 +250,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         classes,
         rate_limit,
         reduction,
-        graph,
+        incremental,
+        columns,
+        adjacency,
         sampler,
         select_then_actuate,
         signal,

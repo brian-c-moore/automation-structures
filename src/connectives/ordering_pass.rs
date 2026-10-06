@@ -144,6 +144,7 @@ impl PositionOrder for SignedRowOrder<'_> {
             implies self.key_le(a, c) by {}
     }
     fn len(&self) -> (n: usize) { self.values.len() }
+    #[expect(clippy::indexing_slicing, reason = "PositionOrder requires both positions below the immutable row-value length")]
     fn compare(&self, left: usize, right: usize) -> (ordering: i8) {
         use crate::primitives::audit_sink::NullableSigned::{Missing, Value};
         match (self.values[left], self.values[right]) {
@@ -214,4 +215,148 @@ pub fn try_arrange_indices<C: PositionOrder>(row_count: usize, order: &C)
     Ok(positions)
 }
 
+/// The forward and inverse arrays describe the same exact finite permutation.
+pub open spec fn inverse_permutation(positions: Seq<usize>, inverse: Seq<usize>) -> bool {
+    &&& permutation(positions, positions.len())
+    &&& inverse.len() == positions.len()
+    &&& forall|rank: int| 0 <= rank < positions.len() ==>
+        #[trigger] inverse[positions[rank] as int] == rank
+    &&& forall|original: int| 0 <= original < inverse.len() ==>
+        #[trigger] inverse[original] < positions.len()
+            && positions[inverse[original] as int] == original
+}
+
+/// Immutable forward and inverse views of one canonical finite arrangement.
+/// The two arrays are jointly owned certificates of the same permutation.
+/// Neither view permits mutation or a replacement ordering authority.
+///
+/// ```rust
+/// use automation_structures::connectives::ordering_pass::{IndexArrangement, SignedRowOrder};
+/// use automation_structures::NullableSigned::Value;
+/// let values = vec![Value(9), Value(2), Value(9)];
+/// let order = SignedRowOrder { values: &values, descending: false, nulls_first: false };
+/// let arranged = IndexArrangement::try_new(values.len(), &order)?;
+/// assert_eq!(arranged.positions(), &[1, 0, 2]);
+/// assert_eq!(arranged.rank_of(0), Some(1));
+/// # Ok::<(), automation_structures::ArrangementError>(())
+/// ```
+/// An immutable view cannot replace an arranged position:
+/// ```compile_fail
+/// use automation_structures::connectives::ordering_pass::{IndexArrangement, SignedRowOrder};
+/// let values = vec![automation_structures::NullableSigned::Value(1)];
+/// let order = SignedRowOrder { values: &values, descending: false, nulls_first: false };
+/// let arranged = IndexArrangement::try_new(1, &order)?;
+/// arranged.positions()[0] = 9;
+/// # Ok::<(), automation_structures::ArrangementError>(())
+/// ```
+pub struct IndexArrangement {
+    positions: Vec<usize>,
+    inverse: Vec<usize>,
+}
+
+impl IndexArrangement {
+    /// Exact immutable finite universe and its two mutually inverse views.
+    pub closed spec fn inv(&self) -> bool {
+        inverse_permutation(self.positions@, self.inverse@)
+    }
+    /// Original input position at every arranged rank.
+    pub closed spec fn positions_spec(&self) -> Seq<usize> { self.positions@ }
+    /// Arranged rank at every original input position.
+    pub closed spec fn inverse_spec(&self) -> Seq<usize> { self.inverse@ }
+    /// Expose the same owner's joint permutation facts to verified compositions.
+    pub proof fn expose_certificate(&self)
+        requires self.inv(),
+        ensures inverse_permutation(self.positions_spec(), self.inverse_spec()),
+    {}
+
+    /// Reuse the existing finite arrangement and construct its inverse once.
+    /// Cursor owns visitation; no sorting algorithm or caller scan is added.
+    ///
+    /// # Errors
+    /// Refuses an out-of-domain count or either fallible array reservation.
+    #[expect(clippy::indexing_slicing, reason = "the arrangement Cursor and admitted permutation certificate bound each original-position read")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the arrangement Cursor advances only while strictly below the fixed count")]
+    pub fn try_new<C: PositionOrder>(count: usize, order: &C)
+        -> (result: Result<Self, ArrangementError>)
+        ensures result is Ok ==> result.unwrap().inv()
+            && inverse_permutation(result.unwrap().positions_spec(), result.unwrap().inverse_spec())
+            && result.unwrap().positions_spec().len() == count
+            && arranged(result.unwrap().positions_spec(), order)
+            && count <= order.domain_len(),
+            (result matches Err(ArrangementError::OutsideDomain)) == (count > order.domain_len()),
+    {
+        let positions = match try_arrange_indices(count, order) {
+            Ok(positions) => positions,
+            Err(reason) => { return Err(reason); },
+        };
+        let mut inverse = Vec::new();
+        if inverse.try_reserve(count).is_err() { return Err(ArrangementError::Allocation); }
+        extend_identity(&mut inverse, count);
+        let mut cursor = crate::connectives::cursor::Cursor::new(0);
+        while cursor.position < count
+            invariant cursor.position <= count,
+                count <= order.domain_len(),
+                permutation(positions@, count as nat), arranged(positions@, order),
+                inverse@.len() == count,
+                forall|rank: int| 0 <= rank < cursor.position ==>
+                    #[trigger] inverse@[positions@[rank] as int] == rank,
+            decreases count - cursor.position,
+        {
+            let rank = cursor.position;
+            let original = positions[rank];
+            inverse.set(original, rank);
+            cursor.advance_to(rank + 1);
+        }
+        assert forall|original: int| 0 <= original < inverse@.len() implies
+            #[trigger] inverse@[original] < positions@.len()
+                && positions@[inverse@[original] as int] == original by {
+            assert(positions@.contains(original as usize));
+            let rank = choose|rank: int| 0 <= rank < positions@.len()
+                && positions@[rank] == original;
+            assert(inverse@[original] == rank);
+        }
+        Ok(Self { positions, inverse })
+    }
+
+    /// Borrow the arranged original positions without a mutable array escape.
+    pub fn positions(&self) -> (positions: &[usize])
+        requires self.inv(), ensures positions@ == self.positions_spec(),
+    { self.positions.as_slice() }
+    /// Borrow the inverse certificate without a mutable array escape.
+    pub fn inverse(&self) -> (inverse: &[usize])
+        requires self.inv(), ensures inverse@ == self.inverse_spec(),
+    { self.inverse.as_slice() }
+    /// Number of admitted positions.
+    pub fn len(&self) -> (length: usize)
+        requires self.inv(), ensures length == self.positions_spec().len(),
+    { self.positions.len() }
+    /// Whether the admitted universe is empty.
+    pub fn is_empty(&self) -> (empty: bool)
+        requires self.inv(), ensures empty == (self.positions_spec().len() == 0),
+    { self.positions.is_empty() }
+    /// Observe an original position at one rank; foreign ranks return None.
+    #[expect(clippy::indexing_slicing, reason = "the runtime rank guard checks the immutable positions length")]
+    pub fn original_at(&self, rank: usize) -> (original: Option<usize>)
+        requires self.inv(), ensures original ==
+            if rank < self.positions_spec().len() { Some(self.positions_spec()[rank as int]) }
+            else { None },
+    { if rank < self.positions.len() { Some(self.positions[rank]) } else { None } }
+    /// Observe an arranged rank for an original position; foreign inputs return None.
+    #[expect(clippy::indexing_slicing, reason = "the runtime original-position guard checks the immutable inverse length")]
+    pub fn rank_of(&self, original: usize) -> (rank: Option<usize>)
+        requires self.inv(), ensures rank ==
+            if original < self.inverse_spec().len() { Some(self.inverse_spec()[original as int]) }
+            else { None },
+    { if original < self.inverse.len() { Some(self.inverse[original]) } else { None } }
+}
+
+}
+
+impl core::fmt::Debug for IndexArrangement {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("IndexArrangement")
+            .field("positions", &self.positions())
+            .finish()
+    }
 }
