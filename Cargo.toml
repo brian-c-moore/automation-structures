@@ -46,7 +46,7 @@ proof-api = []
 
 [dependencies]
 vstd = "=0.0.0-2026-05-24-0157"
-indexmap = "=2.14.0"
+indexmap = "=2.14.2"
 
 [package.metadata.verus]
 verify = true
