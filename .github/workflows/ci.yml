@@ -93,7 +93,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the minimum supported Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
       - name: Compile and run every known-answer executable
         shell: bash
         env:
@@ -126,7 +126,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the minimum supported Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
       - name: Build and consume the publication archive
         env:
           RUSTUP_TOOLCHAIN: 1.95.0

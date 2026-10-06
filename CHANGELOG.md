@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Install Clippy and rustfmt in the known-answer and package CI jobs so standalone fixtures and packaged consumers can run their required lint and formatting checks.
+- Update the pinned indexmap dependency from 2.14.0 to 2.14.2.
+
 ## 0.3.0
 
 - Add dynamic typed candidate traversal through the existing Registry, QualityHierarchy, OrderingPass and TraversalEngine, preserving original context and payload custody.

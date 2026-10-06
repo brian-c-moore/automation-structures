@@ -201,7 +201,7 @@ Verified downstream crates can enable the proof API directly:
 
 ```toml
 [dependencies]
-automation-structures = { version = "0.3.0", features = ["proof-api"] }
+automation-structures = { version = "0.3.1", features = ["proof-api"] }
 ```
 
 Use crate-root types in application code. Enabling `proof-api` keeps the checked API available
