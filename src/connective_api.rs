@@ -7,7 +7,7 @@
 use vstd::prelude::*;
 
 use crate::connectives::accumulator::Accumulator as AccumulatorCarrier;
-use crate::connectives::buffer::Buffer as BufferCarrier;
+use crate::connectives::buffer::{Buffer as BufferCarrier, BufferLayout, ContiguousStorage};
 use crate::connectives::counter::Counter as CounterCarrier;
 use crate::connectives::marker::Marker as MarkerCarrier;
 use crate::value_eq::ValueEq;
@@ -67,14 +67,12 @@ impl<T: Copy> Accumulator<T> {
 
     /// Total number of values across both segments when representable by `usize`.
     pub fn checked_len(&self) -> Option<usize> {
-        self.inner
-            .accumulated_len()
-            .checked_add(self.inner.pending_len())
+        self.inner.checked_total_len()
     }
 
     /// Whether both segments are empty.
     pub fn is_empty(&self) -> bool {
-        self.inner.accumulated_len() == 0 && self.inner.pending_len() == 0
+        self.inner.total_is_empty()
     }
 
     /// Number of values already accumulated.
@@ -135,8 +133,8 @@ impl<T: Copy> Accumulator<T> {
 /// assert_eq!(buffer.push("full"), Err("full"));
 /// assert_eq!(buffer.pop(), Some("first"));
 /// ```
-pub struct Buffer<T> {
-    inner: BufferCarrier<T>,
+pub struct Buffer<T, S: BufferLayout<T> = ContiguousStorage> {
+    inner: BufferCarrier<T, S>,
 }
 
 impl<T> Buffer<T> {
@@ -146,6 +144,9 @@ impl<T> Buffer<T> {
         ensures buffer.well_formed(), buffer.retained() == values@,
             buffer.admitted_capacity() == values@.len(),
     { Self { inner: BufferCarrier::from_values(values) } }
+
+}
+impl<T, S: BufferLayout<T>> Buffer<T, S> {
 
     /// Logical FIFO contents used by proof consumers.
     pub closed spec fn retained(&self) -> Seq<T> {
@@ -171,6 +172,32 @@ impl<T> Buffer<T> {
     pub closed spec fn distinct(&self) -> bool {
         crate::connectives::buffer::all_distinct(self.inner.values@)
     }
+
+    /// Construct the selected sealed layout through the existing Buffer owner.
+    pub fn with_storage(capacity: usize) -> (buffer: Self)
+        ensures buffer.well_formed(), buffer.distinct(),
+            buffer.admitted_capacity() == capacity as nat,
+            buffer.retained() == Seq::<T>::empty(),
+            forall|value: T| !buffer.contains_retained(value),
+    { Self { inner: BufferCarrier::<T, S>::with_storage(capacity) } }
+
+    /// Reserve the selected physical layout before any checked FIFO publication.
+    ///
+    /// # Errors
+    /// Returns the standard allocator refusal before constructing the owner.
+    pub fn try_with_storage(capacity: usize)
+        -> (result: Result<Self, std::collections::TryReserveError>)
+        ensures result is Ok ==> result->Ok_0.well_formed(),
+            result is Ok ==> result->Ok_0.distinct(),
+            result is Ok ==> result->Ok_0.admitted_capacity() == capacity as nat,
+            result is Ok ==> result->Ok_0.retained() == Seq::<T>::empty(),
+            result is Ok ==> forall|value: T| !result->Ok_0.contains_retained(value),
+    {
+        let inner = BufferCarrier::<T, S>::try_with_storage(capacity)?;
+        Ok(Self { inner })
+    }
+}
+impl<T> Buffer<T> {
 
     /// Construct an empty FIFO with a fixed capacity.
     pub fn new(capacity: usize) -> (buffer: Self)
@@ -203,6 +230,9 @@ impl<T> Buffer<T> {
         Ok(Self { inner })
     }
 
+}
+impl<T, S: BufferLayout<T>> Buffer<T, S> {
+
     /// Fixed FIFO capacity.
     pub fn capacity(&self) -> (capacity: usize)
         ensures capacity as nat == self.admitted_capacity(),
@@ -224,12 +254,23 @@ impl<T> Buffer<T> {
         self.inner.is_empty()
     }
 
+    /// Borrow an original value by FIFO position in either physical layout.
+    pub fn get(&self, index: usize) -> (value: Option<&T>)
+        ensures value is Some <==> index < self.retained().len(),
+            value matches Some(value) ==> *value == self.retained()[index as int],
+    {
+        crate::connectives::buffer::BufferStorage::value_at(&self.inner.values, index)
+    }
+
     /// Whether the FIFO is at capacity.
     pub fn is_full(&self) -> (full: bool)
         ensures full == (self.retained().len() == self.admitted_capacity()),
     {
         self.inner.is_full()
     }
+
+}
+impl<T> Buffer<T> {
 
     /// Query the encoded-size total through the existing Buffer owner and Reduction.
     ///
@@ -248,6 +289,9 @@ impl<T> Buffer<T> {
     {
         self.inner.projected_size(projection)
     }
+
+}
+impl<T, S: BufferLayout<T>> Buffer<T, S> {
 
     /// Push one value, returning it unchanged when the FIFO is full.
     ///
@@ -464,11 +508,6 @@ impl<T: Copy + core::fmt::Debug> core::fmt::Debug for Accumulator<T> {
 }
 
 impl<T> Buffer<T> {
-    /// Borrow a retained value by FIFO position.
-    pub fn get(&self, index: usize) -> Option<&T> {
-        self.inner.values.get(index)
-    }
-
     /// Borrow the retained FIFO contents.
     pub fn as_slice(&self) -> &[T] {
         self.inner.values.as_slice()
@@ -477,6 +516,13 @@ impl<T> Buffer<T> {
     /// Borrow the retained values in FIFO order.
     pub fn iter(&self) -> core::slice::Iter<'_, T> {
         self.inner.values.iter()
+    }
+}
+
+impl<T> Buffer<T, crate::connectives::buffer::FifoStorage> {
+    /// Borrow retained FIFO values in order without making them contiguous.
+    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, T> {
+        self.inner.values.values.iter()
     }
 }
 

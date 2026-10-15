@@ -46,6 +46,7 @@ mod registry_storage_seal {
         pub trait Sealed {}
         pub trait Layout<K, V> {}
         pub trait Search<K, V, Q> {}
+        pub trait IndexedKey {}
     }
 }
 
@@ -65,6 +66,18 @@ impl std::hash::Hash for ByteKey {
 impl std::borrow::Borrow<[u8]> for ByteKey {
     fn borrow(&self) -> &[u8] {
         self.as_bytes()
+    }
+}
+
+impl<K: IndexedRegistryKey> PartialEq for BorrowedRegistryKey<'_, K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+impl<K: IndexedRegistryKey> Eq for BorrowedRegistryKey<'_, K> {}
+impl<K: IndexedRegistryKey> std::hash::Hash for BorrowedRegistryKey<'_, K> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(self.key, state);
     }
 }
 
@@ -386,11 +399,29 @@ impl<K: RegistryKey> KeyIdentity for K {
     }
 }
 
+/// Temporary immutable key borrow for the same Registry identity and storage binding.
+/// The original key stays in its owned input; this adapter owns no membership or index.
+pub(crate) struct BorrowedRegistryKey<'a, K: KeyIdentity> {
+    pub(crate) key: &'a K,
+}
+impl<K: KeyIdentity> KeyIdentity for BorrowedRegistryKey<'_, K> {
+    type Identity = K::Identity;
+    closed spec fn identity(&self) -> K::Identity { self.key.identity() }
+    fn key_equal(&self, other: &Self) -> (equal: bool) { self.key.key_equal(other.key) }
+}
+impl<K: KeyIdentity> BorrowedRegistryKey<'_, K> {
+    pub(crate) proof fn expose_identity(&self)
+        ensures self.identity() == self.key.identity(),
+    {}
+}
+
 /// A borrowed query interpreted in the same key domain as the retained key.
 pub trait RegistryQuery<K: KeyIdentity>: Sized {
     /// Logical identity of the query; it is not retained by the registry.
     spec fn query_identity(&self) -> K::Identity;
-    /// Compare the query with one retained key without allocating another key.
+    /// Compare borrowed query and key representations in the admitted domain.
+    /// Result correspondence does not constrain the adapter's physical allocation
+    /// or callback effects; those require the concrete binding's premises.
     fn matches_key(&self, key: &K) -> (equal: bool)
         ensures equal == (self.query_identity() == key.identity());
 }
@@ -592,17 +623,94 @@ pub trait RegistryLayout<K, V>: registry_storage_seal::Layout<K, V> {
 }
 /// Published Vec representation; this type adds no runtime state.
 pub struct LinearStorage;
-/// Indexed byte-key representation; this type adds no runtime state.
+/// Indexed representation over the library's admitted immutable key domains.
 pub struct IndexedStorage;
+/// Physical hash/equality binding, not an additional Registry obligation.
+///
+/// Sealing restricts this binding to standard u64 equality/hashing and the
+/// existing exact ByteKey encoding, including immutable borrows of those keys.
+/// Generic KeyIdentity adapters retain their
+/// original storage choices; their contracts do not imply hash correspondence.
+pub trait IndexedRegistryKey:
+    KeyIdentity + Eq + std::hash::Hash + registry_storage_seal::IndexedKey {}
+impl registry_storage_seal::IndexedKey for u64 {}
+impl registry_storage_seal::IndexedKey for ByteKey {}
+impl IndexedRegistryKey for u64 {}
+impl IndexedRegistryKey for ByteKey {}
+impl<K: IndexedRegistryKey> registry_storage_seal::IndexedKey for BorrowedRegistryKey<'_, K> {}
+impl<K: IndexedRegistryKey> IndexedRegistryKey for BorrowedRegistryKey<'_, K> {}
 impl registry_storage_seal::Sealed for LinearStorage {}
 impl registry_storage_seal::Sealed for IndexedStorage {}
 impl<K, V> registry_storage_seal::Layout<K, V> for LinearStorage {}
-impl<V> registry_storage_seal::Layout<ByteKey, V> for IndexedStorage {}
+impl<K: IndexedRegistryKey, V> registry_storage_seal::Layout<K, V> for IndexedStorage {}
 impl<K, V> RegistryLayout<K, V> for LinearStorage {
     type Entries = Vec<(K, V)>;
 }
-impl<V> RegistryLayout<ByteKey, V> for IndexedStorage {
-    type Entries = IndexedEntries<V>;
+impl<K: IndexedRegistryKey, V> RegistryLayout<K, V> for IndexedStorage {
+    type Entries = IndexedEntries<V, K>;
+}
+impl registry_storage_seal::Sealed for crate::connectives::buffer::FifoStorage {}
+impl<K, V> registry_storage_seal::Layout<K, V> for crate::connectives::buffer::FifoStorage {}
+impl<K, V> RegistryLayout<K, V> for crate::connectives::buffer::FifoStorage {
+    type Entries = crate::connectives::buffer::FifoValues<(K, V)>;
+}
+
+impl<K, V> registry_storage_seal::Sealed for crate::connectives::buffer::FifoValues<(K, V)> {}
+impl<K, V, Q> registry_storage_seal::Search<K, V, Q> for crate::connectives::buffer::FifoValues<(K, V)> {}
+impl<K: KeyIdentity, V, Q: RegistryQuery<K>> RegistrySearch<K, V, Q>
+    for crate::connectives::buffer::FifoValues<(K, V)> {}
+
+impl<K: KeyIdentity, V> RegistryStorage<K, V> for crate::connectives::buffer::FifoValues<(K, V)> {
+    fn len(&self) -> (length: usize) {
+        proof { self.expose_view(); }
+        self.values.len()
+    }
+    fn try_reserve_additional(&mut self, additional: usize) -> (reserved: bool) {
+        crate::connectives::buffer::BufferStorage::try_reserve_values(self, additional).is_ok()
+    }
+    #[expect(clippy::indexing_slicing, reason = "the storage guard checks the retained deque position before borrowing its key")]
+    fn key_at(&self, i: usize) -> (key: Option<&K>) {
+        proof { self.expose_view(); }
+        if i < self.values.len() { Some(&self.values[i].0) } else { None }
+    }
+    #[expect(clippy::indexing_slicing, reason = "the storage guard checks the retained deque position before borrowing its value")]
+    fn value_at(&self, i: usize) -> (value: Option<&V>) {
+        proof { self.expose_view(); }
+        if i < self.values.len() { Some(&self.values[i].1) } else { None }
+    }
+    /// Standard mutable data-borrow premise absent from pinned vstd. Only the
+    /// selected value may change; its key and all other physical entries stay fixed.
+    #[verifier::external_body]
+    fn value_mut_at(&mut self, i: usize) -> (value: Option<&mut V>) {
+        self.values.get_mut(i).map(|entry| &mut entry.1)
+    }
+    fn push(&mut self, pair: (K, V)) {
+        proof { self.expose_view(); }
+        self.values.push_back(pair);
+        proof { self.expose_view(); }
+    }
+    fn remove(&mut self, i: usize) -> (pair: Option<(K, V)>) {
+        proof { self.expose_view(); }
+        let pair = self.values.remove(i);
+        proof { self.expose_view(); }
+        pair
+    }
+}
+
+impl<K: KeyIdentity, V> ResourceRegistry<K, V, crate::connectives::buffer::FifoStorage> {
+    /// Select FIFO backing for the existing unique-mapping owner.
+    pub fn new_fifo() -> (registry: Self)
+        ensures registry.entries@.len() == 0, registry.unique_identities(),
+    { Self { entries: crate::connectives::buffer::BufferStorage::empty() } }
+
+    /// Reserve physical entries before any Registry publication.
+    ///
+    /// # Errors
+    /// Returns the standard allocator refusal without changing a binding.
+    pub fn try_reserve_entries(&mut self, additional: usize)
+        -> (result: Result<(), std::collections::TryReserveError>)
+        ensures final(self).entries@ == old(self).entries@,
+    { crate::connectives::buffer::BufferStorage::try_reserve_values(&mut self.entries, additional) }
 }
 
 /// Sealed physical entry representation of the one ResourceRegistry owner.
@@ -648,11 +756,29 @@ pub trait RegistryStorage<K: KeyIdentity, V>: registry_storage_seal::Sealed + Vi
 pub trait RegistrySearch<K: KeyIdentity, V, Q: RegistryQuery<K>>:
     RegistryStorage<K, V> + registry_storage_seal::Search<K, V, Q> {
     /// Locate an equal key; the query is not retained.
+    #[expect(clippy::arithmetic_side_effects, reason = "the search cursor advances only while strictly below the unchanged storage length")]
     fn find_position(&self, query: &Q) -> (position: Option<usize>)
         ensures
             position matches Some(i) ==> i < self@.len()
                 && self@[i as int].0.identity() == query.query_identity(),
-            position is None ==> !has_key(identity_entries(self@), self@.len() as int, query.query_identity());
+            position is None ==> !has_key(identity_entries(self@), self@.len() as int, query.query_identity()),
+    {
+        let len = self.len();
+        let mut i: usize = 0;
+        while i < len
+            invariant i <= len, len == self@.len(),
+                forall|t: int| 0 <= t < i ==> self@[t].0.identity() != query.query_identity(),
+            decreases len - i,
+        {
+            let key = match self.key_at(i) {
+                Some(key) => key,
+                None => { proof { assert(false); } return None; },
+            };
+            if query.matches_key(key) { return Some(i); }
+            i = i + 1;
+        }
+        None
+    }
 }
 
 impl<K, V> registry_storage_seal::Sealed for Vec<(K, V)> {}
@@ -681,13 +807,13 @@ impl<K: KeyIdentity, V> RegistryStorage<K, V> for Vec<(K, V)> {
 }
 
 impl<K: KeyIdentity, V, Q: RegistryQuery<K>> RegistrySearch<K, V, Q> for Vec<(K, V)> {
-    #[expect(clippy::indexing_slicing, reason = "the search loop guards i < the unchanged physical storage length")]
-    #[expect(clippy::arithmetic_side_effects, reason = "the search cursor advances only while strictly below the unchanged storage length")]
+    #[expect(clippy::indexing_slicing, reason = "the search loop checks i < the unchanged retained Vec length before borrowing a key")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the search cursor advances only while strictly below the unchanged Vec length")]
     fn find_position(&self, query: &Q) -> (position: Option<usize>) {
         let len = self.len();
         let mut i: usize = 0;
         while i < len
-            invariant i <= len, len == self.len(),
+            invariant i <= len, len == self@.len(),
                 forall|t: int| 0 <= t < i ==> self@[t].0.identity() != query.query_identity(),
             decreases len - i,
         {
@@ -702,18 +828,19 @@ impl<K: KeyIdentity, V, Q: RegistryQuery<K>> RegistrySearch<K, V, Q> for Vec<(K,
 /// Its ordered logical entry view is bound by the concrete library-call premises below.
 #[verifier::external_body]
 #[verifier::reject_recursive_types(V)]
-pub struct IndexedEntries<V> {
-    map: indexmap::IndexMap<ByteKey, V>,
+#[verifier::reject_recursive_types(K)]
+pub struct IndexedEntries<V, K = ByteKey> {
+    map: indexmap::IndexMap<K, V>,
 }
-impl<V> registry_storage_seal::Sealed for IndexedEntries<V> {}
-impl<V> registry_storage_seal::Search<ByteKey, V, ByteKey> for IndexedEntries<V> {}
+impl<K, V> registry_storage_seal::Sealed for IndexedEntries<V, K> {}
+impl<K: IndexedRegistryKey, V> registry_storage_seal::Search<K, V, K> for IndexedEntries<V, K> {}
 impl<V> registry_storage_seal::Search<ByteKey, V, &[u8]> for IndexedEntries<V> {}
-impl<V> View for IndexedEntries<V> {
-    type V = Seq<(ByteKey, V)>;
+impl<K, V> View for IndexedEntries<V, K> {
+    type V = Seq<(K, V)>;
     uninterp spec fn view(&self) -> Self::V;
 }
 
-impl<V> IndexedEntries<V> {
+impl<K: IndexedRegistryKey, V> IndexedEntries<V, K> {
     /// Physical library capacity observation, separate from the logical mapping.
     pub uninterp spec fn capacity_spec(&self) -> nat;
     /// Library premise: capacity covers retained entries and fits usize.
@@ -734,47 +861,52 @@ impl<V> IndexedEntries<V> {
     { Self { map: indexmap::IndexMap::new() } }
 }
 
-impl<V> RegistryStorage<ByteKey, V> for IndexedEntries<V> {
+impl<K: IndexedRegistryKey, V> RegistryStorage<K, V> for IndexedEntries<V, K> {
     #[verifier::external_body]
     fn len(&self) -> (n: usize) { self.map.len() }
     fn try_reserve_additional(&mut self, additional: usize) -> (reserved: bool) {
         self.try_reserve(additional)
     }
     #[verifier::external_body]
-    fn key_at(&self, i: usize) -> (key: Option<&ByteKey>) {
+    #[inline]
+    fn key_at(&self, i: usize) -> (key: Option<&K>) {
         self.map.get_index(i).map(|(key, _)| key)
     }
     #[verifier::external_body]
+    #[inline]
     fn value_at(&self, i: usize) -> (value: Option<&V>) {
         self.map.get_index(i).map(|(_, value)| value)
     }
     #[verifier::external_body]
+    #[inline]
     fn value_mut_at(&mut self, i: usize) -> (value: Option<&mut V>) {
         self.map.get_index_mut(i).map(|(_, value)| value)
     }
     #[verifier::external_body]
-    fn push(&mut self, pair: (ByteKey, V)) { self.map.insert(pair.0, pair.1); }
+    fn push(&mut self, pair: (K, V)) { self.map.insert(pair.0, pair.1); }
     #[verifier::external_body]
-    fn remove(&mut self, i: usize) -> (pair: Option<(ByteKey, V)>) {
+    fn remove(&mut self, i: usize) -> (pair: Option<(K, V)>) {
         self.map.shift_remove_index(i)
     }
 }
 
-impl<V> RegistrySearch<ByteKey, V, ByteKey> for IndexedEntries<V> {
+impl<K: IndexedRegistryKey, V> RegistrySearch<K, V, K> for IndexedEntries<V, K> {
     #[verifier::external_body]
-    fn find_position(&self, query: &ByteKey) -> (position: Option<usize>) {
+    #[inline]
+    fn find_position(&self, query: &K) -> (position: Option<usize>) {
         self.map.get_index_of(query)
     }
 }
 impl<V> RegistrySearch<ByteKey, V, &[u8]> for IndexedEntries<V> {
     #[verifier::external_body]
+    #[inline]
     fn find_position(&self, query: &&[u8]) -> (position: Option<usize>) {
         self.map.get_index_of(*query)
     }
 }
 
-impl<V> ResourceRegistry<ByteKey, V, IndexedStorage> {
-    /// Construct the indexed byte-key representation of the existing Registry.
+impl<K: IndexedRegistryKey, V> ResourceRegistry<K, V, IndexedStorage> {
+    /// Construct the existing indexed representation for an admitted key domain.
     pub fn new_indexed() -> (r: Self)
         ensures r.entries@.len() == 0, r.unique_identities(),
     { Self { entries: IndexedEntries::empty() } }
@@ -789,7 +921,7 @@ impl<V> ResourceRegistry<ByteKey, V, IndexedStorage> {
     ///
     /// # Errors
     /// Returns the unconsumed key/value if storage reservation fails; bindings are unchanged.
-    pub fn try_register_key(&mut self, key: ByteKey, value: V) -> (result: Result<(), (ByteKey, V)>)
+    pub fn try_register_key(&mut self, key: K, value: V) -> (result: Result<(), (K, V)>)
         requires old(self).unique_identities(),
         ensures final(self).unique_identities(),
             result is Err ==> result.unwrap_err() == (key, value)
@@ -829,6 +961,7 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
     where S::Entries: RegistrySearch<K, V, K>,
 {
     /// Borrow the actual retained owner at a known position without replacing it.
+    #[inline]
     pub fn value_mut_at(&mut self, i: usize) -> (value: Option<&mut V>)
         requires old(self).unique_identities(),
         ensures value is Some <==> i < old(self).entries@.len(),
@@ -854,6 +987,7 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
     }
 
     /// Locate a borrowed key and borrow its retained owner, preserving other entries.
+    #[inline]
     pub fn lookup_query_mut<Q: RegistryQuery<K>>(&mut self, query: &Q) -> (value: Option<&mut V>)
         where S::Entries: RegistrySearch<K, V, Q>,
         requires old(self).unique_identities(),
@@ -921,6 +1055,21 @@ pub open spec fn selected_count<K, V, P: RegistryPredicate<K, V>>(
     if length <= 0 || length > entries.len() { 0 }
     else { selected_count(entries, length - 1, predicate)
         + if predicate.selected(entries[length - 1].0, entries[length - 1].1) { 1int } else { 0int } }
+}
+
+proof fn selected_count_monotone<K, V, P: RegistryPredicate<K, V>>(
+    entries: Seq<(K, V)>, start: int, end: int, predicate: P,
+)
+    requires 0 <= start <= end <= entries.len(),
+    ensures selected_count(entries, start, predicate) <= selected_count(entries, end, predicate),
+    decreases end - start,
+{
+    if start < end {
+        selected_count_monotone(entries, start, end - 1, predicate);
+        assert(selected_count(entries, end, predicate)
+            == selected_count(entries, end - 1, predicate)
+                + if predicate.selected(entries[end - 1].0, entries[end - 1].1) { 1int } else { 0int });
+    }
 }
 
 // Borrowed domain content only; the named Reduction retains all traversal state.
@@ -1004,7 +1153,7 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
             return Err((RegistryInsertError::StorageUnavailable, key, value));
         }
         let position = self.entries.len();
-        self.register_key(key, value);
+        self.register_absent_key(key, value);
         Ok(position)
     }
 
@@ -1033,9 +1182,40 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
     }
 
     /// Whether at least one retained entry satisfies the domain predicate.
+    #[expect(clippy::arithmetic_side_effects, reason = "the retained Registry length bounds each canonical Cursor successor")]
     pub fn any_matching<P: RegistryPredicate<K, V>>(&self, predicate: &P) -> (any: bool)
         ensures any == (selected_count(self.entries@, self.entries@.len() as int, *predicate) > 0),
-    { self.count_matching(predicate) > 0 }
+    {
+        let length = self.entries.len();
+        let mut cursor = crate::connectives::cursor::Cursor::new(0);
+        while cursor.position < length
+            invariant cursor.position <= length, length == self.entries@.len(),
+                selected_count(self.entries@, cursor.position as int, *predicate) == 0,
+            decreases length - cursor.position,
+        {
+            let position = cursor.position;
+            let key = match self.entries.key_at(position) {
+                Some(key) => key,
+                None => { proof { assert(false); } return false; },
+            };
+            let value = match self.entries.value_at(position) {
+                Some(value) => value,
+                None => { proof { assert(false); } return false; },
+            };
+            if predicate.test(key, value) {
+                proof {
+                    assert(selected_count(self.entries@, position as int + 1, *predicate) == 1);
+                    selected_count_monotone(self.entries@, position as int + 1, length as int, *predicate);
+                }
+                return true;
+            }
+            proof {
+                assert(selected_count(self.entries@, position as int + 1, *predicate) == 0);
+            }
+            cursor.advance_to(position + 1);
+        }
+        false
+    }
 
     /// Whether every retained entry satisfies the predicate; true for an empty Registry.
     pub fn all_matching<P: RegistryPredicate<K, V>>(&self, predicate: &P) -> (all: bool)
@@ -1119,6 +1299,7 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
     }
 
     /// Locate either a retained-key query or a borrowed representation using one search.
+    #[inline]
     fn find_key<Q: RegistryQuery<K>>(&self, query: &Q) -> (position: Option<usize>)
         where S::Entries: RegistrySearch<K, V, Q>,
         ensures
@@ -1127,7 +1308,10 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
             position is None ==> !self.contains_identity(query.query_identity()),
     { self.entries.find_position(query) }
 
-    /// Borrow the actual retained value using an allocation-free query representation.
+    /// Borrow the retained value without constructing a retained key or entry.
+    /// Physical allocation and callback behavior of comparison belong to the
+    /// admitted query/storage binding; a generic adapter alone supplies no such bound.
+    #[inline]
     pub fn lookup_query<'a, Q: RegistryQuery<K>>(&'a self, query: &Q) -> (res: Option<&'a V>)
         where S::Entries: RegistrySearch<K, V, Q>,
         requires self.unique_identities(),
@@ -1145,7 +1329,9 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
     }
 
     /// Take an owned binding through the same identity search and Deregister action.
-    /// Absent queries preserve every entry; no payload cloning or allocation occurs.
+    /// Absent queries preserve every entry. The action transfers the original pair
+    /// without cloning its payload or reserving entry storage. Physical allocation
+    /// and callback behavior of comparison remain the concrete binding's premises.
     pub fn take_query<Q: RegistryQuery<K>>(&mut self, query: &Q) -> (removed: Option<(K, V)>)
         where S::Entries: RegistrySearch<K, V, Q>,
         requires old(self).unique_identities(),
@@ -1307,6 +1493,30 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
                 assert(fb == old_entries);
             }
         }
+        self.register_absent_key(k, v);
+    }
+
+    /// Shared Register append after the owner has established exact key absence.
+    /// The caller retains exclusive custody and supplies storage admission.
+    /// This action performs no identity search. Physical push behavior remains
+    /// the selected sealed storage binding's premise, not a transaction guarantee.
+    pub(crate) fn register_absent_key(&mut self, k: K, v: V)
+        requires old(self).unique_identities(), !old(self).contains_key_identity(k),
+        ensures final(self).unique_identities(), final(self).maps_key(k, v),
+            final(self).entries@ == old(self).entries@.push((k, v)),
+            forall|kk: K| kk.identity() != k.identity() ==>
+                (#[trigger] final(self).contains_key_identity(kk) == old(self).contains_key_identity(kk)),
+            forall|kk: K, vv: V| kk.identity() != k.identity() ==>
+                (#[trigger] final(self).maps_key(kk, vv) == old(self).maps_key(kk, vv)),
+    {
+        let ghost fb = self.entries@;
+        assert forall|i: int| 0 <= i < fb.len() implies #[trigger] fb[i].0.identity() != k.identity() by {
+            identity_entry_at(fb, i);
+            if fb[i].0.identity() == k.identity() {
+                assert(self.contains_key_identity(k));
+                assert(false);
+            }
+        }
         proof { identity_entries_push(fb, k, v); }
         self.entries.push((k, v));
         // UniqueMapping: filtered is unique-key and has no key k; appending
@@ -1421,7 +1631,9 @@ impl<K: KeyIdentity, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
 }
 
 
-impl<K: RegistryKey, V> ResourceRegistry<K, V> {
+impl<K: RegistryKey, V, S: RegistryLayout<K, V>> ResourceRegistry<K, V, S>
+    where S::Entries: RegistrySearch<K, V, K>,
+{
 
     // ── Specifications ──────────────────────────────────────────────────
 
@@ -1607,4 +1819,65 @@ impl<K: RegistryKey, V> ResourceRegistry<K, V> {
     }
 }
 
+impl ResourceRegistry<u64, u64, IndexedStorage> {
+    /// Refine Register's remove-then-append sequence when the exact key is already last.
+    /// The existing positional value borrow retains every key and all other bindings.
+    #[expect(clippy::arithmetic_side_effects, reason = "the preceding nonempty check bounds the last position")]
+    pub(crate) fn replace_last_exact(&mut self, key: u64, value: u64) -> (previous: Option<u64>)
+        requires old(self).unique_mapping(),
+        ensures final(self).unique_mapping(),
+            (previous is Some) == (old(self).entries@.len() > 0
+                && old(self).entries@[old(self).entries@.len() as int - 1].0 == key),
+            previous is None ==> final(self).entries@ == old(self).entries@,
+            previous matches Some(prior) ==> old(self).maps_to(key, prior)
+                && final(self).maps_to(key, value)
+                && final(self).entries@
+                    == without_key_sequence(old(self).entries@, key).push((key, value)),
+    {
+        proof { identity_entries_are_exact(self.entries@); }
+        let count = self.entries.len();
+        if count == 0 { return None; }
+        let index = count - 1;
+        let ghost before = self.entries@;
+        let last_key = match self.entries.key_at(index) {
+            Some(last_key) => *last_key,
+            None => return None,
+        };
+        if last_key != key { return None; }
+        proof {
+            without_key_to_remove_unique(before, key, before.len() as int, index as int);
+        }
+        let previous = match self.value_mut_at(index) {
+            Some(retained) => {
+                let prior = *retained;
+                *retained = value;
+                prior
+            }
+            None => return None,
+        };
+        proof {
+            identity_entries_are_exact(self.entries@);
+            before.remove_ensures(index as int);
+            assert(before.subrange(0, before.len() as int) == before);
+            assert(before.update(index as int, (key, value))
+                =~= before.remove(index as int).push((key, value)));
+            assert(before[index as int].0 == key);
+            assert(before[index as int].1 == previous);
+            assert(old(self).maps_to(key, previous));
+            assert(self.entries@ == before.update(index as int, (key, value)));
+            assert(0 <= (index as int) && (index as int) < self.entries@.len());
+            assert(self.entries@[index as int] == (key, value));
+            assert(self.maps_to(key, value));
+        }
+        Some(previous)
+    }
+}
+
+}
+
+impl<K, V> IndexedEntries<V, K> {
+    /// Borrow the one retained indexed mapping in deterministic storage order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&K, &V)> {
+        self.map.iter()
+    }
 }

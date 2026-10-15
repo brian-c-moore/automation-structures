@@ -4,12 +4,12 @@
 
 use vstd::prelude::*;
 
-use crate::connectives::buffer::Buffer;
+use crate::connectives::buffer::{Buffer, BufferLayout, ContiguousStorage, FifoStorage};
 use crate::connectives::counter::Counter;
-use crate::connectives::cursor::Cursor;
+use crate::connectives::cursor::{Cursor, CursorPosition};
 use crate::connectives::marker::Marker;
 use crate::primitives::budget::Budget;
-use crate::primitives::resource_registry::ResourceRegistry;
+use crate::primitives::resource_registry::{RegistryStorage, ResourceRegistry};
 
 verus! {
 
@@ -23,12 +23,23 @@ pub enum TypedStreamError {
     SlotCapacity,
     /// The retained encoded-byte Budget refused publication.
     ByteCapacity,
+    /// A single item's encoded charge exceeds the owner's total byte ceiling.
+    ItemTooLarge,
     /// The next FIFO identity cannot be represented.
     SequenceExhausted,
     /// Producer closure forbids publication, or the closed FIFO has drained.
     Closed,
     /// The open FIFO has no value available for receipt.
     Empty,
+}
+
+/// Refusal priority for observations of the same publication admission predicate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypedStreamPublicationPolicy {
+    /// Preserve the default order: closure, slots, retained bytes, identity.
+    SlotFirst,
+    /// Check a single item's total byte ceiling before slot pressure.
+    ItemSizeFirst,
 }
 
 /// Publication refusal returning the exact original, unconsumed payload.
@@ -107,19 +118,37 @@ pub(crate) proof fn stream_bytes_same_charges<T>(before: Seq<(u64,(T,u64))>, aft
 /// Registry retains original payloads; Buffer retains only FIFO identities.
 /// Encoded bytes cover this owner's retained content until receipt transfers it
 /// to the caller. They are not a total or peak physical-memory measurement.
-/// The current Buffer/Registry layouts move remaining entries on receipt.
-pub struct TypedStream<T> {
+/// FIFO backing transfers the head without shifting retained Buffer/Registry entries.
+pub struct TypedStream<T, P: CursorPosition = usize> {
     scope: u64,
-    payloads: ResourceRegistry<u64, (T, u64)>,
-    queue: Buffer<u64>,
+    payloads: ResourceRegistry<u64, (T, u64), FifoStorage>,
+    queue: Buffer<u64, FifoStorage>,
     slots: Budget,
     bytes: Budget,
     published: Counter,
-    consumed: Cursor,
+    consumed: Cursor<P>,
     closed: Marker,
 }
 
-impl<T> TypedStream<T> {
+impl<T> TypedStream<T, usize> {
+    /// Construct the default usize lifetime profile, preserving caller inference.
+    ///
+    /// # Errors
+    /// Returns StorageUnavailable when physical storage reservation fails.
+    pub fn try_new(scope: u64, slots: usize, encoded_bytes: u64)
+        -> (result: Result<Self, TypedStreamError>)
+        ensures result matches Ok(stream) ==> stream.inv() && stream.scope_spec() == scope
+            && stream.entries_spec().len() == 0 && stream.published_spec() == 0
+            && stream.consumed_spec() == 0 && !stream.closed_spec()
+            && stream.encoded_bytes_spec() == 0
+            && stream.slot_limit_spec() == slots as nat && stream.byte_limit_spec() == encoded_bytes as nat,
+            result matches Err(error) ==> error == TypedStreamError::StorageUnavailable,
+    {
+        Self::try_with_position(scope, slots, encoded_bytes)
+    }
+}
+
+impl<T, P: CursorPosition> TypedStream<T, P> {
     /// Original payloads and their exact Registry-issued FIFO identities.
     pub closed spec fn entries_spec(&self) -> Seq<(u64, (T, u64))> { self.payloads.entries@ }
     /// Immutable caller-owned scope.
@@ -129,7 +158,7 @@ impl<T> TypedStream<T> {
     /// Exact committed publication count.
     pub closed spec fn published_spec(&self) -> nat { self.published.value_spec() }
     /// Exact consumed prefix owned by Cursor.
-    pub closed spec fn consumed_spec(&self) -> nat { self.consumed.position as nat }
+    pub closed spec fn consumed_spec(&self) -> nat { self.consumed.position.ordinal() }
     /// Producer closure owned by Marker.
     pub closed spec fn closed_spec(&self) -> bool { self.closed.marked }
     /// Immutable retained-slot ceiling.
@@ -143,7 +172,7 @@ impl<T> TypedStream<T> {
         !self.closed.marked && self.slots.used() + 1 <= self.slots.capacity as int
             && self.bytes.used() + encoded_bytes as int <= self.bytes.capacity as int
             && self.published.value_spec() < u64::MAX as nat
-            && self.published.value_spec() < usize::MAX as nat
+            && self.published.value_spec() < P::max_ordinal()
     }
     /// Export admission in terms of public retained-content and identity views.
     pub proof fn expose_admission(&self, encoded_bytes: u64)
@@ -152,8 +181,52 @@ impl<T> TypedStream<T> {
             && self.entries_spec().len() < self.slot_limit_spec()
             && self.encoded_bytes_spec() + encoded_bytes as nat <= self.byte_limit_spec()
             && self.published_spec() < u64::MAX as nat
-            && self.published_spec() < usize::MAX as nat),
+            && self.published_spec() < P::max_ordinal()),
     {}
+    /// Existing bounded-transfer contract projected from this same typed owner.
+    pub open spec fn bounded_transfer_model(&self) -> BoundedTransferModel<T> {
+        BoundedTransferModel {
+            slot_capacity: self.slot_limit_spec(), retained_byte_capacity: self.byte_limit_spec(),
+            values: Seq::new(self.entries_spec().len(), |i: int| self.entries_spec()[i].1.0),
+            registry: Seq::new(self.entries_spec().len(), |i: int|
+                (self.entries_spec()[i].0, self.entries_spec()[i].1.1)),
+            retained_bytes: self.encoded_bytes_spec(), head: self.consumed_spec(),
+            tail: self.published_spec(), closed: self.closed_spec(),
+        }
+    }
+    /// Export FIFO custody, limits and the already-owned transfer invariant.
+    pub proof fn expose_bounded_transfer(&self)
+        requires self.inv(),
+        ensures self.bounded_transfer_model().inv(),
+            self.consumed_spec() + self.entries_spec().len() == self.published_spec(),
+            self.published_spec() <= u64::MAX as nat,
+            self.entries_spec().len() <= usize::MAX as nat,
+            self.slot_limit_spec() <= usize::MAX as nat,
+            self.byte_limit_spec() <= u64::MAX as nat,
+            self.encoded_bytes_spec() <= u64::MAX as nat,
+            forall|i: int| 0 <= i < self.entries_spec().len() ==>
+                #[trigger] self.entries_spec()[i].0 as nat == self.consumed_spec() + i as nat,
+    {
+        self.queue.expose_capacity_bound();
+        let model = self.bounded_transfer_model();
+        assert forall|i: int| 0 <= i < self.entries_spec().len() implies
+            #[trigger] self.entries_spec()[i].0 as nat == self.consumed_spec() + i as nat by {
+            assert(self.payloads.entries@[i].0 == self.queue.values@[i]);
+            assert(self.queue.values@[i] as int == self.consumed.position.ordinal() as int + i);
+        }
+        assert forall|i: int| 0 <= i < model.registry.len() implies
+            #[trigger] model.registry[i].0 as nat == model.head + i as nat by {
+            assert(self.payloads.entries@[i].0 == self.queue.values@[i]);
+        }
+        assert forall|left: int, right: int| 0 <= left < model.registry.len()
+            && 0 <= right < model.registry.len() && left != right implies
+            #[trigger] model.registry[left].0 != #[trigger] model.registry[right].0 by {
+            assert(model.registry[left].0 as nat == model.head + left as nat);
+            assert(model.registry[right].0 as nat == model.head + right as nat);
+        }
+        assert(crate::primitives::resource_registry::unique_mapping_entries(model.registry));
+        assert(crate::connectives::ordering_pass::fifo_sequence_order(model.registry, model.head, model.tail));
+    }
     /// Coupling of actual FIFO, payload, identity, and charge owners.
     pub closed spec fn inv(&self) -> bool {
         &&& self.queue.well_formed()
@@ -167,10 +240,10 @@ impl<T> TypedStream<T> {
         &&& self.bytes.allocated as int == stream_bytes_to(self.payloads.entries@,
             self.payloads.entries@.len() as int)
         &&& self.payloads.entries@.len() == self.queue.values@.len()
-        &&& self.consumed.position as nat + self.queue.values@.len() == self.published.value_spec()
-        &&& self.published.value_spec() <= usize::MAX as nat
+        &&& self.consumed.position.ordinal() + self.queue.values@.len() == self.published.value_spec()
+        &&& self.published.value_spec() <= P::max_ordinal()
         &&& forall|index: int| 0 <= index < self.queue.values@.len() ==>
-            #[trigger] self.queue.values@[index] as int == self.consumed.position as int + index
+            #[trigger] self.queue.values@[index] as int == self.consumed.position.ordinal() as int + index
                 && self.payloads.entries@[index].0 == self.queue.values@[index]
     }
     /// Exact logical stutter, including all retained original payloads.
@@ -188,25 +261,26 @@ impl<T> TypedStream<T> {
     ///
     /// # Errors
     /// Returns StorageUnavailable when either physical reservation fails.
-    pub fn try_new(scope: u64, slots: usize, encoded_bytes: u64)
+    pub fn try_with_position(scope: u64, slots: usize, encoded_bytes: u64)
         -> (result: Result<Self, TypedStreamError>)
         ensures result matches Ok(stream) ==> stream.inv() && stream.scope_spec() == scope
             && stream.entries_spec().len() == 0 && stream.published_spec() == 0
             && stream.consumed_spec() == 0 && !stream.closed_spec()
             && stream.encoded_bytes_spec() == 0
             && stream.slot_limit_spec() == slots as nat && stream.byte_limit_spec() == encoded_bytes as nat,
+            result matches Err(error) ==> error == TypedStreamError::StorageUnavailable,
     {
-        let queue = match Buffer::try_new(slots) {
+        let queue = match Buffer::<u64, FifoStorage>::try_with_storage(slots) {
             Ok(queue) => queue,
             Err(_) => return Err(TypedStreamError::StorageUnavailable),
         };
-        let mut payloads = ResourceRegistry::new();
+        let mut payloads = ResourceRegistry::new_fifo();
         if payloads.try_reserve_entries(slots).is_err() {
             return Err(TypedStreamError::StorageUnavailable);
         }
         Ok(Self { scope, payloads, queue, slots: Budget::new(slots as u64),
             bytes: Budget::new(encoded_bytes), published: Counter::new(0),
-            consumed: Cursor::new(0), closed: Marker::new(false) })
+            consumed: Cursor::from_position(P::zero()), closed: Marker::new(false) })
     }
 
     /// Current occupancy, read from the Buffer owner.
@@ -223,13 +297,132 @@ impl<T> TypedStream<T> {
             bytes as int == stream_bytes_to(self.entries_spec(), self.entries_spec().len() as int),
     { self.bytes.allocated }
     /// Exact receipt count read from the retained Cursor owner.
-    pub fn received_count(&self) -> (count: usize) requires self.inv(),
-        ensures count as nat == self.consumed_spec(),
+    pub fn received_count(&self) -> (count: P) requires self.inv(),
+        ensures count.ordinal() == self.consumed_spec(),
     { self.consumed.position }
+    /// Exact publication count read from the retained Counter owner.
+    pub fn published_count(&self) -> (count: u64) requires self.inv(),
+        ensures count as nat == self.published_spec(),
+    { self.published.value() }
     /// Whether producer closure and actual FIFO drainage both hold.
     pub fn is_drained(&self) -> (drained: bool) requires self.inv(),
         ensures drained == (self.closed_spec() && self.entries_spec().len() == 0),
     { self.closed.is_marked() && self.queue.is_empty() }
+
+    /// Borrow the exact oldest original payload and its encoded-byte charge.
+    /// The borrow retains custody and prevents mutation while it is live.
+    pub fn front(&self) -> (value: Option<&(T, u64)>)
+        requires self.inv(),
+        ensures value is Some <==> self.entries_spec().len() > 0,
+            value matches Some(value) ==> *value == self.entries_spec()[0].1,
+    { self.payloads.entries.value_at(0) }
+
+    /// Immutable retained-slot ceiling, read from the Buffer owner.
+    pub fn slot_capacity(&self) -> (slots: usize) requires self.inv(),
+        ensures slots as nat == self.slot_limit_spec(),
+    { self.queue.capacity }
+
+    /// Immutable encoded-byte ceiling, read from the Budget owner.
+    pub fn byte_capacity(&self) -> (bytes: u64) requires self.inv(),
+        ensures bytes as nat == self.byte_limit_spec(),
+    { self.bytes.capacity }
+
+    /// Whether the producer's Marker forbids further publication.
+    pub fn is_closed(&self) -> (closed: bool) requires self.inv(),
+        ensures closed == self.closed_spec(),
+    { self.closed.is_marked() }
+
+    /// Check the current publication guards without consuming a payload.
+    /// The result is an observation, not authority to publish after state changes.
+    /// Coupled callers must retain exclusive ownership through their commits.
+    ///
+    /// # Errors
+    /// Closure, slots, bytes and sequence are checked in that order.
+    pub fn check_publish(&self, encoded_bytes: u64) -> (result: Result<(), TypedStreamError>)
+        requires self.inv(),
+        ensures (result is Ok) == self.publish_admitted_spec(encoded_bytes),
+            (result == Err(TypedStreamError::Closed)) == self.closed_spec(),
+            (result == Err(TypedStreamError::SlotCapacity)) == (!self.closed_spec()
+                && self.entries_spec().len() >= self.slot_limit_spec()),
+            (result == Err(TypedStreamError::ByteCapacity)) == (!self.closed_spec()
+                && self.entries_spec().len() < self.slot_limit_spec()
+                && self.encoded_bytes_spec() + encoded_bytes as nat > self.byte_limit_spec()),
+            (result == Err(TypedStreamError::SequenceExhausted)) == (!self.closed_spec()
+                && self.entries_spec().len() < self.slot_limit_spec()
+                && self.encoded_bytes_spec() + encoded_bytes as nat <= self.byte_limit_spec()
+                && (self.published_spec() >= u64::MAX as nat
+                    || self.published_spec() >= P::max_ordinal())),
+    {
+        self.check_publish_with_policy(encoded_bytes, TypedStreamPublicationPolicy::SlotFirst)
+    }
+
+    /// Observe publication admission with an explicit refusal priority.
+    /// Both policies admit the same inputs and leave every owner unchanged.
+    /// This observation requires exclusive ownership through a subsequent commit.
+    ///
+    /// # Errors
+    /// Closure precedes every refusal. ItemSizeFirst distinguishes a single item
+    /// exceeding the total byte ceiling before slot and retained-byte pressure.
+    pub fn check_publish_with_policy(&self, encoded_bytes: u64, policy: TypedStreamPublicationPolicy)
+        -> (result: Result<(), TypedStreamError>)
+        requires self.inv(),
+        ensures (result is Ok) == self.publish_admitted_spec(encoded_bytes),
+            (result == Err(TypedStreamError::Closed)) == self.closed_spec(),
+            (result == Err(TypedStreamError::ItemTooLarge)) == (!self.closed_spec()
+                && policy == TypedStreamPublicationPolicy::ItemSizeFirst
+                && encoded_bytes as nat > self.byte_limit_spec()),
+            (result == Err(TypedStreamError::SlotCapacity)) == (!self.closed_spec()
+                && (policy == TypedStreamPublicationPolicy::SlotFirst
+                    || encoded_bytes as nat <= self.byte_limit_spec())
+                && self.entries_spec().len() >= self.slot_limit_spec()),
+            (result == Err(TypedStreamError::ByteCapacity)) == (!self.closed_spec()
+                && (policy == TypedStreamPublicationPolicy::SlotFirst
+                    || encoded_bytes as nat <= self.byte_limit_spec())
+                && self.entries_spec().len() < self.slot_limit_spec()
+                && self.encoded_bytes_spec() + encoded_bytes as nat > self.byte_limit_spec()),
+            (result == Err(TypedStreamError::SequenceExhausted)) == (!self.closed_spec()
+                && self.entries_spec().len() < self.slot_limit_spec()
+                && self.encoded_bytes_spec() + encoded_bytes as nat <= self.byte_limit_spec()
+                && (self.published_spec() >= u64::MAX as nat
+                    || self.published_spec() >= P::max_ordinal())),
+    {
+        if self.closed.is_marked() {
+            return Err(TypedStreamError::Closed);
+        }
+        if matches!(policy, TypedStreamPublicationPolicy::ItemSizeFirst) && encoded_bytes > self.bytes.capacity {
+            return Err(TypedStreamError::ItemTooLarge);
+        }
+        if !self.slots.admits_additional(1, 0) {
+            return Err(TypedStreamError::SlotCapacity);
+        }
+        if !self.bytes.admits_additional(encoded_bytes, 0) {
+            return Err(TypedStreamError::ByteCapacity);
+        }
+        if !self.published.can_increment() || self.published.value() >= P::limit() {
+            return Err(TypedStreamError::SequenceExhausted);
+        }
+        Ok(())
+    }
+
+    /// Check whether the actual FIFO has a value available for transfer.
+    /// No dequeue, charge release or Cursor advance occurs.
+    ///
+    /// # Errors
+    /// An empty FIFO returns Empty while open and Closed after producer closure.
+    pub fn check_receive(&self) -> (result: Result<(), TypedStreamError>)
+        requires self.inv(),
+        ensures (result is Ok) == (self.entries_spec().len() > 0),
+            (result == Err(TypedStreamError::Empty)) == (self.entries_spec().len() == 0
+                && !self.closed_spec()),
+            (result == Err(TypedStreamError::Closed)) == (self.entries_spec().len() == 0
+                && self.closed_spec()),
+    {
+        if self.queue.is_empty() {
+            Err(if self.closed.is_marked() { TypedStreamError::Closed } else { TypedStreamError::Empty })
+        } else {
+            Ok(())
+        }
+    }
 
     /// Publish one original payload after all owner guards have admitted it.
     /// No fallible storage operation occurs between the coupled owner commits.
@@ -256,34 +449,25 @@ impl<T> TypedStream<T> {
                 && final(self).consumed_spec() == old(self).consumed_spec()
                 && final(self).closed_spec() == old(self).closed_spec(),
     {
-        if self.closed.is_marked() {
-            return Err(TypedPublishRefusal { error: TypedStreamError::Closed, value });
-        }
-        if !self.slots.admits_additional(1, 0) {
-            return Err(TypedPublishRefusal { error: TypedStreamError::SlotCapacity, value });
-        }
-        if !self.bytes.admits_additional(encoded_bytes, 0) {
-            return Err(TypedPublishRefusal { error: TypedStreamError::ByteCapacity, value });
-        }
-        if !self.published.can_increment() || self.published.value() >= usize::MAX as u64 {
-            return Err(TypedPublishRefusal { error: TypedStreamError::SequenceExhausted, value });
+        if let Err(error) = self.check_publish(encoded_bytes) {
+            return Err(TypedPublishRefusal { error, value });
         }
         let sequence = self.published.value();
         let ghost before = *self;
         proof {
             crate::primitives::resource_registry::identity_entries_are_exact(self.payloads.entries@);
-            assert(!self.payloads.contains_key(sequence)) by {
-                if self.payloads.contains_key(sequence) {
+            assert(!self.payloads.contains_key_identity(sequence)) by {
+                if self.payloads.contains_key_identity(sequence) {
                     let index = choose|index: int| 0 <= index < self.payloads.entries@.len()
                         && #[trigger] self.payloads.entries@[index].0 == sequence;
-                    assert(self.queue.values@[index] as int == self.consumed.position as int + index);
+                    assert(self.queue.values@[index] as int == self.consumed.position.ordinal() as int + index);
                     assert(false);
                 }
             }
         }
         let _slots = self.slots.try_allocate(1);
         let _bytes = self.bytes.try_allocate(encoded_bytes);
-        self.payloads.register(sequence, (value, encoded_bytes));
+        self.payloads.register_absent_key(sequence, (value, encoded_bytes));
         let _queued = self.queue.push(sequence);
         let _published = self.published.try_increment();
         assert(_slots && _bytes && _queued is Ok && _published);
@@ -294,7 +478,7 @@ impl<T> TypedStream<T> {
                 self.payloads.entries@.len() as int));
         }
         assert forall|index: int| 0 <= index < self.queue.values@.len() implies
-            #[trigger] self.queue.values@[index] as int == self.consumed.position as int + index
+            #[trigger] self.queue.values@[index] as int == self.consumed.position.ordinal() as int + index
                 && self.payloads.entries@[index].0 == self.queue.values@[index] by {
             if index < before.queue.values@.len() {
                 assert(self.queue.values@[index] == before.queue.values@[index]);
@@ -309,8 +493,6 @@ impl<T> TypedStream<T> {
     ///
     /// # Errors
     /// Returns Empty while open, or Closed after the closed FIFO has drained.
-    #[expect(clippy::cast_possible_truncation, reason = "the FIFO invariant bounds issued identities by usize::MAX")]
-    #[expect(clippy::arithmetic_side_effects, reason = "a nonempty FIFO places its head strictly below the representable published head")]
     pub fn receive(&mut self) -> (result: Result<ReceivedStreamValue<T>, TypedStreamError>)
         requires old(self).inv(),
         ensures final(self).inv(), final(self).scope_spec() == old(self).scope_spec(),
@@ -321,6 +503,7 @@ impl<T> TypedStream<T> {
             (result is Ok) == (old(self).entries_spec().len() > 0),
             (result == Err(TypedStreamError::Empty)) == (old(self).entries_spec().len() == 0 && !old(self).closed_spec()),
             (result == Err(TypedStreamError::Closed)) == (old(self).entries_spec().len() == 0 && old(self).closed_spec()),
+            result is Err ==> *final(self) == *old(self),
             result is Err ==> final(self).same_state(*old(self)),
             result is Err ==> final(self).entries_spec() == old(self).entries_spec()
                 && final(self).encoded_bytes_spec() == old(self).encoded_bytes_spec()
@@ -337,6 +520,11 @@ impl<T> TypedStream<T> {
         if self.queue.is_empty() {
             return Err(if self.closed.is_marked() { TypedStreamError::Closed } else { TypedStreamError::Empty });
         }
+        proof { assert(self.consumed.position.ordinal() < P::max_ordinal()); }
+        let next = match self.consumed.position.checked_successor() {
+            Some(next) => next,
+            None => { assert(false); return Err(TypedStreamError::Empty); },
+        };
         let ghost before = *self;
         let sequence = match self.queue.pop() { Some(sequence) => sequence, None => { assert(false); return Err(TypedStreamError::Empty); } };
         proof {
@@ -351,9 +539,9 @@ impl<T> TypedStream<T> {
         }
         self.slots.release(1);
         self.bytes.release(entry.1.1);
-        self.consumed.advance_to(sequence as usize + 1);
+        self.consumed.advance_to(next);
         assert forall|index: int| 0 <= index < self.queue.values@.len() implies
-            #[trigger] self.queue.values@[index] as int == self.consumed.position as int + index
+            #[trigger] self.queue.values@[index] as int == self.consumed.position.ordinal() as int + index
                 && self.payloads.entries@[index].0 == self.queue.values@[index] by {
             assert(self.queue.values@[index] == before.queue.values@[index + 1]);
         }
@@ -397,8 +585,6 @@ pub ghost struct BoundedTransferModel<T> {
 impl<T> BoundedTransferModel<T> {
     /// Primitive-rooted and connective-rooted state invariant.
     pub open spec fn inv(self) -> bool {
-        &&& self.slot_capacity > 0
-        &&& self.retained_byte_capacity > 0
         &&& crate::primitives::budget::budget_safety(
             self.slot_capacity,
             self.values.len(),
@@ -525,6 +711,89 @@ pub open spec fn bounded_transfer_initial<T>(model: BoundedTransferModel<T>) -> 
     &&& model.head == 0
     &&& model.tail == 0
     &&& !model.closed
+}
+
+/// Zero slots admit the empty origin and closure, but no publication.
+proof fn zero_slot_bounded_transfer_refuses_and_closes(
+    retained_byte_capacity: nat,
+    candidate: BoundedTransferModel<u64>,
+    value: u64,
+    retained_bytes: u64,
+    sequence: u64,
+) {
+    let initial = BoundedTransferModel {
+        slot_capacity: 0,
+        retained_byte_capacity,
+        values: Seq::<u64>::empty(),
+        registry: Seq::<(u64, u64)>::empty(),
+        retained_bytes: 0,
+        head: 0,
+        tail: 0,
+        closed: false,
+    };
+    assert(initial.inv());
+    assert(bounded_transfer_initial(initial));
+    assert(!bounded_transfer_publish(initial, candidate, value, retained_bytes, sequence));
+    assert(bounded_transfer_refusal_stutters(initial, initial));
+
+    let closed = BoundedTransferModel {
+        slot_capacity: 0,
+        retained_byte_capacity,
+        values: Seq::<u64>::empty(),
+        registry: Seq::<(u64, u64)>::empty(),
+        retained_bytes: 0,
+        head: 0,
+        tail: 0,
+        closed: true,
+    };
+    assert(bounded_transfer_close(initial, closed, true));
+    assert(closed.terminal());
+    assert(bounded_transfer_close(closed, closed, false));
+}
+
+/// One slot with zero byte capacity admits zero-charge publication and receipt.
+proof fn zero_byte_bounded_transfer_publishes_and_receives(value: u64) {
+    let initial = BoundedTransferModel {
+        slot_capacity: 1,
+        retained_byte_capacity: 0,
+        values: Seq::<u64>::empty(),
+        registry: Seq::<(u64, u64)>::empty(),
+        retained_bytes: 0,
+        head: 0,
+        tail: 0,
+        closed: false,
+    };
+    let published = BoundedTransferModel {
+        slot_capacity: 1,
+        retained_byte_capacity: 0,
+        values: seq![value],
+        registry: seq![(0u64, 0u64)],
+        retained_bytes: 0,
+        head: 0,
+        tail: 1,
+        closed: false,
+    };
+    assert(bounded_transfer_initial(initial));
+    assert(published.values =~= initial.values.push(value));
+    assert(published.registry =~= initial.registry.push((0u64, 0u64)));
+    assert(bounded_transfer_publish(initial, published, value, 0, 0));
+
+    let received = BoundedTransferModel {
+        slot_capacity: 1,
+        retained_byte_capacity: 0,
+        values: Seq::<u64>::empty(),
+        registry: Seq::<(u64, u64)>::empty(),
+        retained_bytes: 0,
+        head: 1,
+        tail: 1,
+        closed: false,
+    };
+    assert(received.values =~= published.values.skip(1));
+    assert(received.registry =~= published.registry.skip(1));
+    assert(bounded_transfer_receive(published, received, value, 0, 0));
+    assert(received.retained_bytes == 0);
+    assert(received.values.len() == 0);
+    assert(received.head == received.tail);
 }
 
 /// Publish one value through one StreamGraph connection.
@@ -701,7 +970,7 @@ pub open spec fn pair_initial<T>(
 }
 
 /// Bounded linear stream owner.
-pub struct StreamGraph {
+pub struct StreamGraph<S: BufferLayout<u64> = ContiguousStorage> {
     /// Number of stages in the linear chain.
     pub chain_length: usize,
     /// Maximum records admitted at the source.
@@ -709,11 +978,11 @@ pub struct StreamGraph {
     /// Exclusive upper bound of record values.
     pub record_domain_size: u64,
     /// First FIFO edge owner.
-    pub q1: Buffer<u64>,
+    pub q1: Buffer<u64, S>,
     /// Second FIFO edge owner.
-    pub q2: Buffer<u64>,
+    pub q2: Buffer<u64, S>,
     /// Optional third FIFO edge owner.
-    pub q3: Buffer<u64>,
+    pub q3: Buffer<u64, S>,
     /// Source-admission counter.
     pub ingested: Counter,
     /// Sink-emission counter.
@@ -737,6 +1006,9 @@ impl StreamGraph {
         forall|i: int| 0 <= i < q.len() ==> #[trigger] q[i] < domain
     }
 
+}
+impl<S: BufferLayout<u64>> StreamGraph<S> {
+
     /// Total number of records currently retained across all stream edges.
     pub open spec fn queue_depth(&self) -> nat {
         if self.chain_length == 3 {
@@ -748,13 +1020,13 @@ impl StreamGraph {
 
     /// Whether counters, queues, and configuration values have valid shape and bounds.
     pub open spec fn type_invariant(&self) -> bool {
-        &&& Self::valid_config_spec(
+        &&& StreamGraph::valid_config_spec(
             self.chain_length, self.q1.capacity, self.record_domain_size)
         &&& self.q2.capacity == self.q1.capacity
         &&& self.q3.capacity == self.q1.capacity
-        &&& Self::values_valid(self.q1.values@, self.record_domain_size)
-        &&& Self::values_valid(self.q2.values@, self.record_domain_size)
-        &&& Self::values_valid(self.q3.values@, self.record_domain_size)
+        &&& StreamGraph::values_valid(self.q1.values@, self.record_domain_size)
+        &&& StreamGraph::values_valid(self.q2.values@, self.record_domain_size)
+        &&& StreamGraph::values_valid(self.q3.values@, self.record_domain_size)
         &&& (self.chain_length == 3 ==> self.q3.values@.len() == 0)
         &&& self.ingested.value_spec() <= self.max_inputs as nat
         &&& self.emitted.value_spec() <= self.max_inputs as nat
@@ -856,6 +1128,16 @@ impl StreamGraph {
                 && self.q3.is_empty())
     }
 
+    /// Capacity shared by every Buffer edge owner.
+    pub fn capacity(&self) -> (capacity: usize)
+        ensures capacity == self.q1.capacity,
+    {
+        self.q1.capacity
+    }
+
+}
+impl StreamGraph {
+
     /// Test whether a chain configuration is represented by this carrier.
     pub fn valid_config(
         chain_length: usize,
@@ -868,13 +1150,6 @@ impl StreamGraph {
         (chain_length == 3 || chain_length == 4)
             && capacity > 0
             && record_domain_size > 0
-    }
-
-    /// Capacity shared by every Buffer edge owner.
-    pub fn capacity(&self) -> (capacity: usize)
-        ensures capacity == self.q1.capacity,
-    {
-        self.q1.capacity
     }
 
     /// Construct an empty valid stream graph.
@@ -899,13 +1174,26 @@ impl StreamGraph {
             s.emitted.value_spec() == 0,
             s.inv(),
     {
-        StreamGraph {
-            chain_length,
-            max_inputs,
-            record_domain_size,
-            q1: Buffer::new(capacity),
-            q2: Buffer::new(capacity),
-            q3: Buffer::new(capacity),
+        Self::with_buffers(chain_length, Buffer::new(capacity), Buffer::new(capacity),
+            Buffer::new(capacity), max_inputs, record_domain_size)
+    }
+}
+
+impl<S: BufferLayout<u64>> StreamGraph<S> {
+    /// Bind three empty canonical Buffers to the existing linear transition owner.
+    pub fn with_buffers(chain_length: usize, q1: Buffer<u64, S>, q2: Buffer<u64, S>,
+        q3: Buffer<u64, S>, max_inputs: usize, record_domain_size: u64) -> (s: Self)
+        requires StreamGraph::valid_config_spec(chain_length, q1.capacity, record_domain_size),
+            q1.well_formed(), q2.well_formed(), q3.well_formed(),
+            q2.capacity == q1.capacity, q3.capacity == q1.capacity,
+            q1.values@.len() == 0, q2.values@.len() == 0, q3.values@.len() == 0,
+        ensures s.inv(), s.chain_length == chain_length, s.q1 == q1,
+            s.q2 == q2, s.q3 == q3, s.max_inputs == max_inputs,
+            s.record_domain_size == record_domain_size,
+            s.ingested.value_spec() == 0, s.emitted.value_spec() == 0,
+    {
+        Self {
+            chain_length, max_inputs, record_domain_size, q1, q2, q3,
             ingested: Counter::new(0),
             emitted: Counter::new(0),
         }
@@ -956,7 +1244,6 @@ impl StreamGraph {
     }
 
     /// Transfer the oldest first-edge record to the second edge.
-    #[expect(clippy::indexing_slicing, reason = "the first-queue nonempty guard proves its oldest retained value exists")]
     pub fn middle2_fire(&mut self) -> (accepted: bool)
         requires old(self).inv(),
         ensures
@@ -982,8 +1269,9 @@ impl StreamGraph {
         if self.q1.len() > 0 && self.q2.len() < self.q2.capacity {
             let ghost old_q1 = self.q1.values@;
             let ghost old_q2 = self.q2.values@;
-            let value = self.q1.values[0];
-            let _popped = self.q1.pop();
+            let value = match self.q1.pop() {
+                Some(value) => value, None => return false,
+            };
             let _pushed = self.q2.push(value);
             assert(self.q1.values@ =~= old_q1.subrange(1, old_q1.len() as int));
             assert(self.q2.values@ =~= old_q2.push(old_q1[0]));
@@ -1002,7 +1290,6 @@ impl StreamGraph {
     }
 
     /// Transfer the oldest second-edge record through the optional fourth stage.
-    #[expect(clippy::indexing_slicing, reason = "the second-queue nonempty guard proves its oldest retained value exists")]
     pub fn middle3_fire(&mut self) -> (accepted: bool)
         requires old(self).inv(),
         ensures
@@ -1031,8 +1318,9 @@ impl StreamGraph {
         {
             let ghost old_q2 = self.q2.values@;
             let ghost old_q3 = self.q3.values@;
-            let value = self.q2.values[0];
-            let _popped = self.q2.pop();
+            let value = match self.q2.pop() {
+                Some(value) => value, None => return false,
+            };
             let _pushed = self.q3.push(value);
             assert(self.q2.values@ =~= old_q2.subrange(1, old_q2.len() as int));
             assert(self.q3.values@ =~= old_q3.push(old_q2[0]));
@@ -1104,6 +1392,21 @@ impl StreamGraph {
         }
     }
 
+    /// Observe whether the input bound is reached and every retained queue is empty.
+    pub(crate) fn input_drained(&self) -> (complete: bool)
+        requires self.inv(),
+        ensures
+            complete == (self.ingested.value_spec() == self.max_inputs as nat
+                && self.q1.values@.len() == 0
+                && self.q2.values@.len() == 0
+                && self.q3.values@.len() == 0),
+    {
+        self.ingested.value() == self.max_inputs as u64
+            && self.q1.len() == 0
+            && self.q2.len() == 0
+            && self.q3.len() == 0
+    }
+
     /// Execute the terminal stutter after bounded input is drained.
     pub fn done_stuttering(&mut self) -> (enabled: bool)
         requires old(self).inv(),
@@ -1125,11 +1428,129 @@ impl StreamGraph {
             final(self).emitted.value_spec() == old(self).emitted.value_spec(),
             final(self).inv(),
     {
-        self.ingested.value() == self.max_inputs as u64
-            && self.q1.len() == 0
-            && self.q2.len() == 0
-            && self.q3.len() == 0
+        self.input_drained()
     }
 }
 
+}
+
+#[cfg(test)]
+mod ordinal_profile_tests {
+    use super::{TypedStream, TypedStreamError, TypedStreamPublicationPolicy as Policy};
+    use crate::connectives::counter::Counter;
+    use crate::connectives::cursor::{Cursor, CursorPosition};
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions observe storage refusal and valid lifetime boundary fixtures; fallible setup propagates errors"
+    )]
+    fn exercise_boundary<P: CursorPosition + core::fmt::Debug + PartialEq>(
+        prior: P,
+        terminal: P,
+    ) -> Result<(), TypedStreamError> {
+        assert!(matches!(
+            TypedStream::<Box<[u8]>, P>::try_with_position(93, usize::MAX, 0),
+            Err(TypedStreamError::StorageUnavailable)
+        ));
+        let ceiling = P::limit();
+        let issued = ceiling
+            .checked_sub(1)
+            .ok_or(TypedStreamError::SequenceExhausted)?;
+        assert_eq!(prior.checked_successor(), Some(terminal));
+        assert_eq!(terminal.checked_successor(), None);
+        let mut stream = TypedStream::<Box<[u8]>, P>::try_with_position(91, 1, 3)?;
+        // Empty FIFO, zero charges and equal issued/consumed heads form a valid
+        // prestate. These local fields avoid a lifetime-sized execution loop.
+        stream.published = Counter::new(issued);
+        stream.consumed = Cursor::from_position(prior);
+        assert_eq!(stream.received_count(), prior);
+        assert_eq!(stream.check_receive(), Err(TypedStreamError::Empty));
+        let original = vec![11u8, 12].into_boxed_slice();
+        let address = original.as_ptr();
+        let sequence = stream
+            .publish(original, 3)
+            .map_err(|refusal| refusal.error)?;
+        assert_eq!(sequence, issued);
+        assert_eq!(stream.published.value(), ceiling);
+        assert_eq!(
+            stream.check_publish(u64::MAX),
+            Err(TypedStreamError::SlotCapacity)
+        );
+        assert_eq!(
+            stream.check_publish_with_policy(u64::MAX, Policy::ItemSizeFirst),
+            Err(TypedStreamError::ItemTooLarge)
+        );
+        let head = stream.front().ok_or(TypedStreamError::Empty)?;
+        assert_eq!(head.0.as_ptr(), address);
+        assert_eq!(head.1, 3);
+        let received = stream.receive()?;
+        assert_eq!(received.sequence, issued);
+        assert_eq!(received.value.as_ptr(), address);
+        assert_eq!(received.encoded_bytes, 3);
+        assert_eq!(stream.received_count(), terminal);
+        assert_eq!(stream.len(), 0);
+        assert_eq!(stream.retained_bytes(), 0);
+        assert_eq!(stream.check_publish(4), Err(TypedStreamError::ByteCapacity));
+        assert_eq!(
+            stream.check_publish_with_policy(4, Policy::ItemSizeFirst),
+            Err(TypedStreamError::ItemTooLarge)
+        );
+        assert_eq!(
+            stream.check_publish_with_policy(0, Policy::ItemSizeFirst),
+            Err(TypedStreamError::SequenceExhausted)
+        );
+        assert_eq!(
+            stream.check_publish_with_policy(0, Policy::SlotFirst),
+            Err(TypedStreamError::SequenceExhausted)
+        );
+        assert_eq!(
+            stream.check_publish(0),
+            Err(TypedStreamError::SequenceExhausted)
+        );
+        let refused = vec![21u8].into_boxed_slice();
+        let refused_address = refused.as_ptr();
+        let result = stream.publish(refused, 0);
+        assert!(result.is_err());
+        let refusal = result.err().ok_or(TypedStreamError::Empty)?;
+        assert_eq!(refusal.error, TypedStreamError::SequenceExhausted);
+        assert_eq!(refusal.value.as_ptr(), refused_address);
+        assert_eq!(stream.received_count(), terminal);
+        assert_eq!(stream.published.value(), ceiling);
+        assert_eq!(stream.len(), 0);
+        assert_eq!(stream.retained_bytes(), 0);
+        assert!(stream.close_input());
+        assert_eq!(
+            stream.check_publish(u64::MAX),
+            Err(TypedStreamError::Closed)
+        );
+        assert_eq!(stream.check_receive(), Err(TypedStreamError::Closed));
+        let mut no_slots = TypedStream::<Box<[u8]>, P>::try_with_position(92, 0, 0)?;
+        no_slots.published = Counter::new(ceiling);
+        no_slots.consumed = Cursor::from_position(terminal);
+        assert_eq!(
+            no_slots.check_publish(u64::MAX),
+            Err(TypedStreamError::SlotCapacity)
+        );
+        assert_eq!(no_slots.received_count(), terminal);
+        assert_eq!(no_slots.len(), 0);
+        assert_eq!(no_slots.retained_bytes(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_stream_ordinal_profiles_preserve_valid_terminal_boundaries()
+    -> Result<(), TypedStreamError> {
+        exercise_boundary(
+            usize::MAX
+                .checked_sub(1)
+                .ok_or(TypedStreamError::SequenceExhausted)?,
+            usize::MAX,
+        )?;
+        exercise_boundary(
+            u64::MAX
+                .checked_sub(1)
+                .ok_or(TypedStreamError::SequenceExhausted)?,
+            u64::MAX,
+        )
+    }
 }

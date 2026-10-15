@@ -9,15 +9,17 @@
 //   ProbeBound (INVARIANT)    -- probes_taken <= MaxProbes, with
 //                                EventualConvergence (<>(hi - lo < 2)) the liveness companion.
 //
-//   - `Bisection { domain_size, max_probes, lo, hi, threshold, probes_taken }`
-//     mirrors the TLA+ constants and variables. The counter is executable so
-//     the budget boundary is observable rather than only a ghost assertion.
+//   - `Bisection { domain_size, budget, lo, hi, threshold }` mirrors the TLA+
+//     constants and variables. `budget.capacity` carries the probe bound and
+//     `budget.allocated` the executable probe count, so the budget boundary is
+//     observable rather than only a ghost assertion.
 //   - `monotonicity()` is the MonotonicityPreservation invariant.
 //   - `probe()` is the TLA+ ProbeLeft/ProbeRight action — one atomic step that
 //     maintains monotonicity and ensures hi'-lo' <= (hi-lo)/2.
 //   - `bisect()` drives probe() to convergence; `decreases hi - lo` is the
 //     loop-termination witness.
-//   - `bisection_find()` is a binary-search realization: the search-level view.
+//   - `bisection_find()` is an independent sorted-slice membership query whose
+//     own loop establishes its functional search contracts.
 //
 // Monotonicity, halving, and the termination measure do not
 // determine the post-state selected by ProbeLeft/ProbeRight. `probe` therefore
@@ -276,17 +278,18 @@ impl Bisection {
     }
 }
 
-// ── Applied realization: binary search (a Bisection instance) ─────────────
+// ── Sorted-slice membership query ──────────────────────────────────────
 
 /// A slice is sorted (non-strictly ascending) over its index range.
 pub open spec fn is_sorted(s: Seq<u64>) -> bool {
     forall|i: int, j: int| 0 <= i <= j < s.len() ==> s[i] <= s[j]
 }
 
-/// Binary search: the search-level view of Bisection -- halve [lo, hi) until the
-/// target index is found, or return `sorted.len()` if absent. The interval
-/// invariants are carried by the `Bisection` machine above. `decreases hi - lo`
-/// states that each probe strictly shrinks the interval.
+/// Find a target in a sorted slice, or return `sorted.len()` when it is absent.
+///
+/// The loop proves this query's membership and absence contracts directly.
+/// Its local search bounds and termination measure do not instantiate the
+/// retained interval and probe Budget of the [`Bisection`] composition.
 #[expect(clippy::arithmetic_side_effects, reason = "the loop proves 0 <= lo <= hi <= slice length and lo <= midpoint < hi before either successor")]
 #[expect(clippy::integer_division, reason = "floor((hi - lo) / 2) selects the discrete interior midpoint without adding the endpoints")]
 #[expect(clippy::indexing_slicing, reason = "the search loop proves midpoint < hi <= sorted.len() before the read")]

@@ -252,6 +252,14 @@ impl Sequential {
         }
     }
 
+    /// Observe the canonical owner's terminal inactive state.
+    pub(crate) fn terminal_inactive(&self) -> (terminal: bool)
+        requires self.inv(),
+        ensures terminal == (self.pc == self.steps && !self.active),
+    {
+        self.pc == self.steps && !self.active
+    }
+
     /// `DoneStuttering`: enabled exactly at the terminal inactive state and
     /// never changes carrier state.
     pub fn done_stuttering(&mut self) -> (enabled: bool)
@@ -266,7 +274,7 @@ impl Sequential {
             final(self).history@ == old(self).history@,
             final(self).inv(),
     {
-        self.pc == self.steps && !self.active
+        self.terminal_inactive()
     }
 }
 

@@ -1,4 +1,5 @@
-//! Construct and exercise every structure in the public catalog.
+//! Construct and exercise selected checked primitives, compositions, connective forms,
+//! and execution modalities.
 
 use std::error::Error;
 
@@ -268,6 +269,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         buffer,
     );
 
-    println!("all public automation structures constructed and exercised");
+    println!("selected public automation structures constructed and exercised");
     Ok(())
 }

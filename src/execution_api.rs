@@ -1,8 +1,19 @@
 //! Checked public entry points for reusable execution modalities.
 
-use crate::modalities::fork_join::ForkJoin as ForkJoinCarrier;
+use crate::connectives::buffer::{
+    Buffer, BufferLayout, BufferStorage, ContiguousStorage, FifoStorage,
+};
+use crate::connectives::ordering_pass::{PositionOrder, try_arrange_indices};
+use crate::modalities::fork_join::{
+    CountedWorkerStates, ForkJoin as ForkJoinCarrier, ForkJoinWorkers, JoinedValuesSnapshot,
+};
+
+type CheckedForkJoinCarrier = ForkJoinCarrier<CountedWorkerStates, JoinedValuesSnapshot>;
 use crate::modalities::sequential::Sequential as SequentialCarrier;
-use crate::modalities::step_graph::StepGraph as StepGraphCarrier;
+use crate::modalities::step_graph::{
+    CountedStepStates, StepGraph as StepGraphCarrier, StepGraphStates,
+};
+type CheckedStepGraphCarrier = StepGraphCarrier<CountedStepStates>;
 use crate::modalities::stream_graph::StreamGraph as StreamGraphCarrier;
 use vstd::prelude::*;
 
@@ -70,7 +81,10 @@ impl Sequential {
     pub fn is_active(&self) -> bool { self.inner.active }
 
     /// Whether all steps are complete and inactive.
-    pub fn is_done(&self) -> bool { self.inner.pc == self.inner.steps && !self.inner.active }
+    pub fn is_done(&self) -> bool {
+        proof { use_type_invariant(&*self); }
+        self.inner.terminal_inactive()
+    }
 
     /// Read a completed-step value by execution order.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the history index is in bounds")]
@@ -149,10 +163,13 @@ pub enum ForkJoinPhase {
 /// # Ok::<(), automation_structures::ForkJoinBuildError>(())
 /// ```
 pub struct ForkJoin {
-    inner: ForkJoinCarrier,
+    inner: CheckedForkJoinCarrier,
 }
 
 impl ForkJoin {
+    /// Erased view of the one retained fork-join transition owner.
+    pub closed spec fn state_spec(&self) -> CheckedForkJoinCarrier { self.inner }
+
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool { self.inner.inv() }
 
@@ -162,58 +179,99 @@ impl ForkJoin {
     ///
     /// Returns an error for an empty value domain or an out-of-domain initial value.
     pub fn new(workers: usize, value_domain_size: u64, initial_value: u64)
-        -> (result: Result<Self, ForkJoinBuildError>) {
+        -> (result: Result<Self, ForkJoinBuildError>)
+        ensures (result is Ok) == (value_domain_size > 0 && initial_value < value_domain_size),
+            result is Ok ==> {
+                let owner = result.unwrap().state_spec();
+                &&& owner.inv() && owner.value_domain_size == value_domain_size
+                &&& owner.wstate@.len() == workers && owner.wvalue@.len() == workers
+                &&& owner.phase == ForkJoinPhase::Fork && !owner.output_ready
+                &&& forall|i: int| 0 <= i < workers ==> #[trigger] owner.wstate@[i] == WorkerState::Ready
+                &&& forall|i: int| 0 <= i < workers ==> #[trigger] owner.wvalue@[i] == initial_value
+                &&& forall|i: int| 0 <= i < workers ==> #[trigger] owner.snapshot_spec()[i] == initial_value
+                &&& owner.snapshot_spec().len() == workers
+            },
+    {
         if value_domain_size == 0 { return Err(ForkJoinBuildError::EmptyValueDomain); }
         if initial_value >= value_domain_size {
             return Err(ForkJoinBuildError::InitialValueOutOfRange);
         }
-        Ok(Self { inner: ForkJoinCarrier::new(workers, value_domain_size, initial_value) })
+        Ok(Self { inner: ForkJoinCarrier::new_indexed(workers, value_domain_size, initial_value) })
     }
 
     /// Number of workers.
-    pub fn len(&self) -> usize { self.inner.wstate.len() }
+    pub fn len(&self) -> (length: usize)
+        ensures length == self.state_spec().wstate@.len(),
+    { self.inner.wstate.len() }
 
     /// Whether no workers are configured.
-    pub fn is_empty(&self) -> bool { self.inner.wstate.is_empty() }
+    pub fn is_empty(&self) -> (empty: bool)
+        ensures empty == (self.state_spec().wstate@.len() == 0),
+    { self.inner.wstate.is_empty() }
 
     /// Whether every worker has completed, as observed by the barrier owner.
-    pub fn all_complete(&self) -> bool {
+    pub fn all_complete(&self) -> (complete: bool)
+        ensures complete == self.state_spec().all_complete(), self.state_spec().inv(),
+    {
         proof { use_type_invariant(&*self); }
         self.inner.all_complete_exec()
     }
 
     /// Current global phase.
-    pub fn phase(&self) -> ForkJoinPhase {
+    pub fn phase(&self) -> (phase: ForkJoinPhase)
+        ensures phase == self.state_spec().phase,
+    {
         self.inner.phase
     }
 
     /// Whether the output snapshot is ready.
-    pub fn output_ready(&self) -> bool { self.inner.output_ready }
+    pub fn output_ready(&self) -> (ready: bool)
+        ensures ready == self.state_spec().output_ready,
+    { self.inner.output_ready }
 
     /// Read one worker lifecycle state.
-    #[expect(clippy::indexing_slicing, reason = "the branch proves the worker index is in bounds")]
-    pub fn worker_state(&self, worker: usize) -> Option<WorkerState> {
+    pub fn worker_state(&self, worker: usize) -> (state: Option<WorkerState>)
+        ensures state == crate::modalities::fork_join::worker_at(self.state_spec().wstate@, worker as int),
+    {
         if worker >= self.inner.wstate.len() { return None; }
-        Some(self.inner.wstate[worker])
+        Some(self.inner.wstate.state_at(worker))
     }
 
     /// Read one worker's current value.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the worker index is in bounds")]
-    pub fn worker_value(&self, worker: usize) -> Option<u64> {
+    pub fn worker_value(&self, worker: usize) -> (value: Option<u64>)
+        ensures value == if worker < self.state_spec().wvalue@.len()
+            { Some(self.state_spec().wvalue@[worker as int]) } else { None },
+    {
         if worker < self.inner.wvalue.len() { Some(self.inner.wvalue[worker]) } else { None }
     }
 
     /// Read one stable output value after output production.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the output index is in bounds")]
-    pub fn output(&self, worker: usize) -> Option<u64> {
-        if self.inner.output_ready && worker < self.inner.output_snapshot.len() {
-            Some(self.inner.output_snapshot[worker])
+    pub fn output(&self, worker: usize) -> (value: Option<u64>)
+        ensures value == if self.state_spec().output_ready && worker < self.state_spec().wvalue@.len()
+            { Some(self.state_spec().snapshot_spec()[worker as int]) } else { None },
+            self.state_spec().inv(),
+    {
+        proof { use_type_invariant(self); }
+        if self.inner.output_ready && worker < self.inner.wvalue.len() {
+            Some(self.inner.output_values()[worker])
         } else { None }
     }
 
     /// Start one ready worker during the fork phase.
     #[must_use]
-    pub fn start_worker(&mut self, worker: usize) -> (accepted: bool) {
+    pub fn start_worker(&mut self, worker: usize) -> (accepted: bool)
+        ensures final(self).state_spec().inv(),
+            final(self).state_spec().value_domain_size == old(self).state_spec().value_domain_size,
+            final(self).state_spec().wvalue@ == old(self).state_spec().wvalue@,
+            final(self).state_spec().phase == old(self).state_spec().phase,
+            final(self).state_spec().output_ready == old(self).state_spec().output_ready,
+            final(self).state_spec().snapshot_spec() == old(self).state_spec().snapshot_spec(),
+            crate::modalities::fork_join::start_worker_action(old(self).state_spec().wstate@,
+                final(self).state_spec().wstate@, old(self).state_spec().phase,
+                worker as int, true, accepted),
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = fork_join_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -224,7 +282,18 @@ impl ForkJoin {
 
     /// Complete one running worker with an in-domain value.
     #[must_use]
-    pub fn complete_worker(&mut self, worker: usize, value: u64) -> (accepted: bool) {
+    pub fn complete_worker(&mut self, worker: usize, value: u64) -> (accepted: bool)
+        ensures final(self).state_spec().inv(),
+            final(self).state_spec().value_domain_size == old(self).state_spec().value_domain_size,
+            final(self).state_spec().phase == old(self).state_spec().phase,
+            final(self).state_spec().output_ready == old(self).state_spec().output_ready,
+            final(self).state_spec().snapshot_spec() == old(self).state_spec().snapshot_spec(),
+            crate::modalities::fork_join::complete_worker_action(old(self).state_spec().wstate@,
+                final(self).state_spec().wstate@, old(self).state_spec().phase,
+                worker as int, true, value < old(self).state_spec().value_domain_size, accepted),
+            final(self).state_spec().wvalue@ == if accepted
+                { old(self).state_spec().wvalue@.update(worker as int, value) } else { old(self).state_spec().wvalue@ },
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = fork_join_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -235,7 +304,16 @@ impl ForkJoin {
 
     /// Commit the barrier when every worker is complete.
     #[must_use]
-    pub fn barrier(&mut self) -> (accepted: bool) {
+    pub fn barrier(&mut self) -> (accepted: bool)
+        ensures final(self).state_spec().inv(),
+            final(self).state_spec().value_domain_size == old(self).state_spec().value_domain_size,
+            final(self).state_spec().wstate@ == old(self).state_spec().wstate@,
+            final(self).state_spec().wvalue@ == old(self).state_spec().wvalue@,
+            final(self).state_spec().output_ready == old(self).state_spec().output_ready,
+            final(self).state_spec().snapshot_spec() == old(self).state_spec().snapshot_spec(),
+            crate::modalities::fork_join::barrier_action(old(self).state_spec().phase,
+                final(self).state_spec().phase, true, old(self).state_spec().all_complete(), accepted),
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = fork_join_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -246,7 +324,23 @@ impl ForkJoin {
 
     /// Produce the immutable output snapshot from the joined worker values.
     #[must_use]
-    pub fn produce_output(&mut self) -> (accepted: bool) {
+    pub fn produce_output(&mut self) -> (accepted: bool)
+        ensures final(self).state_spec().inv(),
+            final(self).state_spec().value_domain_size == old(self).state_spec().value_domain_size,
+            final(self).state_spec().wstate@ == old(self).state_spec().wstate@,
+            final(self).state_spec().wvalue@ == old(self).state_spec().wvalue@,
+            if accepted {
+                final(self).state_spec().phase == ForkJoinPhase::Done
+                    && final(self).state_spec().output_ready
+                    && final(self).state_spec().snapshot_spec() == old(self).state_spec().wvalue@
+            } else {
+                final(self).state_spec().phase == old(self).state_spec().phase
+                    && final(self).state_spec().output_ready == old(self).state_spec().output_ready
+                    && final(self).state_spec().snapshot_spec() == old(self).state_spec().snapshot_spec()
+            },
+            crate::modalities::fork_join::produce_output_action(old(self).state_spec().phase,
+                final(self).state_spec().phase, true, accepted),
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = fork_join_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -293,7 +387,7 @@ pub enum StepState {
 /// # Ok::<(), automation_structures::StepGraphBuildError>(())
 /// ```
 pub struct StepGraph {
-    inner: StepGraphCarrier,
+    inner: CheckedStepGraphCarrier,
 }
 
 impl StepGraph {
@@ -311,7 +405,7 @@ impl StepGraph {
             return Err(StepGraphBuildError::EdgeEndpointOutOfRange);
         }
         if !step_edges_distinct(&edges) { return Err(StepGraphBuildError::DuplicateEdge); }
-        Ok(Self { inner: StepGraphCarrier::new(num_nodes, edges) })
+        Ok(Self { inner: StepGraphCarrier::new_counted(num_nodes, edges) })
     }
 
     /// Number of steps.
@@ -338,10 +432,9 @@ impl StepGraph {
     }
 
     /// Read one step lifecycle state.
-    #[expect(clippy::indexing_slicing, reason = "the branch proves the node index is in bounds")]
     pub fn state(&self, node: usize) -> Option<StepState> {
         if node >= self.inner.nstate.len() { return None; }
-        Some(self.inner.nstate[node])
+        Some(self.inner.nstate.state_at(node))
     }
 
     /// Promote a blocked node after every predecessor completes.
@@ -359,6 +452,7 @@ impl StepGraph {
     #[must_use]
     pub fn start(&mut self, node: usize) -> (accepted: bool) {
         proof { use_type_invariant(&*self); }
+        if !self.inner.can_start_ready(node) { return false; }
         let mut carrier = step_graph_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
         let accepted = carrier.start_running(node);
@@ -378,18 +472,9 @@ impl StepGraph {
     }
 
     /// Whether every step is complete.
-    #[expect(clippy::indexing_slicing, reason = "the loop proves the state index is in bounds")]
-    #[expect(clippy::arithmetic_side_effects, reason = "the loop proves the cursor remains within the vector")]
     pub fn is_done(&self) -> bool {
-        let mut index = 0;
-        while index < self.inner.nstate.len()
-            invariant index <= self.inner.nstate.len(),
-            decreases self.inner.nstate.len() - index,
-        {
-            if !matches!(self.inner.nstate[index], StepState::Complete) { return false; }
-            index += 1;
-        }
-        true
+        proof { use_type_invariant(&*self); }
+        self.inner.all_nodes_complete()
     }
 }
 
@@ -403,9 +488,16 @@ pub enum StreamGraphBuildError {
     ZeroCapacity,
     /// The record value domain must be nonempty.
     EmptyRecordDomain,
+    /// Physical queue reservation failed before an owner was constructed.
+    StorageUnavailable,
 }
 
 /// A bounded three- or four-stage FIFO stream graph.
+///
+/// The default contiguous layout preserves borrowed queue slices; removing its
+/// first record shifts the remaining queue. Select `FifoStorage` with
+/// [`Self::try_with_storage`] for pre-reserved constant-time FIFO actions and
+/// borrowed queue iterators. Both layouts use the same transition owner.
 ///
 /// # Examples
 ///
@@ -419,19 +511,11 @@ pub enum StreamGraphBuildError {
 /// assert!(graph.is_done());
 /// # Ok::<(), automation_structures::StreamGraphBuildError>(())
 /// ```
-pub struct StreamGraph {
-    inner: StreamGraphCarrier,
+pub struct StreamGraph<S: BufferLayout<u64> = ContiguousStorage> {
+    inner: StreamGraphCarrier<S>,
 }
 
 impl StreamGraph {
-    #[verifier::type_invariant]
-    closed spec fn well_formed(&self) -> bool { self.inner.inv() }
-
-    /// Source occurrence count observed from the retained Counter.
-    pub closed spec fn ingested_spec(&self) -> nat { self.inner.ingested.value_spec() }
-    /// Sink occurrence count observed from the retained Counter.
-    pub closed spec fn emitted_spec(&self) -> nat { self.inner.emitted.value_spec() }
-
     /// Validate and construct an empty stream graph.
     ///
     /// # Errors
@@ -439,7 +523,23 @@ impl StreamGraph {
     /// Returns an error for an unsupported chain length, zero queue capacity, or an
     /// empty record domain.
     pub fn new(chain_length: usize, capacity: usize, max_inputs: usize, record_domain_size: u64)
-        -> (result: Result<Self, StreamGraphBuildError>) {
+        -> (result: Result<Self, StreamGraphBuildError>)
+        ensures result is Ok ==> result->Ok_0.config_spec()
+                == (chain_length, capacity, max_inputs, record_domain_size),
+            result is Ok ==> result->Ok_0.first_queue_spec() == Seq::<u64>::empty(),
+            result is Ok ==> result->Ok_0.second_queue_spec() == Seq::<u64>::empty(),
+            result is Ok ==> result->Ok_0.third_queue_spec() == Seq::<u64>::empty(),
+            result is Ok ==> result->Ok_0.ingested_spec() == 0,
+            result is Ok ==> result->Ok_0.emitted_spec() == 0,
+            result is Ok <==> ((chain_length == 3 || chain_length == 4)
+                && capacity > 0 && record_domain_size > 0),
+            matches!(result, Err(StreamGraphBuildError::UnsupportedChainLength))
+                <==> (chain_length != 3 && chain_length != 4),
+            matches!(result, Err(StreamGraphBuildError::ZeroCapacity))
+                <==> ((chain_length == 3 || chain_length == 4) && capacity == 0),
+            matches!(result, Err(StreamGraphBuildError::EmptyRecordDomain))
+                <==> ((chain_length == 3 || chain_length == 4) && capacity > 0 && record_domain_size == 0),
+    {
         if chain_length != 3 && chain_length != 4 {
             return Err(StreamGraphBuildError::UnsupportedChainLength);
         }
@@ -449,17 +549,117 @@ impl StreamGraph {
             chain_length, capacity, max_inputs, record_domain_size,
         ) })
     }
+}
+
+impl<S: BufferLayout<u64>> StreamGraph<S> {
+    /// Erased view of the one retained linear-stream transition owner.
+    pub closed spec fn state_spec(&self) -> StreamGraphCarrier<S> { self.inner }
+
+    #[verifier::type_invariant]
+    closed spec fn well_formed(&self) -> bool { self.inner.inv() }
+
+    /// Source occurrence count observed from the retained Counter.
+    pub closed spec fn ingested_spec(&self) -> nat { self.inner.ingested.value_spec() }
+    /// Sink occurrence count observed from the retained Counter.
+    pub closed spec fn emitted_spec(&self) -> nat { self.inner.emitted.value_spec() }
+    /// Immutable chain length, edge capacity, input bound and record domain.
+    pub closed spec fn config_spec(&self) -> (usize, usize, usize, u64) {
+        (self.inner.chain_length, self.inner.q1.capacity,
+            self.inner.max_inputs, self.inner.record_domain_size)
+    }
+    /// Actual first Buffer's logical FIFO contents.
+    pub closed spec fn first_queue_spec(&self) -> Seq<u64> { self.inner.q1.values@ }
+    /// Actual second Buffer's logical FIFO contents.
+    pub closed spec fn second_queue_spec(&self) -> Seq<u64> { self.inner.q2.values@ }
+    /// Actual optional third Buffer's logical FIFO contents.
+    pub closed spec fn third_queue_spec(&self) -> Seq<u64> { self.inner.q3.values@ }
+    /// Maximum number of source records admitted by this run.
+    pub fn max_inputs(&self) -> (bound: usize)
+        ensures bound == self.config_spec().2,
+    { self.inner.max_inputs }
+
+    /// Exclusive upper bound of record values.
+    pub fn record_domain_size(&self) -> (domain: u64)
+        ensures domain == self.config_spec().3,
+    { self.inner.record_domain_size }
+
+    /// Construct the selected layout and reserve each active queue before admission.
+    ///
+    /// # Errors
+    /// Returns the existing configuration errors before reservation, or
+    /// `StorageUnavailable` if physical queue storage cannot be reserved.
+    pub fn try_with_storage(chain_length: usize, capacity: usize, max_inputs: usize,
+        record_domain_size: u64) -> (result: Result<Self, StreamGraphBuildError>)
+        ensures result is Ok ==> result->Ok_0.config_spec()
+                == (chain_length, capacity, max_inputs, record_domain_size),
+            result is Ok ==> result->Ok_0.first_queue_spec() == Seq::<u64>::empty(),
+            result is Ok ==> result->Ok_0.second_queue_spec() == Seq::<u64>::empty(),
+            result is Ok ==> result->Ok_0.third_queue_spec() == Seq::<u64>::empty(),
+            result is Ok ==> result->Ok_0.ingested_spec() == 0,
+            result is Ok ==> result->Ok_0.emitted_spec() == 0,
+            matches!(result, Err(StreamGraphBuildError::UnsupportedChainLength))
+                <==> (chain_length != 3 && chain_length != 4),
+            matches!(result, Err(StreamGraphBuildError::ZeroCapacity))
+                <==> ((chain_length == 3 || chain_length == 4) && capacity == 0),
+            matches!(result, Err(StreamGraphBuildError::EmptyRecordDomain))
+                <==> ((chain_length == 3 || chain_length == 4) && capacity > 0 && record_domain_size == 0),
+            matches!(result, Err(StreamGraphBuildError::StorageUnavailable))
+                ==> ((chain_length == 3 || chain_length == 4) && capacity > 0 && record_domain_size > 0),
+    {
+        if chain_length != 3 && chain_length != 4 {
+            return Err(StreamGraphBuildError::UnsupportedChainLength);
+        }
+        if capacity == 0 { return Err(StreamGraphBuildError::ZeroCapacity); }
+        if record_domain_size == 0 { return Err(StreamGraphBuildError::EmptyRecordDomain); }
+        let q1 = match Buffer::<u64, S>::try_with_storage(capacity) {
+            Ok(queue) => queue, Err(_) => return Err(StreamGraphBuildError::StorageUnavailable),
+        };
+        let q2 = match Buffer::<u64, S>::try_with_storage(capacity) {
+            Ok(queue) => queue, Err(_) => return Err(StreamGraphBuildError::StorageUnavailable),
+        };
+        let q3 = if chain_length == 4 {
+            match Buffer::<u64, S>::try_with_storage(capacity) {
+                Ok(queue) => queue, Err(_) => return Err(StreamGraphBuildError::StorageUnavailable),
+            }
+        } else { Buffer::<u64, S>::with_storage(capacity) };
+        Ok(Self { inner: StreamGraphCarrier::<S>::with_buffers(
+            chain_length, q1, q2, q3, max_inputs, record_domain_size,
+        ) })
+    }
 
     /// Number of execution stages.
-    pub fn chain_length(&self) -> usize { self.inner.chain_length }
+    pub fn chain_length(&self) -> (stages: usize)
+        ensures stages == self.config_spec().0,
+    { self.inner.chain_length }
 
     /// Per-edge FIFO capacity.
-    pub fn capacity(&self) -> usize { self.inner.capacity() }
+    pub fn capacity(&self) -> (capacity: usize)
+        ensures capacity == self.config_spec().1,
+            self.state_spec().inv(),
+            self.state_spec().some_action_enabled(),
+            self.config_spec() == (self.state_spec().chain_length,
+                self.state_spec().q1.capacity, self.state_spec().max_inputs,
+                self.state_spec().record_domain_size),
+            self.ingested_spec() == self.state_spec().ingested.value_spec(),
+            self.emitted_spec() == self.state_spec().emitted.value_spec(),
+            self.first_queue_spec() == self.state_spec().q1.values@,
+            self.second_queue_spec() == self.state_spec().q2.values@,
+            self.third_queue_spec() == self.state_spec().q3.values@,
+    {
+        proof {
+            use_type_invariant(self);
+            self.inner.lemma_some_action_enabled();
+        }
+        self.inner.capacity()
+    }
 
     /// Records admitted at the source.
     #[expect(clippy::cast_possible_truncation, reason = "the private stream invariant bounds the source Counter by max_inputs: usize")]
     pub fn ingested(&self) -> (count: usize)
         ensures count == self.ingested_spec(),
+            self.ingested_spec() == self.first_queue_spec().len()
+                + self.second_queue_spec().len() + self.third_queue_spec().len()
+                + self.emitted_spec(),
     {
         proof { use_type_invariant(self); }
         self.inner.ingested.value() as usize
@@ -475,25 +675,56 @@ impl StreamGraph {
     }
 
     /// Current depth of the first queue.
-    pub fn first_queue_len(&self) -> usize { self.inner.q1.len() }
+    pub fn first_queue_len(&self) -> (length: usize)
+        ensures length == self.first_queue_spec().len(),
+    { self.inner.q1.len() }
 
     /// Current depth of the second queue.
-    pub fn second_queue_len(&self) -> usize { self.inner.q2.len() }
+    pub fn second_queue_len(&self) -> (length: usize)
+        ensures length == self.second_queue_spec().len(),
+    { self.inner.q2.len() }
 
     /// Current depth of the optional third queue.
-    pub fn third_queue_len(&self) -> usize { self.inner.q3.len() }
+    pub fn third_queue_len(&self) -> (length: usize)
+        ensures length == self.third_queue_spec().len(),
+    { self.inner.q3.len() }
 
     /// Whether at least one modeled transition is enabled in the current state.
     ///
     /// This state-level observation does not promise that a scheduler will choose an action.
-    pub fn has_enabled_action(&self) -> bool {
+    pub fn has_enabled_action(&self) -> (enabled: bool)
+        ensures enabled == (
+            (self.ingested_spec() < self.config_spec().2
+                && self.first_queue_spec().len() < self.config_spec().1)
+            || (self.first_queue_spec().len() > 0 && self.second_queue_spec().len() < self.config_spec().1)
+            || (self.config_spec().0 == 3 && self.second_queue_spec().len() > 0)
+            || (self.config_spec().0 == 4 && self.second_queue_spec().len() > 0
+                && self.third_queue_spec().len() < self.config_spec().1)
+            || (self.config_spec().0 == 4 && self.third_queue_spec().len() > 0)
+            || (self.ingested_spec() == self.config_spec().2
+                && self.first_queue_spec().len() == 0 && self.second_queue_spec().len() == 0
+                && self.third_queue_spec().len() == 0)),
+    {
         proof { use_type_invariant(self); }
         self.inner.some_action_enabled_exec()
     }
 
     /// Admit one source record if its value, input bound, and backpressure permit it.
     #[must_use]
-    pub fn ingest(&mut self, value: u64) -> (accepted: bool) {
+    pub fn ingest(&mut self, value: u64) -> (accepted: bool)
+        ensures accepted == (value < old(self).config_spec().3
+                && old(self).ingested_spec() < old(self).config_spec().2
+                && old(self).first_queue_spec().len() < old(self).config_spec().1),
+            final(self).config_spec() == old(self).config_spec(),
+            final(self).first_queue_spec() == if accepted {
+                old(self).first_queue_spec().push(value)
+            } else { old(self).first_queue_spec() },
+            final(self).second_queue_spec() == old(self).second_queue_spec(),
+            final(self).third_queue_spec() == old(self).third_queue_spec(),
+            final(self).ingested_spec() == old(self).ingested_spec()
+                + if accepted { 1nat } else { 0nat },
+            final(self).emitted_spec() == old(self).emitted_spec(),
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = stream_graph_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -504,7 +735,20 @@ impl StreamGraph {
 
     /// Transfer one FIFO record across the first internal stage.
     #[must_use]
-    pub fn advance_first(&mut self) -> (accepted: bool) {
+    pub fn advance_first(&mut self) -> (accepted: bool)
+        ensures accepted == (old(self).first_queue_spec().len() > 0
+                && old(self).second_queue_spec().len() < old(self).config_spec().1),
+            final(self).config_spec() == old(self).config_spec(),
+            final(self).first_queue_spec() == if accepted {
+                old(self).first_queue_spec().skip(1)
+            } else { old(self).first_queue_spec() },
+            final(self).second_queue_spec() == if accepted {
+                old(self).second_queue_spec().push(old(self).first_queue_spec()[0])
+            } else { old(self).second_queue_spec() },
+            final(self).third_queue_spec() == old(self).third_queue_spec(),
+            final(self).ingested_spec() == old(self).ingested_spec(),
+            final(self).emitted_spec() == old(self).emitted_spec(),
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = stream_graph_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -515,7 +759,21 @@ impl StreamGraph {
 
     /// Transfer one FIFO record across the optional four-stage link.
     #[must_use]
-    pub fn advance_second(&mut self) -> (accepted: bool) {
+    pub fn advance_second(&mut self) -> (accepted: bool)
+        ensures accepted == (old(self).config_spec().0 == 4
+                && old(self).second_queue_spec().len() > 0
+                && old(self).third_queue_spec().len() < old(self).config_spec().1),
+            final(self).config_spec() == old(self).config_spec(),
+            final(self).first_queue_spec() == old(self).first_queue_spec(),
+            final(self).second_queue_spec() == if accepted {
+                old(self).second_queue_spec().skip(1)
+            } else { old(self).second_queue_spec() },
+            final(self).third_queue_spec() == if accepted {
+                old(self).third_queue_spec().push(old(self).second_queue_spec()[0])
+            } else { old(self).third_queue_spec() },
+            final(self).ingested_spec() == old(self).ingested_spec(),
+            final(self).emitted_spec() == old(self).emitted_spec(),
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = stream_graph_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -525,15 +783,35 @@ impl StreamGraph {
     }
 
     /// Consume and return the next FIFO record at the sink.
-    #[expect(clippy::indexing_slicing, reason = "the queue guards prove the sink head is present")]
-    pub fn consume(&mut self) -> (value: Option<u64>) {
+    pub fn consume(&mut self) -> (value: Option<u64>)
+        ensures value == if old(self).config_spec().0 == 3 {
+                if old(self).second_queue_spec().len() > 0 {
+                    Some(old(self).second_queue_spec()[0])
+                } else { None }
+            } else {
+                if old(self).third_queue_spec().len() > 0 {
+                    Some(old(self).third_queue_spec()[0])
+                } else { None }
+            },
+            final(self).config_spec() == old(self).config_spec(),
+            final(self).first_queue_spec() == old(self).first_queue_spec(),
+            final(self).second_queue_spec() == if value is Some && old(self).config_spec().0 == 3 {
+                old(self).second_queue_spec().skip(1) } else { old(self).second_queue_spec() },
+            final(self).third_queue_spec() == if value is Some && old(self).config_spec().0 == 4 {
+                old(self).third_queue_spec().skip(1) } else { old(self).third_queue_spec() },
+            final(self).ingested_spec() == old(self).ingested_spec(),
+            final(self).emitted_spec() == old(self).emitted_spec()
+                + if value is Some { 1nat } else { 0nat },
+    {
         proof { use_type_invariant(&*self); }
         let value = if self.inner.chain_length == 3 {
-            if self.inner.q2.is_empty() { return None; }
-            self.inner.q2.values[0]
+            match self.inner.q2.values.value_at(0) {
+                Some(value) => *value, None => return None,
+            }
         } else {
-            if self.inner.q3.is_empty() { return None; }
-            self.inner.q3.values[0]
+            match self.inner.q3.values.value_at(0) {
+                Some(value) => *value, None => return None,
+            }
         };
         let mut carrier = stream_graph_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -547,11 +825,14 @@ impl StreamGraph {
     }
 
     /// Whether the input bound is reached and every queue is drained.
-    pub fn is_done(&self) -> bool {
-        self.inner.ingested.value() == self.inner.max_inputs as u64
-            && self.inner.q1.is_empty()
-            && self.inner.q2.is_empty()
-            && self.inner.q3.is_empty()
+    pub fn is_done(&self) -> (complete: bool)
+        ensures complete == (self.ingested_spec() == self.config_spec().2
+            && self.first_queue_spec().len() == 0
+            && self.second_queue_spec().len() == 0
+            && self.third_queue_spec().len() == 0),
+    {
+        proof { use_type_invariant(&*self); }
+        self.inner.input_drained()
     }
 }
 
@@ -581,7 +862,7 @@ fn step_edges_valid(edges: &Vec<(usize, usize)>, num_nodes: usize) -> (valid: bo
 #[expect(clippy::indexing_slicing, reason = "the nested loops prove both edge indices are in bounds")]
 #[expect(clippy::arithmetic_side_effects, reason = "the loops prove both cursors remain within the vector")]
 #[expect(clippy::ptr_arg, reason = "Verus sequence-view contracts are stated over Vec in this checked boundary")]
-fn step_edges_distinct(edges: &Vec<(usize, usize)>) -> (distinct: bool)
+fn step_edges_distinct_quadratic(edges: &Vec<(usize, usize)>) -> (distinct: bool)
     ensures distinct == StepGraphCarrier::edges_distinct(edges@),
 {
     let mut left = 0;
@@ -611,24 +892,144 @@ fn step_edges_distinct(edges: &Vec<(usize, usize)>) -> (distinct: bool)
     true
 }
 
+// Pure borrowed edge keys; OrderingPass owns the temporary permutation and sort.
+struct StepEdgeOrder<'a> {
+    edges: &'a Vec<(usize, usize)>,
+}
+impl PositionOrder for StepEdgeOrder<'_> {
+    closed spec fn domain_len(&self) -> nat { self.edges@.len() }
+    closed spec fn key_le(&self, left: usize, right: usize) -> bool {
+        let left = self.edges@[left as int];
+        let right = self.edges@[right as int];
+        left.0 < right.0 || (left.0 == right.0 && left.1 <= right.1)
+    }
+    proof fn establish(&self) {
+        assert forall|a: usize| a < self.domain_len() implies #[trigger] self.key_le(a, a) by {}
+        assert forall|a: usize, b: usize| a < self.domain_len() && b < self.domain_len()
+            implies #[trigger] self.key_le(a, b) || self.key_le(b, a) by {}
+        assert forall|a: usize, b: usize, c: usize|
+            a < self.domain_len() && b < self.domain_len() && c < self.domain_len()
+            && #[trigger] self.key_le(a, b) && #[trigger] self.key_le(b, c)
+            implies self.key_le(a, c) by {}
+    }
+    fn len(&self) -> (length: usize) { self.edges.len() }
+    #[expect(clippy::indexing_slicing, reason = "PositionOrder bounds both immutable edge positions")]
+    fn compare(&self, left: usize, right: usize) -> (ordering: i8) {
+        let left = self.edges[left];
+        let right = self.edges[right];
+        if left.0 < right.0 || (left.0 == right.0 && left.1 < right.1) { -1 }
+        else if left.0 == right.0 && left.1 == right.1 { 0 } else { 1 }
+    }
+}
+
+proof fn adjacent_step_edges_are_distinct(order: &StepEdgeOrder<'_>, positions: Seq<usize>)
+    requires
+        order.edges@.len() <= usize::MAX,
+        crate::connectives::ordering_pass::permutation(positions, order.edges@.len()),
+        crate::connectives::ordering_pass::arranged(positions, order),
+        forall|rank: int| 1 <= rank < positions.len() ==>
+            #[trigger] order.edges@[positions[rank - 1] as int] != #[trigger] order.edges@[positions[rank] as int],
+    ensures StepGraphCarrier::edges_distinct(order.edges@),
+{
+    let edges = order.edges@;
+    assert forall|i: int, j: int| 0 <= i < edges.len() && 0 <= j < edges.len() && i != j
+        implies #[trigger] edges[i] != #[trigger] edges[j] by {
+        assert(0 <= i <= usize::MAX && 0 <= j <= usize::MAX);
+        let original_i = i as usize;
+        let original_j = j as usize;
+        assert(original_i as int == i && original_j as int == j);
+        assert(positions.contains(original_i));
+        assert(positions.contains(original_j));
+        let left = choose|rank: int| 0 <= rank < positions.len()
+            && positions[rank] == original_i;
+        let right = choose|rank: int| 0 <= rank < positions.len()
+            && positions[rank] == original_j;
+        assert(0 <= left < positions.len() && positions[left] as int == i);
+        assert(0 <= right < positions.len() && positions[right] as int == j);
+        assert(left != right);
+        if edges[i] == edges[j] {
+            let first = if left < right { left } else { right };
+            let last = if left < right { right } else { left };
+            assert(0 <= first < last < positions.len());
+            assert(positions[last - 1] < edges.len());
+            if first < last - 1 {
+                assert(crate::connectives::ordering_pass::position_le(order, positions[first], positions[last - 1]));
+            } else {
+                assert(first == last - 1);
+                assert(order.key_le(positions[first], positions[last - 1]));
+            }
+            assert(crate::connectives::ordering_pass::position_le(order, positions[last - 1], positions[last]));
+            assert(order.key_le(positions[first], positions[last - 1]));
+            assert(order.key_le(positions[last - 1], positions[last]));
+            let lower = edges[positions[first] as int];
+            let middle = edges[positions[last - 1] as int];
+            let upper = edges[positions[last] as int];
+            assert(lower == upper);
+            assert(lower.0 <= middle.0 && middle.0 <= upper.0);
+            assert(middle.0 == upper.0);
+            assert(lower.1 <= middle.1 && middle.1 <= upper.1);
+            assert(middle == upper);
+            assert(false);
+        }
+    }
+}
+
+#[expect(clippy::indexing_slicing, reason = "the permutation certificate and adjacent-rank guard bound every read")]
+#[expect(clippy::arithmetic_side_effects, reason = "the adjacent rank is positive and advances only below the admitted length")]
+fn step_edges_distinct(edges: &Vec<(usize, usize)>) -> (distinct: bool)
+    ensures distinct == StepGraphCarrier::edges_distinct(edges@),
+{
+    if edges.len() < 2 { return true; }
+    if edges.len() <= 32 { return step_edges_distinct_quadratic(edges); }
+    let order = StepEdgeOrder { edges };
+    let positions = match try_arrange_indices(edges.len(), &order) {
+        Ok(positions) => positions,
+        Err(_) => return step_edges_distinct_quadratic(edges),
+    };
+    let mut rank: usize = 1;
+    while rank < positions.len()
+        invariant
+            1 <= rank <= positions.len(),
+            crate::connectives::ordering_pass::permutation(positions@, edges@.len()),
+            crate::connectives::ordering_pass::arranged(positions@, &order),
+            forall|i: int| 1 <= i < rank ==>
+                #[trigger] edges@[positions@[i - 1] as int] != #[trigger] edges@[positions@[i] as int],
+        decreases positions.len() - rank,
+    {
+        let left = positions[rank - 1];
+        let right = positions[rank];
+        if edges[left].0 == edges[right].0 && edges[left].1 == edges[right].1 {
+            assert(left != right);
+            assert(!StepGraphCarrier::edges_distinct(edges@));
+            return false;
+        }
+        rank = rank + 1;
+    }
+    proof { adjacent_step_edges_are_distinct(&order, positions@); }
+    true
+}
+
 fn sequential_sentinel() -> (carrier: SequentialCarrier)
     ensures carrier.inv(),
 { SequentialCarrier::new(1, 1, 0) }
 
-fn fork_join_sentinel() -> (carrier: ForkJoinCarrier)
+fn fork_join_sentinel() -> (carrier: CheckedForkJoinCarrier)
     ensures carrier.inv(),
-{ ForkJoinCarrier::new(0, 1, 0) }
+{ ForkJoinCarrier::new_indexed(0, 1, 0) }
 
-fn step_graph_sentinel() -> (carrier: StepGraphCarrier)
+fn step_graph_sentinel() -> (carrier: CheckedStepGraphCarrier)
     ensures carrier.inv(),
 {
     let edges: Vec<(usize, usize)> = Vec::new();
-    StepGraphCarrier::new(0, edges)
+    StepGraphCarrier::new_counted(0, edges)
 }
 
-fn stream_graph_sentinel() -> (carrier: StreamGraphCarrier)
+fn stream_graph_sentinel<S: BufferLayout<u64>>() -> (carrier: StreamGraphCarrier<S>)
     ensures carrier.inv(),
-{ StreamGraphCarrier::new(3, 1, 0, 1) }
+{
+    StreamGraphCarrier::<S>::with_buffers(3, Buffer::<u64, S>::with_storage(1),
+        Buffer::<u64, S>::with_storage(1), Buffer::<u64, S>::with_storage(1), 0, 1)
+}
 
 }
 
@@ -662,9 +1063,11 @@ impl ForkJoin {
 
     /// Borrow the stable output snapshot after output production.
     pub fn outputs(&self) -> Option<&[u64]> {
-        self.inner
-            .output_ready
-            .then_some(self.inner.output_snapshot.as_slice())
+        if self.inner.output_ready {
+            Some(self.inner.output_values())
+        } else {
+            None
+        }
     }
 }
 
@@ -681,16 +1084,6 @@ impl StepGraph {
 }
 
 impl StreamGraph {
-    /// Maximum number of source records admitted by this run.
-    pub fn max_inputs(&self) -> usize {
-        self.inner.max_inputs
-    }
-
-    /// Exclusive upper bound of record values.
-    pub fn record_domain_size(&self) -> u64 {
-        self.inner.record_domain_size
-    }
-
     /// Borrow records waiting at the first FIFO edge.
     pub fn first_queue(&self) -> &[u64] {
         self.inner.q1.values.as_slice()
@@ -704,6 +1097,21 @@ impl StreamGraph {
     /// Borrow records waiting at the optional third FIFO edge.
     pub fn third_queue(&self) -> &[u64] {
         self.inner.q3.values.as_slice()
+    }
+}
+
+impl StreamGraph<FifoStorage> {
+    /// Borrow the first queue in FIFO order without copying or making it contiguous.
+    pub fn first_queue(&self) -> std::collections::vec_deque::Iter<'_, u64> {
+        self.inner.q1.values.values.iter()
+    }
+    /// Borrow the second queue in FIFO order without copying or making it contiguous.
+    pub fn second_queue(&self) -> std::collections::vec_deque::Iter<'_, u64> {
+        self.inner.q2.values.values.iter()
+    }
+    /// Borrow the optional third queue in FIFO order without copying or making it contiguous.
+    pub fn third_queue(&self) -> std::collections::vec_deque::Iter<'_, u64> {
+        self.inner.q3.values.values.iter()
     }
 }
 
@@ -724,17 +1132,22 @@ impl_observational_debug!(StepGraph, "StepGraph",
     "edge_count" => edge_count,
     "done" => is_done,
 );
-impl_observational_debug!(StreamGraph, "StreamGraph",
-    "chain_length" => chain_length,
-    "capacity" => capacity,
-    "has_enabled_action" => has_enabled_action,
-    "ingested" => ingested,
-    "emitted" => emitted,
-    "first_queue_len" => first_queue_len,
-    "second_queue_len" => second_queue_len,
-    "third_queue_len" => third_queue_len,
-    "done" => is_done,
-);
+impl<S: BufferLayout<u64>> core::fmt::Debug for StreamGraph<S> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("StreamGraph")
+            .field("chain_length", &self.chain_length())
+            .field("capacity", &self.capacity())
+            .field("has_enabled_action", &self.has_enabled_action())
+            .field("ingested", &self.ingested())
+            .field("emitted", &self.emitted())
+            .field("first_queue_len", &self.first_queue_len())
+            .field("second_queue_len", &self.second_queue_len())
+            .field("third_queue_len", &self.third_queue_len())
+            .field("done", &self.is_done())
+            .finish()
+    }
+}
 
 impl_public_error!(SequentialBuildError, {
     Self::NoSteps => "sequential execution requires at least one step",
@@ -753,4 +1166,5 @@ impl_public_error!(StreamGraphBuildError, {
     Self::UnsupportedChainLength => "stream graph supports only three- or four-stage chains",
     Self::ZeroCapacity => "stream-graph queue capacity must be positive",
     Self::EmptyRecordDomain => "stream-graph record domain is empty",
+    Self::StorageUnavailable => "stream-graph queue storage could not be reserved",
 });

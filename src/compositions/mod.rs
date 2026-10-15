@@ -29,6 +29,8 @@ pub mod bisection;
 pub mod equivalence_class;
 /// Master and sub-pool budget federation.
 pub mod federated_budget;
+/// Complete minimum selection with retained ordering and a canonical Hard winner.
+pub mod minimum_selection;
 /// Fixed-window rate limiting.
 pub mod rate_limit;
 /// Ordered additive and maximum reductions.
