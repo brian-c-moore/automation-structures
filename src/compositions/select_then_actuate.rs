@@ -237,7 +237,7 @@ impl SelectThenActuate {
             && !self.actuation.is_actuated(seat)
     }
 
-    /// Whether every seat is actuated and the pass can close.
+    /// Whether every allocated seat is actuated and the pass can close.
     pub fn can_finish(&self) -> (enabled: bool)
         requires self.inv(),
         ensures enabled == (!self.actuation.complete && self.actuation.ready_to_finish()),
@@ -246,6 +246,7 @@ impl SelectThenActuate {
     }
 
     /// CompetitiveSelectionHard.Evaluate followed by ActuationPass.Allocate.
+    #[expect(clippy::indexing_slicing, reason = "the action precondition bounds the borrowed selection owner by the retained seat count")]
     pub fn evaluate(&mut self, seat: usize)
         requires
             old(self).inv(),
@@ -275,19 +276,18 @@ impl SelectThenActuate {
     {
         proof { self.expose(); }
         let ghost old_selections = self.selections@;
-        let mut selection = CompetitiveSelectionHard::new(self.num_candidates);
-        self.selections.set_and_swap(seat, &mut selection);
-        assert(selection == old_selections[seat as int]);
-        selection.evaluate();
-        let winner = match selection.allocation {
-            Some(candidate) => candidate,
-            None => {
-                assert(false);
-                0
-            },
+        let winner = {
+            let selection = &mut self.selections[seat];
+            selection.evaluate();
+            match selection.allocation {
+                Some(candidate) => candidate,
+                None => {
+                    assert(false);
+                    0
+                },
+            }
         };
         self.actuation.allocate(seat, winner as u64);
-        self.selections.set(seat, selection);
         assert(self.selection_owners_well_formed()) by {
             reveal(SelectThenActuate::selection_owners_well_formed);
             assert forall|index: int| 0 <= index < self.selections@.len() implies {
@@ -326,6 +326,7 @@ impl SelectThenActuate {
 
     /// Revise one unapplied seat through ActuationPass.Deallocate and
     /// CompetitiveSelectionHard.UpdateScore.
+    #[expect(clippy::indexing_slicing, reason = "the action precondition bounds the borrowed selection owner by the retained seat count")]
     pub fn update_score(&mut self, seat: usize, candidate: usize, value: u64)
         requires
             old(self).inv(),
@@ -355,11 +356,10 @@ impl SelectThenActuate {
         if self.actuation.is_allocated(seat) {
             self.actuation.deallocate(seat);
         }
-        let mut selection = CompetitiveSelectionHard::new(self.num_candidates);
-        self.selections.set_and_swap(seat, &mut selection);
-        assert(selection == old_selections[seat as int]);
-        selection.update_score(candidate, value);
-        self.selections.set(seat, selection);
+        {
+            let selection = &mut self.selections[seat];
+            selection.update_score(candidate, value);
+        }
         assert(self.selection_owners_well_formed()) by {
             reveal(SelectThenActuate::selection_owners_well_formed);
             assert forall|index: int| 0 <= index < self.selections@.len() implies {

@@ -46,20 +46,20 @@ fn check<T: std::fmt::Debug + PartialEq>(name: &str, got: T, want: T) -> bool {
 // ── distributional: the empirical statistical layer ────────────────────────────────
 //
 // Every other check in this binary is a known-answer cross-check of a verified
-// function. This section is an empirical statistical test, because the Sampler
-// entry's distributional property is not expressible in the TLA+ model;
-// Sampler.tla's header names chi-squared as the route.
+// function. This section measures seeded proposal/entropy rules composed with
+// Sampler's acceptor. The primary model specifies bounded selection and live
+// support; it does not determine the caller's probability law.
 //
-// Two generators are run: `draw_weighted` and `draw_uniform`. Both are
-// Verus-verified against the same specification -- each re-establishes exactly
-// BoundedSample and SupportConsistency and nothing else -- and they produce
-// different frequency profiles, so the specification does not pin the
-// distribution and the draw rule is domain-supplied content.
+// Two draw rules are run: `draw_weighted` and `draw_uniform`. Both preserve the
+// same Sampler invariant. Their verified contracts also specify their different
+// admission guards and the exact accepted/refused state changes. The resulting
+// frequency profiles measure these fixture rules; they are not distribution
+// theorems derived from BoundedSample and SupportConsistency alone.
 //
-// The generator is a linear congruential generator with the Numerical Recipes
-// constants, which Sampler.tla's header names as the reference generator. An
-// LCG is not a cryptographic PRNG and its low-order bits have short periods, so
-// the high bits are used for both proposals.
+// This fixture uses a linear congruential generator with the Numerical Recipes
+// constants. The primary Sampler model does not select a reference generator.
+// An LCG is not a cryptographic PRNG, and its low-order bits have short periods,
+// so this fixture uses the high bits for proposals and entropy.
 
 struct Lcg(u32);
 
@@ -421,7 +421,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     all_ok &= actuation_pass_vectors::run();
 
-    // Bisection Bisection: halving search on sorted slice.
+    // Sorted-slice membership query; the retained Bisection machine is checked below.
     let sorted: [u64; 7] = [1, 3, 5, 7, 9, 11, 13];
     all_ok &= check(
         "Bisection bisection_find(sorted, 1)",

@@ -5,9 +5,8 @@ around behavioral obligations, with explicit contracts and conditions for compos
 rules govern how the implementations preserve those contracts and how their state owners combine.
 
 Automation Structures Research explains the choice of abstractions and defines their semantics.
-`alk-core` is being built as an automation kernel composed from this library; other applications
-can use the same parts in their own architectures. Responsibility for a deployment obligation
-depends on the enforcement authority established for that deployment.
+Applications compose these parts under their own enforcement boundaries. Responsibility for
+a deployment obligation depends on the enforcement authority established for that deployment.
 
 ## Ownership model
 
@@ -56,7 +55,10 @@ forward and inverse arrays jointly describe one permutation. The existing sort
 produces the forward order and Cursor owns inverse construction. Neither array
 can become a second mutable ordering authority.
 
-TypedAllocation is AllocationSnapshot's owned-payload entry profile. Its private
+TypedAllocation's budgeted profile is AllocationSnapshot's owned-payload entry
+composition. Its unbudgeted profile binds insert-only ResourceRegistry membership
+and consuming seal, without a Budget or an AllocationSnapshot budget theorem.
+Both retain the same entry preparation and publication implementation. Private
 batch preparation reuses the same content guards, checks pending borrowed key
 identities in Registry, and folds every dimension through ReductionColumns.
 Budget previews admit the whole prefix without overflowing. After all storage
@@ -176,6 +178,13 @@ establishing that an external delegate performed a later side effect.
 The supported hard, hard-exclusive, soft, and ranked selection forms live together under the
 single `CompetitiveSelection` primitive owner module.
 
+The complete-minimum construction lives in `compositions/minimum_selection.rs`:
+OrderingPass retains the full arrangement, the existing Hard owner selects one
+winner, and Cursor/Buffer retain all ties. It introduces no new primitive mode or
+winner quota; `CompetitiveSelectionMinimum` is only a compatibility re-export.
+SummarySignal, typed allocation, owned/column Reduction, traversal and typed stream
+profiles likewise require their own joint contracts and refinement evidence.
+
 ## Connective owners
 
 | Connective | State owner or relation |
@@ -221,7 +230,56 @@ The composition owners are the files under `src/compositions/`. The checked wrap
 | `TraversalBudgetComposition` | `TraversalEngine` wrapper with no additional state and a composition theorem |
 | `GovernedCommit` | bounded integration witness over `ResourceRegistry`, two `Budget` owners, `PropagationPass`, `ActuationPass`, `AuditSink`, and `Sequential` |
 
+## Domain, storage and execution bindings
+
+Domain adapters supply mathematical content: key identity and borrowed equality,
+predicates, size projections, ordering, fold operations, snapshot eligibility and
+traversal mutation/inverse laws. A native trait implementation, Copy bound or
+immutable receiver alone proves neither callback purity nor stability of aliased
+content. Review the concrete adapter and its executable/specification correspondence;
+a callback must not conceal another scheduler, registry, queue or lifecycle owner.
+Prepared compositions exclude callbacks from commit where their contract says so;
+that is a composition property, not an unconditional promise of every part action.
+
+AuditSink owns Record admission, accepted-prefix count and carried result for both
+its full-history and SummaryHistory bindings. SummaryHistory's sequence is proof-only:
+it cannot supply runtime replay, chain validation, retained evidence or durability.
+Its Counter has no reset or wrap. Original full-history behavior remains distinct.
+
+Buffer retains one logical sequence under sealed contiguous Vec and FIFO deque
+bindings. Typed stream/fanout and selected-layout linear StreamGraph use the FIFO
+binding; pre-reservation supplies physical room for admitted publications. Default
+Buffer and StreamGraph retain borrowed-slice compatibility and their shifting
+front-removal cost. A selected layout changes representation, not the sequence
+bound, admission, FIFO custody or transition owner. FIFO observations borrow the
+retained data without creating another queue or cached aggregate. The standard
+container's allocation, complexity and iterator contracts remain physical premises.
+
+Registry retains one logical mapping. Sealed Vec, FIFO deque and IndexMap
+representations supply physical storage and lookup, not another Registry
+transition authority. FIFO positional removal is distinct from equality-only
+linear search and arbitrary order-preserving removal. Byte-slice
+equality, hashing and Borrow must agree on the retained byte identity. The named
+external-body bindings assume the stated library contracts; structural verification
+does not prove Rust slice equality, IndexMap internals, hashing, allocator behavior
+or a domain encoding's injectivity. Their concrete dependency and target identities
+must be bound when those premises are used. OrderingPass similarly relies on Vec
+reservation and slice sorting under the admitted comparator; immutable permutation
+certificates do not verify arbitrary domain comparators or grant scheduling fairness.
+
+Logical refusal frames preserve the governed state and original input specified by
+each selected profile. Reservation may leave spare physical capacity. Native fault
+controls qualify only their concrete storage/actions and listed failure sites.
+RateLimit's bounded logical-clock observation is not an OS timer; physical scheduling,
+synchronization, external effects and recovery require their own binding evidence.
+
 ## Adding or changing implementation
+
+A proposed part API must satisfy all seven checks: a concrete required behavior; an exact
+mismatch in existing callable parts; responsibility local to the owner; domain-neutral semantics;
+one shared implementation; a minimal interface; and a verifiable contract with decisive controls.
+A missing convenience composition is insufficient. Unknown checks block that proposed change.
+This is a review rule, not a proof that no composition is possible.
 
 Before adding state or a transition:
 
@@ -240,9 +298,9 @@ and contract clause is preserved under that mapping.
 
 ## Release gate
 
-Run `cargo crate-quality --profile release`. The crate's `.crate-quality.toml` defines the required
-commands, while CI runs the Rust tests across its supported operating systems and runs the
-remaining verification jobs on Linux; a release candidate must pass every check listed here.
+Run the ordinary development checks in [CONTRIBUTING.md](CONTRIBUTING.md). CI runs the Rust tests
+across its supported operating systems and the remaining verification jobs on Linux. A release
+candidate must pass every check listed here.
 
 1. Workflow and shell-script static analysis, formatting, strict Clippy, tests for all targets and
    features, doctests, strict rustdoc, and the complete public catalog example on Rust 1.95.0.

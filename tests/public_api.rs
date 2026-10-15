@@ -45,6 +45,336 @@ fn counter_preview_frames_generation_exhaustion() {
 #[test]
 #[expect(
     clippy::panic_in_result_fn,
+    reason = "assertions qualify joint refusal/catch-up and independent generations; setup propagates errors"
+)]
+fn stable_signal_listeners_compose_independent_temporary_registrations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use automation_structures::{Buffer, Counter, SignalListener, SummarySignal};
+    fn issue(
+        signal: &mut SummarySignal<u64>,
+        listener: SignalListener,
+        generation: &mut Counter,
+        temporary: &mut Buffer<u64>,
+        observed_head: usize,
+    ) -> Result<bool, automation_structures::SignalProfileError> {
+        if signal.change_count() != observed_head
+            || !temporary.is_empty()
+            || !generation.can_increment()
+        {
+            return Ok(false);
+        }
+        signal.notify(listener)?;
+        assert!(generation.try_increment());
+        assert_eq!(temporary.push(generation.value()), Ok(()));
+        Ok(true)
+    }
+    let mut signal = SummarySignal::new(77, 0u64, 2, 16);
+    let first_listener = signal.register()?;
+    let second_listener = signal.register()?;
+    assert_ne!(first_listener.generation(), second_listener.generation());
+    let mut exhausted = Counter::new(u64::MAX);
+    let mut available = Counter::new(0);
+    let mut first = Buffer::try_new(1)?;
+    let mut second = Buffer::try_new(1)?;
+    assert!(signal.set_value(1)?);
+    assert!(signal.pending(first_listener)?);
+    assert!(signal.pending(second_listener)?);
+    assert!(!issue(
+        &mut signal,
+        first_listener,
+        &mut exhausted,
+        &mut first,
+        1
+    )?);
+    assert_eq!(exhausted.value(), u64::MAX);
+    assert!(first.is_empty());
+    assert!(signal.pending(first_listener)?);
+    assert!(signal.pending(second_listener)?);
+    assert!(issue(
+        &mut signal,
+        second_listener,
+        &mut available,
+        &mut second,
+        1
+    )?);
+    assert_eq!(available.value(), 1);
+    assert!(second.contains(1));
+    assert!(signal.pending(first_listener)?);
+    assert!(!signal.pending(second_listener)?);
+    assert!(signal.set_value(2)?);
+    assert!(!issue(
+        &mut signal,
+        second_listener,
+        &mut available,
+        &mut second,
+        2
+    )?);
+    assert_eq!(available.value(), 1);
+    assert!(signal.pending(second_listener)?);
+    // Readiness admission belongs to the enclosing application. This witness
+    // exercises only the governed catch-up and temporary retirement actions.
+    assert!(signal.notify(second_listener)?.changed);
+    assert_eq!(second.pop(), Some(1));
+    assert_eq!(available.value(), 1);
+    assert!(signal.set_value(3)?);
+    assert!(!issue(
+        &mut signal,
+        second_listener,
+        &mut available,
+        &mut second,
+        2
+    )?);
+    assert!(second.is_empty());
+    assert_eq!(available.value(), 1);
+    assert!(signal.pending(second_listener)?);
+    assert!(issue(
+        &mut signal,
+        second_listener,
+        &mut available,
+        &mut second,
+        3
+    )?);
+    assert_eq!(available.value(), 2);
+    assert!(!second.contains(1));
+    assert!(second.contains(2));
+    assert!(signal.pending(first_listener)?);
+    assert!(!signal.pending(second_listener)?);
+    assert_eq!(second.pop(), Some(2));
+    assert_eq!(available.value(), 2);
+    assert_eq!(exhausted.value(), u64::MAX);
+    assert_eq!(signal.listener_count(), 2);
+    assert_eq!(signal.change_count(), 3);
+    Ok(())
+}
+
+#[test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "assertions check positional token identity and refusal frames; setup returns typed errors"
+)]
+fn summary_signal_positional_actions_check_scope_index_and_generation()
+-> Result<(), Box<dyn std::error::Error>> {
+    use automation_structures::{SignalProfileError, SummarySignal};
+    let mut signal = SummarySignal::new(78, 0u64, 2, 2);
+    let first = signal.register()?;
+    let second = signal.register()?;
+    let mut foreign = SummarySignal::new(79, 0u64, 1, 2);
+    let foreign_listener = foreign.register()?;
+    assert!(!signal.pending_at(first, 0)?);
+    assert!(signal.set_value(1)?);
+    for (token, index, error) in [
+        (first, 1, SignalProfileError::UnknownListener),
+        (second, 0, SignalProfileError::UnknownListener),
+        (first, usize::MAX, SignalProfileError::UnknownListener),
+        (foreign_listener, 0, SignalProfileError::ForeignScope),
+    ] {
+        assert_eq!(signal.pending_at(token, index), Err(error));
+        assert_eq!(signal.notify_at(token, index), Err(error));
+        assert_eq!(signal.value(), 1);
+        assert_eq!(signal.change_count(), 1);
+        assert_eq!(signal.listener_count(), 2);
+        assert!(signal.pending_at(first, 0)?);
+        assert!(signal.pending_at(second, 1)?);
+    }
+    let observed = signal.notify_at(first, 0)?;
+    assert_eq!(
+        (observed.value, observed.head, observed.changed),
+        (1, 1, true)
+    );
+    assert!(!signal.pending_at(first, 0)?);
+    assert!(signal.pending_at(second, 1)?);
+    assert!(!signal.notify_at(first, 0)?.changed);
+    signal.remove(first)?;
+    assert_eq!(
+        signal.pending_at(first, 0),
+        Err(SignalProfileError::UnknownListener)
+    );
+    assert_eq!(
+        signal.notify_at(first, 0),
+        Err(SignalProfileError::UnknownListener)
+    );
+    assert_eq!(
+        signal.pending_at(second, 1),
+        Err(SignalProfileError::UnknownListener)
+    );
+    assert_eq!(
+        signal.notify_at(second, 1),
+        Err(SignalProfileError::UnknownListener)
+    );
+    assert!(signal.pending_at(second, 0)?);
+    assert!(signal.notify_at(second, 0)?.changed);
+    let replacement = signal.register()?;
+    assert_eq!(replacement.generation(), 3);
+    assert_eq!(
+        signal.notify_at(first, 1),
+        Err(SignalProfileError::UnknownListener)
+    );
+    assert!(signal.pending_at(replacement, 1)?);
+    assert!(signal.set_value(2)?);
+    assert_eq!(signal.notify_at(second, 0)?.head, 2);
+    assert!(signal.pending_at(replacement, 1)?);
+    assert_eq!(signal.change_count(), 2);
+    assert_eq!(signal.listener_count(), 2);
+    Ok(())
+}
+
+#[test]
+fn cursor_profiles_preserve_default_inference_and_u64_movement() {
+    use automation_structures::{Cursor, CursorError, CursorPosition};
+    let mut native = Cursor::new(0);
+    let _: usize = native.position();
+    assert_eq!(native.position(), 0);
+    assert_eq!(native.advance_to(1), Ok(()));
+    assert_eq!(native.position(), 1);
+    assert_eq!(native.advance_to(0), Err(CursorError::Regression));
+    assert_eq!(native.position(), 1);
+    assert_eq!(native.advance_to(1), Ok(()));
+    assert_eq!(<usize as CursorPosition>::zero(), 0);
+    assert_eq!(<usize as CursorPosition>::limit(), usize::MAX as u64);
+    assert_eq!(<usize as CursorPosition>::checked_successor(0), Some(1));
+    assert_eq!(
+        <usize as CursorPosition>::checked_successor(usize::MAX - 1),
+        Some(usize::MAX)
+    );
+    assert_eq!(
+        <usize as CursorPosition>::checked_successor(usize::MAX),
+        None
+    );
+    let mut wide = Cursor::<u64>::from_position(0);
+    let _: u64 = wide.position();
+    assert_eq!(wide.position(), 0);
+    assert_eq!(wide.advance_to(u64::MAX), Ok(()));
+    assert_eq!(wide.position(), u64::MAX);
+    assert_eq!(wide.advance_to(u64::MAX - 1), Err(CursorError::Regression));
+    assert_eq!(wide.position(), u64::MAX);
+    assert_eq!(wide.advance_to(u64::MAX), Ok(()));
+    assert_eq!(<u64 as CursorPosition>::zero(), 0);
+    assert_eq!(<u64 as CursorPosition>::limit(), u64::MAX);
+    assert_eq!(<u64 as CursorPosition>::checked_successor(0), Some(1));
+    assert_eq!(
+        <u64 as CursorPosition>::checked_successor(u64::MAX - 1),
+        Some(u64::MAX)
+    );
+    assert_eq!(<u64 as CursorPosition>::checked_successor(u64::MAX), None);
+}
+
+#[test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "assertions check storage refusal, owner queries and borrowed payload identity; setup propagates errors"
+)]
+fn typed_stream_queries_borrow_the_retained_head_and_match_guard_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    use automation_structures::{
+        TypedStream, TypedStreamError as Error, TypedStreamPublicationPolicy as Policy,
+    };
+    assert!(matches!(
+        TypedStream::<u64>::try_new(84, usize::MAX, 0),
+        Err(Error::StorageUnavailable)
+    ));
+    let mut stream = TypedStream::try_new(81, 2, 5)?;
+    assert_eq!((stream.slot_capacity(), stream.byte_capacity()), (2, 5));
+    assert!(!stream.is_closed());
+    assert!(stream.front().is_none());
+    assert_eq!(stream.check_receive(), Err(Error::Empty));
+    assert_eq!(stream.check_publish(0), Ok(()));
+    let first = vec![11u8, 12].into_boxed_slice();
+    let first_address = first.as_ptr();
+    let sequence = stream.publish(first, 2).map_err(|refusal| refusal.error)?;
+    assert_eq!(sequence, 0);
+    {
+        let head = stream.front();
+        assert!(head.is_some());
+        let head = head.ok_or("missing first retained head")?;
+        assert_eq!(head.0.as_ptr(), first_address);
+        assert_eq!(head.1, 2);
+    }
+    assert_eq!(stream.check_receive(), Ok(()));
+    assert_eq!(stream.check_publish(4), Err(Error::ByteCapacity));
+    let second = vec![13u8, 14, 15].into_boxed_slice();
+    let second_address = second.as_ptr();
+    let sequence = stream.publish(second, 3).map_err(|refusal| refusal.error)?;
+    assert_eq!(sequence, 1);
+    assert_eq!(stream.check_publish(u64::MAX), Err(Error::SlotCapacity));
+    assert_eq!(
+        stream.check_publish_with_policy(u64::MAX, Policy::SlotFirst),
+        Err(Error::SlotCapacity)
+    );
+    assert_eq!(
+        stream.check_publish_with_policy(u64::MAX, Policy::ItemSizeFirst),
+        Err(Error::ItemTooLarge)
+    );
+    assert_eq!((stream.len(), stream.retained_bytes()), (2, 5));
+    assert_eq!(
+        stream
+            .front()
+            .ok_or("lost retained head after policy query")?
+            .0
+            .as_ptr(),
+        first_address
+    );
+    let refused = vec![16u8].into_boxed_slice();
+    let refused_address = refused.as_ptr();
+    let result = stream.publish(refused, u64::MAX);
+    assert!(result.is_err());
+    let refusal = result
+        .err()
+        .ok_or("default publication lost slot-first refusal")?;
+    assert_eq!(refusal.error, Error::SlotCapacity);
+    assert_eq!(refusal.value.as_ptr(), refused_address);
+    assert_eq!((stream.len(), stream.retained_bytes()), (2, 5));
+    let received = stream.receive()?;
+    assert_eq!(received.value.as_ptr(), first_address);
+    let head = stream.front().ok_or("missing second retained head")?;
+    assert_eq!(head.0.as_ptr(), second_address);
+    assert_eq!(head.1, 3);
+    assert_eq!(stream.check_publish(3), Err(Error::ByteCapacity));
+    assert_eq!(
+        stream.check_publish_with_policy(3, Policy::ItemSizeFirst),
+        Err(Error::ByteCapacity)
+    );
+    assert!(stream.close_input());
+    assert!(stream.is_closed());
+    assert_eq!(stream.check_publish(0), Err(Error::Closed));
+    assert_eq!(
+        stream.check_publish_with_policy(u64::MAX, Policy::SlotFirst),
+        Err(Error::Closed)
+    );
+    assert_eq!(
+        stream.check_publish_with_policy(u64::MAX, Policy::ItemSizeFirst),
+        Err(Error::Closed)
+    );
+    assert_eq!(stream.check_receive(), Ok(()));
+    let received = stream.receive()?;
+    assert_eq!(received.value.as_ptr(), second_address);
+    assert!(stream.front().is_none());
+    assert_eq!(stream.check_receive(), Err(Error::Closed));
+    let zero = TypedStream::<u64>::try_new(82, 1, 0)?;
+    assert_eq!(zero.check_publish(1), Err(Error::ByteCapacity));
+    assert_eq!(
+        zero.check_publish_with_policy(1, Policy::SlotFirst),
+        Err(Error::ByteCapacity)
+    );
+    assert_eq!(
+        zero.check_publish_with_policy(1, Policy::ItemSizeFirst),
+        Err(Error::ItemTooLarge)
+    );
+    assert_eq!(zero.check_publish(0), Ok(()));
+    assert_eq!(
+        zero.check_publish_with_policy(0, Policy::ItemSizeFirst),
+        Ok(())
+    );
+    assert_eq!((zero.len(), zero.retained_bytes()), (0, 0));
+    let mut no_slots = TypedStream::<u64>::try_new(83, 0, u64::MAX)?;
+    assert_eq!(no_slots.check_publish(0), Err(Error::SlotCapacity));
+    assert!(no_slots.close_input());
+    assert_eq!(no_slots.check_publish(u64::MAX), Err(Error::Closed));
+    Ok(())
+}
+
+#[test]
+#[expect(
+    clippy::panic_in_result_fn,
     reason = "assertions exercise typed FIFO custody, pressure, and closure; setup propagates typed errors"
 )]
 fn typed_stream_preserves_original_fifo_payloads_pressure_and_closure()
@@ -75,7 +405,9 @@ fn typed_stream_preserves_original_fifo_payloads_pressure_and_closure()
     assert_eq!(refusal.error, TypedStreamError::SlotCapacity);
     assert_eq!(refusal.value.as_ptr(), refused_address);
     assert_eq!((stream.len(), stream.retained_bytes()), (2, 5));
-    let received = stream.receive()?;
+    let received = stream.receive();
+    assert!(received.is_ok());
+    let received = received?;
     assert_eq!(
         (received.scope, received.sequence, received.encoded_bytes),
         (73, 0, 2)
@@ -140,6 +472,55 @@ fn typed_stream_preserves_original_fifo_payloads_pressure_and_closure()
     );
     assert!(no_slots.close_input());
     assert!(no_slots.is_drained());
+
+    let mut fifo =
+        automation_structures::Buffer::<u64, automation_structures::FifoStorage>::try_with_storage(
+            3,
+        )?;
+    let mut wrapped = TypedStream::try_new(76, 3, 3)?;
+    for value in 0..3u64 {
+        assert_eq!(fifo.push(value), Ok(()));
+        assert_eq!(
+            wrapped
+                .publish(vec![value].into_boxed_slice(), 1)
+                .map_err(|refusal| refusal.error)?,
+            value
+        );
+    }
+    for next in 0..64u64 {
+        let tail = next
+            .checked_add(3)
+            .ok_or("bounded wraparound ordinal overflow")?;
+        assert_eq!(fifo.get(0), Some(&next));
+        assert!(fifo.iter().copied().eq(next..tail));
+        assert_eq!(fifo.get(3), None);
+        assert_eq!(fifo.push(tail), Err(tail));
+        assert_eq!(fifo.pop(), Some(next));
+        assert_eq!(fifo.push(tail), Ok(()));
+        let received = wrapped.receive()?;
+        assert_eq!(received.sequence, next);
+        assert_eq!(&*received.value, &[next]);
+        assert_eq!((wrapped.len(), wrapped.retained_bytes()), (2, 2));
+        assert_eq!(
+            wrapped
+                .publish(vec![tail].into_boxed_slice(), 1)
+                .map_err(|refusal| refusal.error)?,
+            tail
+        );
+        assert_eq!((wrapped.len(), wrapped.retained_bytes()), (3, 3));
+    }
+    assert!(wrapped.close_input());
+    for next in 64..67u64 {
+        assert_eq!(fifo.pop(), Some(next));
+        let received = wrapped.receive()?;
+        assert_eq!(received.sequence, next);
+        assert_eq!(&*received.value, &[next]);
+    }
+    assert_eq!(fifo.pop(), None);
+    assert!(fifo.iter().next().is_none());
+    assert_eq!(fifo.get(0), None);
+    assert!(wrapped.is_drained());
+    assert_eq!(wrapped.retained_bytes(), 0);
     Ok(())
 }
 
@@ -152,6 +533,8 @@ fn summary_signal_retains_latest_value_and_dynamic_generation_custody()
 -> Result<(), Box<dyn std::error::Error>> {
     use automation_structures::{SignalObservation, SignalProfileError, SummarySignal};
     let mut signal = SummarySignal::new(41, 7u64, 2, 3);
+    assert!(signal.can_set_value(7));
+    assert!(signal.can_set_value(9));
     assert_eq!(
         (
             signal.value(),
@@ -193,6 +576,7 @@ fn summary_signal_retains_latest_value_and_dynamic_generation_custody()
             changed: false
         }
     );
+    assert!(signal.pending(second)?);
     assert_eq!(
         signal.notify(second)?,
         SignalObservation {
@@ -203,6 +587,7 @@ fn summary_signal_retains_latest_value_and_dynamic_generation_custody()
     );
     signal.remove(first)?;
     assert_eq!(signal.listener_count(), 1);
+    assert!(!signal.pending(second)?);
     let replacement = signal.register()?;
     assert_ne!(first, replacement);
     assert_eq!(
@@ -240,6 +625,8 @@ fn summary_signal_retains_latest_value_and_dynamic_generation_custody()
         (0, 0, 0)
     );
     assert_eq!(signal.set_value(13), Ok(true));
+    assert!(!signal.can_set_value(15));
+    assert!(signal.can_set_value(13));
     assert_eq!(
         signal.set_value(15),
         Err(SignalProfileError::ChangeCapacity)
@@ -259,6 +646,8 @@ fn summary_signal_retains_latest_value_and_dynamic_generation_custody()
     signal.remove(replacement)?;
     assert_eq!(signal.listener_count(), 0);
     let mut no_listeners = SummarySignal::new(43, 0u64, 0, 0);
+    assert!(no_listeners.can_set_value(0));
+    assert!(!no_listeners.can_set_value(1));
     assert_eq!(
         no_listeners.register(),
         Err(SignalProfileError::ListenerCapacity)
@@ -299,6 +688,8 @@ fn typed_fanout_retains_original_until_both_governed_branches_consume()
         1
     );
     assert_eq!((stream.retained_len(), stream.retained_bytes()), (2, 5));
+    assert_eq!(stream.pending_len(FanoutBranch::Left), 2);
+    assert_eq!(stream.pending_len(FanoutBranch::Right), 2);
     assert_eq!(stream.remaining_references(0), Some(2));
     assert_eq!(first_lifetime.strong_count(), 1);
     let left = stream.observe(FanoutBranch::Left)?;
@@ -387,6 +778,57 @@ fn typed_fanout_retains_original_until_both_governed_branches_consume()
         matches!(pressure.publish(12u64, 1), Err(refusal) if refusal.error == TypedFanoutError::ByteCapacity && refusal.value == 12)
     );
     assert_eq!(pressure.retained_len(), 0);
+
+    let mut wrapped = TypedFanout::try_new(84, 3, 3)?;
+    for value in 0..3u64 {
+        assert_eq!(
+            wrapped
+                .publish(Rc::new(value), 1)
+                .map_err(|refusal| refusal.error)?,
+            value
+        );
+    }
+    for next in 0..64u64 {
+        let branches = if next & 1 == 0 {
+            [FanoutBranch::Left, FanoutBranch::Right]
+        } else {
+            [FanoutBranch::Right, FanoutBranch::Left]
+        };
+        let mut lifetime = None;
+        for branch in branches {
+            let observation = wrapped.observe(branch)?;
+            assert_eq!(observation.token.sequence(), next);
+            assert_eq!(**observation.value, next);
+            lifetime = Some(Rc::downgrade(observation.value));
+            let token = observation.token;
+            wrapped.consume(token)?;
+        }
+        assert_eq!(
+            lifetime.ok_or("missing fanout observation")?.strong_count(),
+            0
+        );
+        assert_eq!(wrapped.remaining_references(next), None);
+        assert_eq!((wrapped.retained_len(), wrapped.retained_bytes()), (2, 2));
+        let tail = next
+            .checked_add(3)
+            .ok_or("bounded wraparound ordinal overflow")?;
+        assert_eq!(
+            wrapped
+                .publish(Rc::new(tail), 1)
+                .map_err(|refusal| refusal.error)?,
+            tail
+        );
+    }
+    assert!(wrapped.close_input());
+    for next in 64..67u64 {
+        for branch in [FanoutBranch::Left, FanoutBranch::Right] {
+            let token = wrapped.observe(branch)?.token;
+            assert_eq!(token.sequence(), next);
+            wrapped.consume(token)?;
+        }
+    }
+    assert!(wrapped.is_drained());
+    assert_eq!((wrapped.retained_len(), wrapped.retained_bytes()), (0, 0));
     Ok(())
 }
 
@@ -415,9 +857,9 @@ fn registry_take_returns_original_owned_payload_and_frames_other_bindings()
     registry
         .try_insert_unique(9u64, last)
         .map_err(|(reason, _, _)| reason)?;
-    let (key, returned) = registry
-        .take_query(&2u64)
-        .ok_or("missing owned middle binding")?;
+    let transferred = registry.take_query(&2u64);
+    assert!(transferred.is_some());
+    let (key, returned) = transferred.ok_or("missing owned middle binding")?;
     assert_eq!(key, 2);
     assert_eq!(returned.as_ptr(), middle_address);
     assert_eq!(&*returned, [3, 4]);
@@ -466,7 +908,9 @@ fn registry_take_returns_original_owned_payload_and_frames_other_bindings()
 )]
 fn complete_minimum_selection_preserves_every_tie_without_a_quota()
 -> Result<(), Box<dyn std::error::Error>> {
-    use automation_structures::{CompetitiveSelectionMinimum, NullableSigned, SignedRowOrder};
+    use automation_structures::{
+        CompetitiveSelectionMinimum, NullableSigned, PositionOrder, SignedRowOrder,
+    };
     for (input, expected) in [
         (vec![], vec![]),
         (vec![3, 1, 1, 2], vec![1usize, 2]),
@@ -483,6 +927,23 @@ fn complete_minimum_selection_preserves_every_tie_without_a_quota()
         })
         .map_err(|(reason, _)| reason)?;
         assert_eq!(selected.selected(), expected);
+        assert_eq!(selected.winner(), expected.first().copied());
+        assert_eq!(selected.order().values.as_ptr(), original);
+        assert_eq!(selected.scores().len(), values.len());
+        assert_eq!(selected.selection().allocation, selected.winner());
+        assert_eq!(selected.selection().scores.as_slice(), selected.scores());
+        assert_eq!(selected.arrangement().len(), values.len());
+        for (rank, item) in selected.arrangement().iter().copied().enumerate() {
+            assert_eq!(selected.inverse().get(item), Some(&rank));
+        }
+        for (left, left_score) in selected.scores().iter().enumerate() {
+            for (right, right_score) in selected.scores().iter().enumerate() {
+                assert_eq!(
+                    left_score.cmp(right_score),
+                    selected.order().compare(left, right).cmp(&0).reverse()
+                );
+            }
+        }
         assert_eq!(selected.len(), expected.len());
         assert_eq!(selected.is_empty(), expected.is_empty());
         assert_eq!(values.as_ptr(), original);
@@ -611,6 +1072,100 @@ mod owned_reduction {
                 .ok_or("zero ceiling was accepted")?
                 .0,
             OwnedReductionError::Capacity
+        );
+        let initial = vec![7u8];
+        let initial_address = initial.as_ptr();
+        let mut reused = VersionedReduction::try_new(initial, 3, AppendBytes { maximum: 4 })
+            .map_err(|(reason, _, _)| reason)?;
+        assert_eq!(
+            reused
+                .prepare(vec![4])
+                .map_err(|(reason, _)| reason)?
+                .commit(),
+            1
+        );
+        let first_address = reused
+            .version(1)
+            .ok_or("missing reused first version")?
+            .as_ptr();
+        assert_eq!(
+            reused
+                .prepare(vec![3])
+                .map_err(|(reason, _)| reason)?
+                .commit(),
+            2
+        );
+        let second_address = reused
+            .version(2)
+            .ok_or("missing reused second version")?
+            .as_ptr();
+        assert_eq!(reused.processed_len(), 2);
+        assert_eq!(reused.version(0), Some(&vec![7]));
+        assert_eq!(reused.version(1), Some(&vec![7, 4]));
+        assert_eq!(reused.version(2), Some(&vec![7, 4, 3]));
+        let input = vec![8];
+        let input_address = input.as_ptr();
+        let returned = reused
+            .prepare(input)
+            .map_err(|(reason, _)| reason)?
+            .cancel();
+        assert_eq!(returned, vec![8]);
+        assert_eq!(returned.as_ptr(), input_address);
+        assert_eq!(reused.processed_len(), 2);
+        assert_eq!(reused.version(0), Some(&vec![7]));
+        assert_eq!(reused.version(1), Some(&vec![7, 4]));
+        assert_eq!(reused.version(2), Some(&vec![7, 4, 3]));
+        assert_eq!(reused.version(3), None);
+        assert_eq!(
+            reused
+                .version(0)
+                .ok_or("missing cancelled initial version")?
+                .as_ptr(),
+            initial_address
+        );
+        assert_eq!(
+            reused
+                .version(1)
+                .ok_or("missing cancelled first version")?
+                .as_ptr(),
+            first_address
+        );
+        assert_eq!(
+            reused
+                .version(2)
+                .ok_or("missing cancelled second version")?
+                .as_ptr(),
+            second_address
+        );
+        assert_eq!(
+            reused
+                .prepare(returned)
+                .map_err(|(reason, _)| reason)?
+                .commit(),
+            3
+        );
+        assert_eq!(reused.processed_len(), 3);
+        assert_eq!(reused.version(3), Some(&vec![7, 4, 3, 8]));
+        assert_eq!(
+            reused
+                .version(0)
+                .ok_or("missing retained initial version")?
+                .as_ptr(),
+            initial_address
+        );
+        assert_eq!(
+            reused
+                .version(1)
+                .ok_or("missing retained first version")?
+                .as_ptr(),
+            first_address
+        );
+        assert_eq!(
+            reused
+                .version(2)
+                .ok_or("missing retained second version")?
+                .as_ptr(),
+            second_address
         );
         Ok(())
     }
@@ -822,6 +1377,241 @@ mod typed_admission {
     }
 }
 
+mod indexed_typed_admission {
+    use automation_structures::{
+        ByteKey, IndexedStorage, TypedAllocation, TypedAllocationError, UnrestrictedAllocation,
+    };
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions report product-contract failures"
+    )]
+    fn indexed_batches_keep_borrowed_identity_original_custody_and_refusal_frames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut owner = TypedAllocation::<ByteKey, Vec<u8>, UnrestrictedAllocation, IndexedStorage>
+            ::try_new_indexed(&vec![3, 6], UnrestrictedAllocation)?;
+        if !owner.try_reserve_members(3) {
+            return Err("member storage reservation refused".into());
+        }
+        let items = vec![
+            (ByteKey::from_bytes(vec![0, 255]), (vec![7u8], vec![1, 0])),
+            (ByteKey::from_bytes(vec![1]), (vec![9u8], vec![1, 2])),
+        ];
+        let key_pointer = items
+            .first()
+            .ok_or("missing first item")?
+            .0
+            .as_bytes()
+            .as_ptr();
+        let items_pointer = items.as_ptr();
+        let payload_pointer = items.first().ok_or("missing first item")?.1.0.as_ptr();
+        let charges_pointer = items.first().ok_or("missing first item")?.1.1.as_ptr();
+        let cancelled = owner.prepare_batch(items)?.cancel();
+        assert_eq!(owner.len(), 0);
+        assert_eq!(owner.budget(0), Some((3, 0)));
+        let first = cancelled
+            .items
+            .first()
+            .ok_or("cancel lost the first item")?;
+        assert_eq!(cancelled.items.as_ptr(), items_pointer);
+        assert_eq!(first.0.as_bytes().as_ptr(), key_pointer);
+        assert_eq!(first.1.0.as_ptr(), payload_pointer);
+        assert_eq!(first.1.1.as_ptr(), charges_pointer);
+        owner.prepare_batch(cancelled.items)?.commit();
+        assert_eq!(
+            owner.get_query(&[0, 255].as_slice()).map(Vec::as_ptr),
+            Some(payload_pointer)
+        );
+        assert_eq!(owner.budget(0), Some((3, 2)));
+        assert_eq!(owner.budget(1), Some((6, 2)));
+        assert_eq!(
+            owner.entry_at(0).map(|(key, _)| key.as_bytes()),
+            Some([0, 255].as_slice())
+        );
+        assert!(owner.entry_at(2).is_none());
+        for (items, reason) in [
+            (
+                vec![(ByteKey::from_bytes(vec![0, 255]), (vec![11], vec![1, 1]))],
+                TypedAllocationError::DuplicateKey,
+            ),
+            (
+                vec![
+                    (ByteKey::from_bytes(vec![2]), (vec![12], vec![1, 1])),
+                    (ByteKey::from_bytes(vec![2]), (vec![13], vec![1, 1])),
+                ],
+                TypedAllocationError::DuplicateKey,
+            ),
+            (
+                vec![(ByteKey::from_bytes(vec![2]), (vec![14], vec![1, 5]))],
+                TypedAllocationError::Capacity,
+            ),
+        ] {
+            let refusal = owner
+                .prepare_batch(items)
+                .err()
+                .ok_or("the invalid batch was admitted")?;
+            assert_eq!(refusal.reason, Some(reason));
+            assert_eq!(owner.len(), 2);
+            assert_eq!(owner.budget(0), Some((3, 2)));
+            assert_eq!(owner.budget(1), Some((6, 2)));
+            assert!(owner.get_query(&[2].as_slice()).is_none());
+            assert_eq!(
+                owner.get_query(&[0, 255].as_slice()).map(Vec::as_ptr),
+                Some(payload_pointer)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions report product-contract failures"
+    )]
+    fn payload_borrows_and_ordered_consumption_preserve_fixed_key_and_charge_owners()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut owner = TypedAllocation::try_new_indexed(&vec![2, 4], UnrestrictedAllocation)?;
+        let first = vec![7u8];
+        let second = vec![9u8];
+        let first_pointer = first.as_ptr();
+        let second_pointer = second.as_ptr();
+        owner.prepare(9u64, first, vec![1, 0])?.commit();
+        owner.prepare(2u64, second, vec![1, 4])?.commit();
+        assert_eq!(owner.check_charge(1, 0), Some(true));
+        assert_eq!(owner.check_charge(1, 1), Some(false));
+        assert_eq!(owner.check_charge(2, 0), None);
+        assert!(!owner.check_member_count(1));
+        assert!(owner.check_member_count(0));
+        let value = owner
+            .get_query_mut(&9u64)
+            .ok_or("the admitted payload is missing")?;
+        *value.first_mut().ok_or("the retained payload is empty")? = 8;
+        assert!(owner.get_query_mut(&3u64).is_none());
+        assert_eq!(owner.budget(0), Some((2, 2)));
+        assert_eq!(owner.budget(1), Some((4, 4)));
+        assert_eq!(
+            owner.entry_at(0).map(|(key, value)| (*key, value.as_ptr())),
+            Some((9, first_pointer))
+        );
+        assert_eq!(
+            owner.entry_at(1).map(|(key, value)| (*key, value.as_ptr())),
+            Some((2, second_pointer))
+        );
+        let values = owner
+            .try_into_values()
+            .map_err(|_| "ordered output reservation refused")?;
+        assert_eq!(values, vec![vec![8u8], vec![9u8]]);
+        assert_eq!(
+            values.first().ok_or("first output missing")?.as_ptr(),
+            first_pointer
+        );
+        assert_eq!(
+            values.get(1).ok_or("second output missing")?.as_ptr(),
+            second_pointer
+        );
+        let mut unbudgeted = TypedAllocation::unbudgeted(UnrestrictedAllocation);
+        assert!(unbudgeted.check_member_count(u64::MAX));
+        assert_eq!(unbudgeted.check_charge(0, 0), None);
+        unbudgeted.prepare(1u64, vec![3u8], vec![])?.commit();
+        let values = unbudgeted
+            .try_into_values()
+            .map_err(|_| "linear output reservation refused")?;
+        assert_eq!(values, vec![vec![3u8]]);
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions report product-contract failures"
+    )]
+    fn incremental_preparation_preserves_refused_prefix_custody_and_commit_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut owner = TypedAllocation::try_new_indexed(&vec![3, 5], UnrestrictedAllocation)?;
+        owner
+            .prepare(ByteKey::from_bytes(vec![0]), vec![7u8], vec![1, 0])?
+            .commit();
+        let value = vec![8u8];
+        let pointer = value.as_ptr();
+        let mut builder = owner.prepare_batch_builder(3)?;
+        assert!(builder.contains_query(&[0].as_slice()));
+        builder.try_push(ByteKey::from_bytes(vec![1]), value, vec![1, 1])?;
+        assert!(builder.contains_query(&[1].as_slice()));
+        assert_eq!(builder.check_charge(1, 4), Some(true));
+        assert_eq!(builder.check_charge(1, 5), Some(false));
+        assert_eq!(builder.check_charge(2, 0), None);
+        for (key, charges, expected, dimension) in [
+            (
+                vec![1],
+                vec![1, 0],
+                TypedAllocationError::DuplicateKey,
+                None,
+            ),
+            (vec![2], vec![1, 5], TypedAllocationError::Capacity, Some(1)),
+            (vec![2], vec![1], TypedAllocationError::WidthMismatch, None),
+        ] {
+            let value = vec![9u8];
+            let pointer = value.as_ptr();
+            let charges_pointer = charges.as_ptr();
+            let refused = builder
+                .try_push(ByteKey::from_bytes(key), value, charges)
+                .err()
+                .ok_or("invalid incremental input was admitted")?;
+            assert_eq!(refused.reason, Some(expected));
+            assert_eq!(refused.dimension, dimension);
+            assert_eq!(refused.value.as_ptr(), pointer);
+            assert_eq!(refused.charges.as_ptr(), charges_pointer);
+            assert!(!builder.contains_query(&[2].as_slice()));
+        }
+        let returned = builder.cancel();
+        assert_eq!(returned.items.len(), 1);
+        assert_eq!(
+            returned
+                .items
+                .first()
+                .ok_or("prefix disappeared")?
+                .1
+                .0
+                .as_ptr(),
+            pointer
+        );
+        assert_eq!(owner.len(), 1);
+        assert_eq!(owner.budget(0), Some((3, 1)));
+        assert_eq!(owner.budget(1), Some((5, 0)));
+        let mut builder = owner.prepare_batch_builder(2)?;
+        let (key, (value, charges)) = returned
+            .items
+            .into_iter()
+            .next()
+            .ok_or("prefix disappeared")?;
+        builder.try_push(key, value, charges)?;
+        builder.try_push(ByteKey::from_bytes(vec![2]), vec![9u8], vec![1, 4])?;
+        builder.finish().commit();
+        assert_eq!(owner.budget(0), Some((3, 3)));
+        assert_eq!(owner.budget(1), Some((5, 5)));
+        assert_eq!(
+            owner.entry_at(0).map(|(key, _)| key.as_bytes()),
+            Some([0].as_slice())
+        );
+        assert_eq!(
+            owner.entry_at(1).map(|(key, _)| key.as_bytes()),
+            Some([1].as_slice())
+        );
+        assert_eq!(
+            owner.entry_at(2).map(|(key, _)| key.as_bytes()),
+            Some([2].as_slice())
+        );
+
+        let mut unbudgeted = TypedAllocation::unbudgeted(UnrestrictedAllocation);
+        let mut builder = unbudgeted.prepare_batch_builder(1)?;
+        builder.try_push(7u64, 9u64, vec![])?;
+        builder.finish().commit();
+        assert_eq!(unbudgeted.get(&7), Some(&9));
+        Ok(())
+    }
+}
+
 mod typed_batch {
     use automation_structures::{
         ByteKey, TypedAllocation, TypedAllocationError, UnrestrictedAllocation,
@@ -904,7 +1694,7 @@ mod typed_batch {
     )]
     fn complete_batch_preserves_owned_order_and_commits_every_charge()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut allocation = TypedAllocation::try_new(&vec![3, 6, 9], UnrestrictedAllocation)?;
+        let mut allocation = TypedAllocation::try_new(&vec![4, 6, 9], UnrestrictedAllocation)?;
         let first = Box::new(7u64);
         let first_address = &*first as *const u64;
         let second = Box::new(99u64);
@@ -920,7 +1710,7 @@ mod typed_batch {
         assert_eq!(allocation.len(), 0);
         allocation.prepare_batch(cancelled.items)?.commit();
         assert_eq!(allocation.len(), 2);
-        assert_eq!(allocation.budget(0), Some((3, 2)));
+        assert_eq!(allocation.budget(0), Some((4, 2)));
         assert_eq!(allocation.budget(1), Some((6, 6)));
         assert_eq!(allocation.budget(2), Some((9, 9)));
         assert_eq!(
@@ -935,6 +1725,104 @@ mod typed_batch {
                 .ok_or("missing second admitted payload")? as *const u64,
             second_address
         );
+        let third = Box::new(17u64);
+        let third_address = &*third as *const u64;
+        let third_key = ByteKey::from_bytes(vec![1]);
+        let third_key_address = third_key.as_bytes().as_ptr();
+        let third_charges = vec![1, 0, 0];
+        let third_charges_address = third_charges.as_ptr();
+        let returned = allocation
+            .prepare(third_key, third, third_charges)?
+            .cancel();
+        assert_eq!(returned.reason, None);
+        assert_eq!(returned.dimension, None);
+        assert_eq!(returned.key.as_bytes(), &[1]);
+        assert_eq!(returned.key.as_bytes().as_ptr(), third_key_address);
+        assert_eq!(*returned.value, 17);
+        assert_eq!(&*returned.value as *const u64, third_address);
+        assert_eq!(returned.charges, vec![1, 0, 0]);
+        assert_eq!(returned.charges.as_ptr(), third_charges_address);
+        assert_eq!(allocation.len(), 2);
+        assert_eq!(allocation.dimension_count(), 3);
+        assert_eq!(allocation.budget(0), Some((4, 2)));
+        assert_eq!(allocation.budget(1), Some((6, 6)));
+        assert_eq!(allocation.budget(2), Some((9, 9)));
+        assert!(allocation.get_query(&(&[1][..])).is_none());
+        for (query, value, pointer) in [
+            (&[][..], 7u64, first_address),
+            (&[0, 255][..], 99, second_address),
+        ] {
+            let retained = allocation
+                .get_query(&query)
+                .ok_or("missing retained payload")?;
+            assert_eq!(**retained, value);
+            assert_eq!(&**retained as *const u64, pointer);
+        }
+        let fourth = Box::new(23u64);
+        let fourth_address = &*fourth as *const u64;
+        let items = vec![
+            (returned.key, (returned.value, returned.charges)),
+            (ByteKey::from_bytes(vec![2]), (fourth, vec![1, 0, 0])),
+        ];
+        let items_address = items.as_ptr();
+        let returned = allocation.prepare_batch(items)?.cancel();
+        assert_eq!(returned.reason, None);
+        assert_eq!(returned.entry, None);
+        assert_eq!(returned.dimension, None);
+        assert_eq!(returned.items.as_ptr(), items_address);
+        assert_eq!(returned.items.len(), 2);
+        let third_returned = returned
+            .items
+            .first()
+            .ok_or("missing cancelled third item")?;
+        assert_eq!(third_returned.0.as_bytes(), &[1]);
+        assert_eq!(third_returned.0.as_bytes().as_ptr(), third_key_address);
+        assert_eq!(*third_returned.1.0, 17);
+        assert_eq!(&*third_returned.1.0 as *const u64, third_address);
+        assert_eq!(third_returned.1.1, vec![1, 0, 0]);
+        assert_eq!(third_returned.1.1.as_ptr(), third_charges_address);
+        let fourth_returned = returned
+            .items
+            .get(1)
+            .ok_or("missing cancelled fourth item")?;
+        assert_eq!(fourth_returned.0.as_bytes(), &[2]);
+        assert_eq!(*fourth_returned.1.0, 23);
+        assert_eq!(&*fourth_returned.1.0 as *const u64, fourth_address);
+        assert_eq!(fourth_returned.1.1, vec![1, 0, 0]);
+        assert_eq!(allocation.len(), 2);
+        assert_eq!(allocation.dimension_count(), 3);
+        assert_eq!(allocation.budget(0), Some((4, 2)));
+        assert_eq!(allocation.budget(1), Some((6, 6)));
+        assert_eq!(allocation.budget(2), Some((9, 9)));
+        assert!(allocation.get_query(&(&[1][..])).is_none());
+        assert!(allocation.get_query(&(&[2][..])).is_none());
+        for (query, value, pointer) in [
+            (&[][..], 7u64, first_address),
+            (&[0, 255][..], 99, second_address),
+        ] {
+            let retained = allocation
+                .get_query(&query)
+                .ok_or("missing retained payload")?;
+            assert_eq!(**retained, value);
+            assert_eq!(&**retained as *const u64, pointer);
+        }
+        allocation.prepare_batch(returned.items)?.commit();
+        assert_eq!(allocation.len(), 4);
+        assert_eq!(allocation.budget(0), Some((4, 4)));
+        assert_eq!(allocation.budget(1), Some((6, 6)));
+        assert_eq!(allocation.budget(2), Some((9, 9)));
+        for (query, value, pointer) in [
+            (&[][..], 7u64, first_address),
+            (&[0, 255][..], 99, second_address),
+            (&[1][..], 17, third_address),
+            (&[2][..], 23, fourth_address),
+        ] {
+            let retained = allocation
+                .get_query(&query)
+                .ok_or("missing recommitted payload")?;
+            assert_eq!(**retained, value);
+            assert_eq!(&**retained as *const u64, pointer);
+        }
         let sealed = allocation.seal();
         assert_eq!(
             **sealed
@@ -1030,10 +1918,9 @@ mod typed_batch {
                 (2, (vec![99], vec![1, 1, 1])),
             ];
             let address = items.as_ptr();
-            let refused = allocation
-                .prepare_batch(items)
-                .err()
-                .ok_or("over-capacity batch admitted")?;
+            let refusal = allocation.prepare_batch(items);
+            assert!(refusal.is_err());
+            let refused = refusal.err().ok_or("over-capacity batch admitted")?;
             assert_eq!(refused.reason, Some(TypedAllocationError::Capacity));
             assert_eq!(
                 (refused.entry, refused.dimension),
@@ -1103,8 +1990,8 @@ mod reduction_rows {
         CheckedSignedAdd, RecordRefusal, ReductionColumns, ReductionRowError,
     };
 
-    fn observations(
-        owner: &ReductionColumns<CheckedSignedAdd>,
+    fn observations<O: automation_structures::TypedChainOperation<Carry = i64>>(
+        owner: &ReductionColumns<O>,
     ) -> Vec<(Option<usize>, Option<i64>)> {
         (0..owner.column_count())
             .map(|column| (owner.column_processed(column), owner.column_result(column)))
@@ -1142,6 +2029,69 @@ mod reduction_rows {
             vec![(Some(2), Some(3)), (Some(2), Some(0)), (Some(2), Some(0))]
         );
         assert_eq!(owner.column_processed(3), None);
+        storage_profile_boundaries::<automation_structures::connectives::buffer::ContiguousStorage>(
+        )?;
+        storage_profile_boundaries::<automation_structures::connectives::buffer::InlineStorage<4>>(
+        )?;
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions report test-oracle failures; fallible setup propagates typed errors"
+    )]
+    fn storage_profile_boundaries<
+        S: automation_structures::connectives::buffer::BufferLayout<(i64, i64)>,
+    >() -> Result<(), Box<dyn std::error::Error>> {
+        for width in [0, 1, 2, 3, 4, 5, 16] {
+            let mut boundary = ReductionColumns::try_new(&vec![CheckedSignedAdd; width], 1)?;
+            let inputs = vec![1; width];
+            let initial = vec![(Some(0), Some(0)); width];
+            boundary.prepare_row_with_storage::<S>(&inputs)?.cancel();
+            assert_eq!(observations(&boundary), initial);
+            drop(boundary.prepare_row_with_storage::<S>(&inputs)?);
+            assert_eq!(observations(&boundary), initial);
+            let wrong_width = width.checked_add(1).ok_or("boundary width overflow")?;
+            assert!(matches!(
+                boundary.prepare_row_with_storage::<S>(&vec![1; wrong_width]),
+                Err(ReductionRowError::WidthMismatch)
+            ));
+            assert_eq!(observations(&boundary), initial);
+            boundary.prepare_row_with_storage::<S>(&inputs)?.commit();
+            let committed = vec![(Some(1), Some(1)); width];
+            assert_eq!(observations(&boundary), committed);
+            if width > 0 {
+                assert!(matches!(
+                    boundary.prepare_row_with_storage::<S>(&inputs),
+                    Err(ReductionRowError::Column {
+                        column: 0,
+                        reason: RecordRefusal::Capacity
+                    })
+                ));
+                assert_eq!(observations(&boundary), committed);
+                let last = width
+                    .checked_sub(1)
+                    .ok_or("missing final boundary column")?;
+                for refused in [0, last] {
+                    let mut overflow =
+                        ReductionColumns::try_new(&vec![CheckedSignedAdd; width], 2)?;
+                    let mut first = vec![0; width];
+                    *first.get_mut(refused).ok_or("missing boundary column")? = i64::MAX;
+                    overflow.prepare_row_with_storage::<S>(&first)?.commit();
+                    let before = observations(&overflow);
+                    assert!(matches!(
+                        overflow.prepare_row_with_storage::<S>(&inputs),
+                        Err(ReductionRowError::Column {
+                            column,
+                            reason: RecordRefusal::Domain
+                        }) if column == refused
+                    ));
+                    assert_eq!(observations(&overflow), before);
+                }
+            } else {
+                assert_eq!(boundary.processed_len(), 0);
+            }
+        }
         Ok(())
     }
 
@@ -1223,6 +2173,269 @@ mod reduction_rows {
         assert_eq!(
             owner.column_result(1),
             Some(SignedSumCount { sum: 5, count: 2 })
+        );
+        Ok(())
+    }
+
+    fn workspace_values(
+        workspace: &automation_structures::connectives::buffer::Buffer<
+            (i64, i64),
+            automation_structures::FifoStorage,
+        >,
+    ) -> Vec<(i64, i64)> {
+        use automation_structures::connectives::buffer::BufferStorage;
+        (0..workspace.len())
+            .filter_map(|index| workspace.values.value_at(index).copied())
+            .collect()
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions bind whole owner/workspace frames; fallible admission propagates"
+    )]
+    fn borrowed_workspace_reuses_storage_with_fresh_rows_and_both_owners()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use automation_structures::connectives::buffer::Buffer;
+        use automation_structures::{FifoStorage, ReductionWorkspaceError};
+        let mut owner = ReductionColumns::try_new(&vec![CheckedSignedAdd; 3], 2)?;
+        let initial = observations(&owner);
+        let mut short = Buffer::<(i64, i64), FifoStorage>::try_with_storage(2)?;
+        assert_eq!(short.push((99, 101)), Ok(()));
+        let old_short = workspace_values(&short);
+        assert!(matches!(
+            owner.prepare_row_in(&vec![1, 1], &mut short),
+            Err(ReductionWorkspaceError::Row(
+                ReductionRowError::WidthMismatch
+            ))
+        ));
+        assert_eq!(short.capacity(), 2);
+        assert_eq!(workspace_values(&short), old_short);
+        assert_eq!(observations(&owner), initial);
+        assert!(matches!(
+            owner.prepare_row_in(&vec![1, 1, 1], &mut short),
+            Err(ReductionWorkspaceError::CapacityMismatch {
+                expected: 3,
+                actual: 2
+            })
+        ));
+        assert_eq!(short.capacity(), 2);
+        assert_eq!(workspace_values(&short), old_short);
+        assert_eq!(observations(&owner), initial);
+
+        let mut pending = Buffer::<(i64, i64), FifoStorage>::try_with_storage(3)?;
+        assert_eq!(pending.push((99, 101)), Ok(()));
+        owner
+            .prepare_row_in(&vec![7, -4, 8], &mut pending)?
+            .cancel();
+        assert_eq!(observations(&owner), initial);
+        assert_eq!(workspace_values(&pending), vec![(7, 7), (-4, -4), (8, 8)]);
+        {
+            let _prepared = owner.prepare_row_in(&vec![1, 2, 3], &mut pending)?;
+        }
+        assert_eq!(observations(&owner), initial);
+        assert_eq!(workspace_values(&pending), vec![(1, 1), (2, 2), (3, 3)]);
+
+        let mut inputs = vec![7, -4, 8];
+        let row = owner.prepare_row_in(&inputs, &mut pending)?;
+        *inputs.first_mut().ok_or("missing Copy input")? = 99;
+        row.commit();
+        assert_eq!(workspace_values(&pending), vec![(7, 7), (-4, -4), (8, 8)]);
+        assert_eq!(
+            observations(&owner),
+            vec![(Some(1), Some(7)), (Some(1), Some(-4)), (Some(1), Some(8))]
+        );
+        owner
+            .prepare_row_in(&vec![-4, 4, -8], &mut pending)?
+            .commit();
+        assert_eq!(workspace_values(&pending), vec![(-4, 3), (4, 0), (-8, 0)]);
+        assert_eq!(
+            observations(&owner),
+            vec![(Some(2), Some(3)), (Some(2), Some(0)), (Some(2), Some(0))]
+        );
+        let mut other = ReductionColumns::try_new(&vec![CheckedSignedAdd; 3], 2)?;
+        other.prepare_row_in(&vec![5, 6, 7], &mut pending)?.cancel();
+        assert_eq!(observations(&other), initial);
+        assert_eq!(workspace_values(&pending), vec![(5, 5), (6, 6), (7, 7)]);
+        assert_eq!(pending.capacity(), 3);
+
+        for width in [0, 1, 2, 3, 4, 5, 16] {
+            let mut columns = ReductionColumns::try_new(&vec![CheckedSignedAdd; width], 2)?;
+            let mut workspace = Buffer::<(i64, i64), FifoStorage>::try_with_storage(width)?;
+            let items = vec![1; width];
+            columns.prepare_row_in(&items, &mut workspace)?.cancel();
+            {
+                let _prepared = columns.prepare_row_in(&items, &mut workspace)?;
+            }
+            assert_eq!(observations(&columns), vec![(Some(0), Some(0)); width]);
+            columns.prepare_row_in(&items, &mut workspace)?.commit();
+            columns.prepare_row_in(&items, &mut workspace)?.commit();
+            assert_eq!(observations(&columns), vec![(Some(2), Some(2)); width]);
+            if width > 0 {
+                assert!(matches!(
+                    columns.prepare_row_in(&items, &mut workspace),
+                    Err(ReductionWorkspaceError::Row(ReductionRowError::Column {
+                        column: 0,
+                        reason: RecordRefusal::Capacity,
+                    }))
+                ));
+                assert!(workspace.is_empty());
+            } else {
+                assert_eq!(columns.processed_len(), 0);
+                assert!(workspace.is_empty());
+            }
+            assert_eq!(workspace.capacity(), width);
+        }
+        Ok(())
+    }
+
+    static WORKSPACE_EVENTS: std::sync::Mutex<Vec<(usize, &'static str)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    #[derive(Clone, Copy)]
+    struct ObservedAdd {
+        column: usize,
+    }
+
+    impl ObservedAdd {
+        fn event(&self, kind: &'static str) {
+            if let Ok(mut events) = WORKSPACE_EVENTS.lock() {
+                events.push((self.column, kind));
+            }
+        }
+    }
+
+    impl automation_structures::TypedChainOperation for ObservedAdd {
+        type Item = i64;
+        type Carry = i64;
+
+        fn initial(&self) -> i64 {
+            0
+        }
+        fn accepts_exec(&self, previous: i64, operation: i64) -> bool {
+            self.event("accept");
+            previous.checked_add(operation).is_some()
+        }
+        fn combine_typed(&self, previous: i64, operation: i64) -> i64 {
+            self.event("combine");
+            previous.wrapping_add(operation)
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions bind first refusal, callback order and commit without domain reentry"
+    )]
+    fn borrowed_workspace_refusal_prefix_and_callbacks_stay_canonical()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use automation_structures::connectives::buffer::Buffer;
+        use automation_structures::{FifoStorage, ReductionWorkspaceError};
+        let operators = vec![
+            ObservedAdd { column: 0 },
+            ObservedAdd { column: 1 },
+            ObservedAdd { column: 2 },
+        ];
+        for refused in [0, 2] {
+            let mut owner = ReductionColumns::try_new(&operators, 2)?;
+            let mut pending = Buffer::<(i64, i64), FifoStorage>::try_with_storage(3)?;
+            let mut first = vec![0; 3];
+            *first.get_mut(refused).ok_or("missing refusal column")? = i64::MAX;
+            owner.prepare_row_in(&first, &mut pending)?.commit();
+            let before = observations(&owner);
+            WORKSPACE_EVENTS
+                .lock()
+                .map_err(|_| "event log poisoned")?
+                .clear();
+            assert!(matches!(
+                owner.prepare_row_in(&vec![1; 3], &mut pending),
+                Err(ReductionWorkspaceError::Row(ReductionRowError::Column {
+                    column, reason: RecordRefusal::Domain,
+                })) if column == refused
+            ));
+            assert_eq!(observations(&owner), before);
+            assert_eq!(workspace_values(&pending), vec![(1, 1); refused]);
+            let mut expected = Vec::new();
+            for column in 0..refused {
+                expected.push((column, "accept"));
+                expected.push((column, "combine"));
+            }
+            expected.push((refused, "accept"));
+            assert_eq!(
+                *WORKSPACE_EVENTS.lock().map_err(|_| "event log poisoned")?,
+                expected
+            );
+
+            WORKSPACE_EVENTS
+                .lock()
+                .map_err(|_| "event log poisoned")?
+                .clear();
+            let prepared = owner.prepare_row_in(&vec![0; 3], &mut pending)?;
+            let admitted_events = WORKSPACE_EVENTS
+                .lock()
+                .map_err(|_| "event log poisoned")?
+                .clone();
+            prepared.commit();
+            assert_eq!(
+                *WORKSPACE_EVENTS.lock().map_err(|_| "event log poisoned")?,
+                admitted_events
+            );
+            let all_events = vec![
+                (0, "accept"),
+                (0, "combine"),
+                (1, "accept"),
+                (1, "combine"),
+                (2, "accept"),
+                (2, "combine"),
+            ];
+            assert_eq!(admitted_events, all_events);
+            WORKSPACE_EVENTS
+                .lock()
+                .map_err(|_| "event log poisoned")?
+                .clear();
+            assert!(matches!(
+                owner.prepare_row_in(&vec![0; 3], &mut pending),
+                Err(ReductionWorkspaceError::Row(ReductionRowError::Column {
+                    column: 0,
+                    reason: RecordRefusal::Capacity,
+                }))
+            ));
+            assert!(pending.is_empty());
+            assert!(
+                WORKSPACE_EVENTS
+                    .lock()
+                    .map_err(|_| "event log poisoned")?
+                    .is_empty()
+            );
+        }
+
+        let mut owner = ReductionColumns::try_new(&operators, 2)?;
+        let mut short = Buffer::<(i64, i64), FifoStorage>::try_with_storage(2)?;
+        assert_eq!(short.push((99, 101)), Ok(()));
+        let old_short = workspace_values(&short);
+        WORKSPACE_EVENTS
+            .lock()
+            .map_err(|_| "event log poisoned")?
+            .clear();
+        assert!(matches!(
+            owner.prepare_row_in(&vec![0; 2], &mut short),
+            Err(ReductionWorkspaceError::Row(
+                ReductionRowError::WidthMismatch
+            ))
+        ));
+        assert!(matches!(
+            owner.prepare_row_in(&vec![0; 3], &mut short),
+            Err(ReductionWorkspaceError::CapacityMismatch {
+                expected: 3,
+                actual: 2
+            })
+        ));
+        assert_eq!(workspace_values(&short), old_short);
+        assert!(
+            WORKSPACE_EVENTS
+                .lock()
+                .map_err(|_| "event log poisoned")?
+                .is_empty()
         );
         Ok(())
     }
@@ -1622,7 +2835,7 @@ mod owner_queries {
     use automation_structures::{RegistryInsertError, RegistryPredicate, ResourceRegistry};
     use vstd::prelude::*;
     verus! {
-        struct AtLeast { minimum: u64 }
+        pub(super) struct AtLeast { pub(super) minimum: u64 }
         impl RegistryPredicate<u64, u64> for AtLeast {
             open spec fn selected(&self, _key: u64, value: u64) -> bool { value >= self.minimum }
             fn test(&self, _key: &u64, value: &u64) -> (selected: bool) { *value >= self.minimum }
@@ -1898,29 +3111,88 @@ use automation_structures::{
 
 #[test]
 fn checked_budget_api_preserves_guards_and_observations() {
+    let observe = |budget: &Budget| {
+        (
+            budget.capacity(),
+            budget.allocated(),
+            budget.reserved(),
+            budget.pending_eviction(),
+            budget.available(),
+        )
+    };
     let mut budget = Budget::new(10);
 
     assert_eq!(budget.capacity(), 10);
     assert_eq!(budget.available(), 10);
     assert!(budget.try_reserve(4));
+    assert_eq!(observe(&budget), (10, 0, 4, 0, 6));
+    let reserved = observe(&budget);
     assert!(!budget.try_allocate(7));
+    assert_eq!(observe(&budget), reserved);
     assert_eq!(
         budget.commit_reservation(5),
         Err(BudgetError::AmountExceedsReservation)
     );
+    assert_eq!(observe(&budget), reserved);
     assert_eq!(budget.commit_reservation(4), Ok(()));
+    assert_eq!(observe(&budget), (10, 4, 0, 0, 6));
     assert_eq!(budget.mark_eviction(3), Ok(()));
     assert_eq!(budget.pending_eviction(), 3);
+    let reclaiming = observe(&budget);
     assert_eq!(
         budget.complete_eviction(4),
         Err(BudgetError::AmountExceedsPendingEviction)
     );
+    assert_eq!(observe(&budget), reclaiming);
     assert_eq!(budget.complete_eviction(3), Ok(()));
     assert_eq!(budget.allocated(), 1);
     assert_eq!(budget.reserved(), 0);
+    let allocated = observe(&budget);
     assert_eq!(budget.release(2), Err(BudgetError::AmountExceedsAllocation));
+    assert_eq!(observe(&budget), allocated);
     assert_eq!(budget.release(1), Ok(()));
     assert_eq!(budget.available(), 10);
+
+    for capacity in [0, u64::MAX] {
+        let mut zero = Budget::new(capacity);
+        let initial = observe(&zero);
+        assert!(zero.try_allocate(0));
+        assert_eq!(observe(&zero), initial);
+        assert!(zero.try_reserve(0));
+        assert_eq!(observe(&zero), initial);
+        assert_eq!(zero.commit_reservation(0), Ok(()));
+        assert_eq!(observe(&zero), initial);
+        assert_eq!(zero.release(0), Ok(()));
+        assert_eq!(observe(&zero), initial);
+        assert_eq!(zero.mark_eviction(0), Ok(()));
+        assert_eq!(observe(&zero), initial);
+        assert_eq!(zero.complete_eviction(0), Ok(()));
+        assert_eq!(observe(&zero), initial);
+    }
+    const HELD: u64 = u64::MAX - 1;
+    let mut full = Budget::new(u64::MAX);
+    assert!(full.try_reserve(HELD));
+    assert!(full.try_allocate(1));
+    assert_eq!(observe(&full), (u64::MAX, 1, HELD, 0, 0));
+    let claimed = observe(&full);
+    assert!(!full.try_allocate(1));
+    assert_eq!(observe(&full), claimed);
+    assert!(!full.try_reserve(1));
+    assert_eq!(observe(&full), claimed);
+    assert_eq!(
+        full.mark_eviction(2),
+        Err(BudgetError::AmountExceedsAllocation)
+    );
+    assert_eq!(observe(&full), claimed);
+    assert_eq!(full.commit_reservation(HELD), Ok(()));
+    assert_eq!(observe(&full), (u64::MAX, u64::MAX, 0, 0, 0));
+    assert_eq!(full.mark_eviction(u64::MAX), Ok(()));
+    assert_eq!(observe(&full), (u64::MAX, 0, 0, u64::MAX, 0));
+    let pending = observe(&full);
+    assert_eq!(full.release(1), Err(BudgetError::AmountExceedsAllocation));
+    assert_eq!(observe(&full), pending);
+    assert_eq!(full.complete_eviction(u64::MAX), Ok(()));
+    assert_eq!(observe(&full), (u64::MAX, 0, 0, 0, u64::MAX));
 }
 
 #[test]
@@ -1947,6 +3219,44 @@ fn checked_registry_returns_prior_values() {
     assert_eq!(registry.remove(4), Some(20));
     assert_eq!(registry.remove(4), None);
     assert_eq!(registry.len(), 0);
+    let mut query = ResourceRegistry::new();
+    assert_eq!(query.insert(1, 10), None);
+    assert_eq!(query.insert(2, 3), None);
+    assert_eq!(query.insert(3, 20), None);
+    for (minimum, expected) in [(8, true), (15, true), (21, false)] {
+        let predicate = owner_queries::AtLeast { minimum };
+        assert_eq!(query.any_matching(&predicate), expected);
+    }
+    assert_eq!(query.entry(0), Some((1, 10)));
+    assert_eq!(query.entry(1), Some((2, 3)));
+    assert_eq!(query.entry(2), Some((3, 20)));
+    assert_eq!(query.len(), 3);
+    assert_eq!(query.insert(3, 21), Some(20));
+    assert_eq!(query.insert(3, 22), Some(21));
+    assert_eq!(query.entry(0), Some((1, 10)));
+    assert_eq!(query.entry(1), Some((2, 3)));
+    assert_eq!(query.entry(2), Some((3, 22)));
+    assert_eq!(query.len(), 3);
+    assert_eq!(query.insert(2, 4), Some(3));
+    assert_eq!(query.entry(0), Some((1, 10)));
+    assert_eq!(query.entry(1), Some((3, 22)));
+    assert_eq!(query.entry(2), Some((2, 4)));
+    assert_eq!(query.insert(2, 5), Some(4));
+    assert_eq!(query.entry(0), Some((1, 10)));
+    assert_eq!(query.entry(1), Some((3, 22)));
+    assert_eq!(query.entry(2), Some((2, 5)));
+    assert_eq!(query.len(), 3);
+    assert_eq!(query.get(9), None);
+    assert_eq!(query.insert(9, 90), None);
+    assert_eq!(query.entry(0), Some((1, 10)));
+    assert_eq!(query.entry(1), Some((3, 22)));
+    assert_eq!(query.entry(2), Some((2, 5)));
+    assert_eq!(query.entry(3), Some((9, 90)));
+    assert_eq!(query.len(), 4);
+    assert_eq!(query.remove(9), Some(90));
+    assert_eq!(query.remove(9), None);
+    assert_eq!(query.entry(2), Some((2, 5)));
+    assert_eq!(query.len(), 3);
 }
 
 #[test]
@@ -1962,6 +3272,11 @@ fn checked_registry_preserves_deterministic_survivor_order() {
     assert_eq!(registry.remove(1), Some(10));
     assert_eq!(registry.entry(0), Some((3, 30)));
     assert_eq!(registry.entry(1), Some((2, 21)));
+    assert_eq!(registry.entry(usize::MAX), None);
+    let entries: Vec<(&u64, &u64)> = registry.iter().collect();
+    assert_eq!(entries, vec![(&3, &30), (&2, &21)]);
+    assert_eq!(registry.iter().len(), 2);
+    assert_eq!(registry.iter().nth(2), None);
 }
 
 #[cfg(feature = "proof-api")]
@@ -1994,6 +3309,50 @@ fn checked_audit_sink_bounds_append_and_exposes_immutable_records() {
     );
     assert_eq!(sink.record(1), None);
     assert!(sink.validate());
+
+    let mut chain = AuditSink::new(3);
+    assert!(chain.try_record(9));
+    let first = chain.record(0);
+    assert!(chain.try_record(u64::MAX));
+    assert!(chain.try_record(7));
+    assert_eq!(chain.record(0), first);
+    assert_eq!(chain.last_hash(), 46);
+    let records = vec![
+        AuditRecord {
+            operation: 9,
+            previous_hash: 0,
+            hash: 10,
+        },
+        AuditRecord {
+            operation: u64::MAX,
+            previous_hash: 10,
+            hash: 46,
+        },
+        AuditRecord {
+            operation: 7,
+            previous_hash: 46,
+            hash: 46,
+        },
+    ];
+    assert_eq!(chain.records().collect::<Vec<_>>(), records);
+    assert!(chain.is_full());
+    assert!(!chain.try_record(100));
+    assert_eq!(chain.records().collect::<Vec<_>>(), records);
+    assert_eq!(chain.last_hash(), 46);
+    assert_eq!(chain.len(), 3);
+    assert_eq!(chain.capacity(), 3);
+    assert_eq!(chain.record(usize::MAX), None);
+    assert!(chain.validate());
+
+    let mut zero = AuditSink::new(0);
+    assert!(zero.is_empty());
+    assert!(zero.is_full());
+    assert!(zero.validate());
+    assert!(!zero.try_record(u64::MAX));
+    assert_eq!(zero.len(), 0);
+    assert_eq!(zero.last_hash(), 0);
+    assert_eq!(zero.record(0), None);
+    assert_eq!(zero.records().count(), 0);
 }
 
 #[test]
@@ -2042,8 +3401,10 @@ fn checked_actuation_rejects_disabled_actions() {
     assert_eq!(pass.finish(), Err(ActuationError::PassIncomplete));
     assert_eq!(pass.actuate(0), Ok(()));
     assert_eq!(pass.effect(0), Some(Some(11)));
+    assert!(pass.ready_to_finish());
     assert_eq!(pass.deallocate(0), Err(ActuationError::SeatAlreadyActuated));
     assert_eq!(pass.allocate(1, 22), Ok(()));
+    assert!(!pass.ready_to_finish());
     assert_eq!(
         pass.allocate(1, 33),
         Err(ActuationError::SeatAlreadyAllocated)
@@ -2054,6 +3415,50 @@ fn checked_actuation_rejects_disabled_actions() {
     assert!(pass.is_complete());
     assert_eq!(pass.allocate(1, 22), Err(ActuationError::PassComplete));
     assert_eq!(pass.allocation(2), None);
+    assert_eq!(pass.effects(), &[Some(11), None]);
+    assert_eq!(pass.allocations(), &[Some(11), None]);
+    assert_eq!(pass.allocate(2, 0), Err(ActuationError::SeatOutOfRange));
+    assert_eq!(pass.deallocate(2), Err(ActuationError::SeatOutOfRange));
+    assert_eq!(pass.actuate(2), Err(ActuationError::SeatOutOfRange));
+    assert_eq!(pass.deallocate(0), Err(ActuationError::PassComplete));
+    assert_eq!(pass.actuate(0), Err(ActuationError::PassComplete));
+    assert_eq!(pass.finish(), Err(ActuationError::PassComplete));
+    assert_eq!(pass.effects(), &[Some(11), None]);
+    assert_eq!(pass.allocations(), &[Some(11), None]);
+
+    let mut pass = ActuationPass::new(vec![Some(0), None, Some(91), None]);
+    assert!(!pass.is_empty());
+    assert_eq!(pass.deallocate(1), Err(ActuationError::SeatUnallocated));
+    assert_eq!(pass.finish(), Err(ActuationError::PassIncomplete));
+    assert_eq!(pass.allocations(), &[Some(0), None, Some(91), None]);
+    assert_eq!(pass.effects(), &[None, None, None, None]);
+    assert_eq!(pass.deallocate(2), Ok(()));
+    assert_eq!(pass.allocations(), &[Some(0), None, None, None]);
+    assert_eq!(pass.allocate(2, 57), Ok(()));
+    assert_eq!(pass.actuate(2), Ok(()));
+    assert_eq!(pass.allocations(), &[Some(0), None, Some(57), None]);
+    assert_eq!(pass.effects(), &[None, None, Some(57), None]);
+    assert_eq!(pass.actuate(2), Err(ActuationError::SeatAlreadyActuated));
+    assert_eq!(
+        pass.allocate(2, 99),
+        Err(ActuationError::SeatAlreadyAllocated)
+    );
+    assert_eq!(pass.effects(), &[None, None, Some(57), None]);
+    assert_eq!(pass.allocations(), &[Some(0), None, Some(57), None]);
+    assert!(!pass.ready_to_finish());
+    assert_eq!(pass.actuate(0), Ok(()));
+    assert_eq!(pass.effects(), &[Some(0), None, Some(57), None]);
+    assert!(pass.ready_to_finish());
+    assert_eq!(pass.finish(), Ok(()));
+    assert_eq!(pass.effects(), &[Some(0), None, Some(57), None]);
+    assert_eq!(pass.allocations(), &[Some(0), None, Some(57), None]);
+
+    let mut empty = ActuationPass::new(Vec::new());
+    assert!(empty.is_empty());
+    assert!(empty.ready_to_finish());
+    assert_eq!(empty.finish(), Ok(()));
+    assert_eq!(empty.actuate(0), Err(ActuationError::SeatOutOfRange));
+    assert_eq!(empty.finish(), Err(ActuationError::PassComplete));
 }
 
 #[test]
@@ -2090,6 +3495,10 @@ fn checked_quality_hierarchy_preserves_refinement_guards() {
         hierarchy.add_child(2, 1),
         Err(QualityHierarchyError::ChildAlreadyParented)
     );
+    assert_eq!(hierarchy.has_edge(0, 1), Some(true));
+    assert_eq!(hierarchy.has_edge(2, 1), Some(false));
+    assert_eq!(hierarchy.has_edge(0, 0), Some(false));
+    assert_eq!(hierarchy.has_edge(4, 1), None);
 }
 
 #[test]
@@ -2111,7 +3520,9 @@ fn rooted_traversal_discovers_chains_multiple_roots_and_zero_costs()
         .map_err(|(reason, _original)| reason)?;
     assert_eq!((profile.considered(), profile.pending()), (0, 5));
     assert_eq!(profile.costs(), &[0; 5]);
-    let mut profile = match profile.finish() {
+    let completion = profile.finish();
+    assert!(completion.is_err());
+    let mut profile = match completion {
         Err(profile) => profile,
         Ok(_) => return Err("completion published before traversal".into()),
     };
@@ -2338,6 +3749,113 @@ fn checked_convergence_governor_computes_its_own_window_average() {
         assert_eq!(governor.history(1), Some(2));
         assert_eq!(governor.history(2), None);
     }
+    let rolling = ConvergenceGovernor::new(2, 6, 3, 9);
+    assert!(rolling.is_ok());
+    if let Ok(mut rolling) = rolling {
+        assert!(rolling.history_values().is_empty());
+        assert_eq!(rolling.threshold(), 2);
+        assert_eq!(rolling.awaken_threshold(), 6);
+        assert_eq!(rolling.window(), 3);
+        assert_eq!(rolling.max_delta(), 9);
+        for (delta, expected, average) in [
+            (1, vec![1], 1),
+            (2, vec![1, 2], 1),
+            (3, vec![1, 2, 3], 2),
+            (4, vec![2, 3, 4], 3),
+            (5, vec![3, 4, 5], 4),
+            (6, vec![4, 5, 6], 5),
+            (7, vec![5, 6, 7], 6),
+            (8, vec![6, 7, 8], 7),
+            (9, vec![7, 8, 9], 8),
+        ] {
+            assert_eq!(rolling.update(delta), Ok(average));
+            assert_eq!(rolling.history_values(), expected.as_slice());
+            assert_eq!(rolling.history_len(), expected.len());
+            assert_eq!(rolling.history(expected.len()), None);
+        }
+        let state = rolling.state();
+        let phase = rolling.phase();
+        let peak = rolling.peak_observed();
+        assert_eq!(rolling.update(10), Err(ConvergenceError::DeltaOutOfRange));
+        assert_eq!(rolling.history_values(), &[7, 8, 9]);
+        assert_eq!(
+            (rolling.state(), rolling.phase(), rolling.peak_observed()),
+            (state, phase, peak)
+        );
+    }
+    let zero = ConvergenceGovernor::new(0, 0, 1, 0);
+    assert!(zero.is_ok());
+    if let Ok(mut zero) = zero {
+        for _ in 0..4 {
+            assert_eq!(zero.update(0), Ok(0));
+            assert_eq!(zero.history_values(), &[0]);
+            assert_eq!(zero.history_len(), 1);
+        }
+        assert_eq!(zero.update(1), Err(ConvergenceError::DeltaOutOfRange));
+        assert_eq!(zero.history_values(), &[0]);
+    }
+    let lazy = ConvergenceGovernor::new(0, 0, 1_000_000_000, 0);
+    assert!(lazy.is_ok());
+    if let Ok(lazy) = lazy {
+        assert!(lazy.history_values().is_empty());
+    }
+    #[cfg(feature = "proof-api")]
+    {
+        use automation_structures::primitives::convergence_governor_phase_aware::ConvergenceGovernorPhaseAware;
+        for window in [1usize, 4, 8, 16, 32, 33, 64, 65, 96, 97, 256] {
+            let checked = ConvergenceGovernor::new(2, 6, window, 9);
+            assert!(checked.is_ok());
+            if let Ok(mut checked) = checked {
+                let mut historical = ConvergenceGovernorPhaseAware::new(2, 6, window, 9);
+                for delta in [1, 9, 0, 9, 0] {
+                    for _ in 0..=window {
+                        assert_eq!(checked.update(delta), Ok(historical.update(delta)));
+                        assert_eq!(
+                            checked.history_values(),
+                            historical.delta_history.as_slice()
+                        );
+                        assert_eq!(checked.history_len(), historical.delta_history.len());
+                        for (index, value) in historical.delta_history.iter().enumerate() {
+                            assert_eq!(checked.history(index), Some(*value));
+                        }
+                        assert_eq!(checked.history(historical.delta_history.len()), None);
+                        assert_eq!(
+                            (checked.state(), checked.phase(), checked.peak_observed()),
+                            (
+                                historical.state,
+                                historical.gradient_phase,
+                                historical.peak_observed,
+                            )
+                        );
+                        let history = checked.history_values().to_vec();
+                        let before = (
+                            checked.threshold(),
+                            checked.awaken_threshold(),
+                            checked.window(),
+                            checked.max_delta(),
+                            checked.state(),
+                            checked.phase(),
+                            checked.peak_observed(),
+                        );
+                        assert_eq!(checked.update(10), Err(ConvergenceError::DeltaOutOfRange));
+                        assert_eq!(checked.history_values(), history.as_slice());
+                        assert_eq!(
+                            (
+                                checked.threshold(),
+                                checked.awaken_threshold(),
+                                checked.window(),
+                                checked.max_delta(),
+                                checked.state(),
+                                checked.phase(),
+                                checked.peak_observed(),
+                            ),
+                            before
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -2562,16 +4080,37 @@ fn checked_federated_budget_preserves_capacity_conservation() {
 }
 
 #[test]
-fn checked_bisection_converges_within_its_probe_budget() {
-    let bisection = Bisection::new(16, 11);
-    assert!(bisection.is_ok());
-    if let Ok(mut bisection) = bisection {
-        assert!(!bisection.is_converged());
-        bisection.converge();
-        assert!(bisection.is_converged());
-        assert!(bisection.lower() <= 11 && 11 <= bisection.upper());
-        assert!(bisection.probes_taken() <= bisection.max_probes());
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "assertions report correspondence failures; constructor errors propagate from test setup"
+)]
+fn checked_bisection_converges_within_its_probe_budget() -> Result<(), Box<dyn std::error::Error>> {
+    let mut bisection = Bisection::new(16, 11)?;
+    assert!(!bisection.is_converged());
+    bisection.converge();
+    assert!(bisection.is_converged());
+    assert!(bisection.lower() <= 11 && 11 <= bisection.upper());
+    assert!(bisection.probes_taken() <= bisection.max_probes());
+
+    for threshold in [1, 0x7fff_ffff_ffff_ffff, 0xffff_ffff_ffff_fffe] {
+        let mut boundary = Bisection::new(u64::MAX, threshold)?;
+        assert_eq!(boundary.max_probes(), 64);
+        boundary.converge();
+        assert!(boundary.is_converged());
+        assert!(boundary.lower() <= threshold && threshold <= boundary.upper());
+        assert_eq!(boundary.threshold(), threshold);
+        assert!(boundary.probes_taken() <= 64);
+        let terminal = (boundary.lower(), boundary.upper(), boundary.probes_taken());
+        assert_eq!(
+            boundary.probe(),
+            Err(automation_structures::BisectionError::AlreadyConverged)
+        );
+        assert_eq!(
+            (boundary.lower(), boundary.upper(), boundary.probes_taken()),
+            terminal
+        );
     }
+    Ok(())
 }
 
 #[test]
@@ -2716,6 +4255,20 @@ fn checked_select_then_actuate_uses_one_selection_and_actuation_lifecycle() {
             composition.evaluate(0),
             Err(SelectThenActuateError::SeatAlreadyAllocated)
         );
+        let first_scores = composition.scores(0).map(<[u64]>::as_ptr);
+        let other_scores = composition.scores(1).map(<[u64]>::as_ptr);
+        assert!(first_scores.is_some());
+        assert!(other_scores.is_some());
+        assert_eq!(composition.update_score(0, 0, 5), Ok(()));
+        assert_eq!(composition.allocation(0), None);
+        assert_eq!(composition.score(0, 0), Some(5));
+        assert_eq!(composition.score(0, 1), Some(5));
+        assert_eq!(composition.score(1, 0), Some(0));
+        assert_eq!(composition.score(1, 1), Some(0));
+        assert_eq!(composition.scores(0).map(<[u64]>::as_ptr), first_scores);
+        assert_eq!(composition.scores(1).map(<[u64]>::as_ptr), other_scores);
+        assert_eq!(composition.effects(), &[None, None]);
+        assert_eq!(composition.evaluate(0), Ok(0));
         assert_eq!(composition.actuate(0), Ok(()));
         assert_eq!(composition.is_actuated(0), Some(true));
         assert_eq!(
@@ -2724,27 +4277,68 @@ fn checked_select_then_actuate_uses_one_selection_and_actuation_lifecycle() {
         );
         assert_eq!(composition.finish(), Ok(()));
         assert!(composition.is_complete());
+        assert_eq!(composition.effects(), &[Some(0), None]);
+    }
+    let empty = SelectThenActuate::new(0, 1);
+    assert!(empty.is_ok());
+    if let Ok(mut empty) = empty {
+        assert_eq!(empty.seat_count(), 0);
+        assert_eq!(empty.finish(), Ok(()));
+        assert!(empty.is_complete());
+        assert_eq!(
+            empty.evaluate(0),
+            Err(SelectThenActuateError::SeatOutOfRange)
+        );
     }
 }
 
 #[test]
 fn checked_signal_tracks_each_recorded_change_epoch() {
+    assert!(Signal::new(0, 0, 0).is_err());
+    assert!(Signal::new(3, 3, 2).is_err());
     let signal = Signal::new(0, 3, 2);
     assert!(signal.is_ok());
     if let Ok(mut signal) = signal {
+        assert_eq!(signal.change_count(), 0);
+        assert!(!signal.change_observed());
+        assert_eq!(signal.is_pending(0), Some(false));
+        assert_eq!(signal.is_pending(1), Some(false));
+        assert_eq!(signal.is_notified(0), Some(false));
+        assert_eq!(signal.is_notified(1), Some(false));
+        assert_eq!(signal.notify(0), Err(SignalError::ListenerNotPending));
         assert_eq!(signal.set_value(0), Ok(false));
         assert_eq!(signal.set_value(3), Err(SignalError::ValueOutOfRange));
+        assert_eq!(signal.change_count(), 0);
+        assert_eq!(signal.value(), 0);
+        assert_eq!(signal.is_pending(1), Some(false));
+        assert_eq!(signal.is_notified(1), Some(false));
         assert_eq!(signal.set_value(2), Ok(true));
+        assert!(signal.change_observed());
         assert_eq!(signal.is_pending(0), Some(true));
+        assert_eq!(signal.is_pending(1), Some(true));
+        assert_eq!(signal.is_notified(0), Some(false));
+        assert_eq!(signal.is_notified(1), Some(false));
         assert_eq!(signal.notify(0), Ok(()));
+        assert_eq!(signal.is_pending(0), Some(false));
+        assert_eq!(signal.is_pending(1), Some(true));
+        assert_eq!(signal.is_notified(1), Some(false));
         assert_eq!(signal.notify(0), Err(SignalError::ListenerNotPending));
         assert_eq!(signal.is_notified(0), Some(true));
+        assert_eq!(signal.is_pending(1), Some(true));
+        assert_eq!(signal.is_notified(1), Some(false));
         assert_eq!(signal.set_value(1), Ok(true));
         assert_eq!(signal.change_count(), 2);
         assert_eq!(signal.value(), 1);
         assert_eq!(signal.is_pending(0), Some(true));
+        assert_eq!(signal.is_pending(1), Some(true));
+        assert_eq!(signal.is_notified(0), Some(false));
+        assert_eq!(signal.is_notified(1), Some(false));
         assert_eq!(signal.notify(0), Ok(()));
         assert_eq!(signal.notify(2), Err(SignalError::ListenerOutOfRange));
+        assert_eq!(signal.is_pending(1), Some(true));
+        assert_eq!(signal.is_notified(1), Some(false));
+        assert_eq!(signal.change_count(), 2);
+        assert_eq!(signal.value(), 1);
     }
 
     let bounded = Signal::with_change_capacity(0, 2, 1, 1);
@@ -2757,6 +4351,47 @@ fn checked_signal_tracks_each_recorded_change_epoch() {
         );
         assert_eq!(bounded.change_count(), 1);
         assert_eq!(bounded.value(), 1);
+        assert_eq!(bounded.is_pending(0), Some(true));
+        assert_eq!(bounded.is_notified(0), Some(false));
+        assert_eq!(bounded.notify(0), Ok(()));
+        assert_eq!(bounded.set_value(1), Ok(false));
+        assert_eq!(
+            bounded.set_value(0),
+            Err(SignalError::ChangeCapacityExhausted)
+        );
+        assert_eq!(bounded.is_pending(0), Some(false));
+        assert_eq!(bounded.is_notified(0), Some(true));
+        assert_eq!(bounded.change_count(), 1);
+        assert_eq!(bounded.value(), 1);
+    }
+
+    let zero_history = Signal::with_change_capacity(0, 2, 2, 0);
+    assert!(zero_history.is_ok());
+    if let Ok(mut signal) = zero_history {
+        assert_eq!(signal.set_value(0), Ok(false));
+        assert_eq!(
+            signal.set_value(1),
+            Err(SignalError::ChangeCapacityExhausted)
+        );
+        assert_eq!(signal.change_count(), 0);
+        assert!(!signal.change_observed());
+        assert_eq!(signal.value(), 0);
+        assert_eq!(signal.is_pending(0), Some(false));
+        assert_eq!(signal.is_pending(1), Some(false));
+        assert_eq!(signal.is_notified(0), Some(false));
+        assert_eq!(signal.is_notified(1), Some(false));
+    }
+
+    let no_listeners = Signal::new(0, 2, 0);
+    assert!(no_listeners.is_ok());
+    if let Ok(mut signal) = no_listeners {
+        assert_eq!(signal.listener_count(), 0);
+        assert_eq!(signal.set_value(1), Ok(true));
+        assert_eq!(signal.is_pending(0), None);
+        assert_eq!(signal.is_notified(0), None);
+        assert_eq!(signal.notify(0), Err(SignalError::ListenerOutOfRange));
+        assert_eq!(signal.value(), 1);
+        assert_eq!(signal.change_count(), 1);
     }
 }
 
@@ -2826,22 +4461,70 @@ fn checked_sequential_execution_preserves_history_position_agreement() {
 
 #[test]
 fn checked_fork_join_requires_every_worker_before_output() {
+    let empty = ForkJoin::new(0, 1, 0);
+    assert!(empty.is_ok());
+    if let Ok(mut execution) = empty {
+        assert!(execution.is_empty());
+        assert!(execution.all_complete());
+        assert_eq!(execution.outputs(), None);
+        assert!(!execution.produce_output());
+        assert!(execution.barrier());
+        assert!(!execution.barrier());
+        assert!(execution.produce_output());
+        assert_eq!(execution.outputs(), Some(&[][..]));
+        assert_eq!(execution.output(0), None);
+        assert!(!execution.start_worker(0));
+        assert!(!execution.complete_worker(0, 0));
+        assert!(!execution.produce_output());
+    }
     let execution = ForkJoin::new(2, 10, 0);
     assert!(execution.is_ok());
     if let Ok(mut execution) = execution {
+        let worker_storage = execution.worker_states().as_ptr();
+        let value_storage = execution.worker_values().as_ptr();
+        assert!(!execution.all_complete());
+        assert_eq!(execution.outputs(), None);
+        assert!(!execution.start_worker(usize::MAX));
+        assert!(!execution.complete_worker(0, 4));
+        assert_eq!(execution.worker_state(usize::MAX), None);
+        assert_eq!(execution.worker_value(usize::MAX), None);
+        assert_eq!(execution.worker_values(), &[0, 0]);
         assert!(!execution.barrier());
         assert!(execution.start_worker(0));
         assert!(execution.start_worker(1));
         assert_eq!(execution.worker_state(0), Some(WorkerState::Running));
         assert!(execution.complete_worker(0, 4));
+        assert!(!execution.all_complete());
+        assert!(!execution.complete_worker(0, 5));
+        assert!(!execution.complete_worker(1, 10));
+        assert_eq!(execution.worker_values(), &[4, 0]);
         assert!(!execution.barrier());
         assert!(execution.complete_worker(1, 6));
+        assert!(execution.all_complete());
         assert!(execution.barrier());
         assert_eq!(execution.phase(), ForkJoinPhase::Join);
         assert!(execution.produce_output());
         assert_eq!(execution.output(0), Some(4));
         assert_eq!(execution.output(1), Some(6));
         assert_eq!(execution.phase(), ForkJoinPhase::Done);
+        assert_eq!(
+            execution.worker_states(),
+            &[WorkerState::Complete, WorkerState::Complete]
+        );
+        assert_eq!(execution.worker_states().as_ptr(), worker_storage);
+        assert_eq!(execution.worker_values().as_ptr(), value_storage);
+        assert_eq!(
+            execution.outputs().map(<[u64]>::as_ptr),
+            Some(value_storage)
+        );
+        assert_eq!(execution.outputs(), Some(&[4, 6][..]));
+        assert_eq!(execution.output(2), None);
+        assert!(!execution.start_worker(0));
+        assert!(!execution.complete_worker(1, 7));
+        assert!(!execution.barrier());
+        assert!(!execution.produce_output());
+        assert_eq!(execution.worker_values(), &[4, 6]);
+        assert_eq!(execution.outputs(), Some(&[4, 6][..]));
     }
 }
 
@@ -2855,24 +4538,287 @@ fn checked_step_graph_enforces_predecessor_completion() {
         StepGraph::new(2, vec![(0, 1), (0, 1)]),
         Err(StepGraphBuildError::DuplicateEdge)
     ));
+    assert!(matches!(
+        StepGraph::new(2, vec![(0, 2), (0, 2)]),
+        Err(StepGraphBuildError::EdgeEndpointOutOfRange)
+    ));
+    assert!(matches!(
+        StepGraph::new(3, vec![(2, 0), (0, 1), (2, 0)]),
+        Err(StepGraphBuildError::DuplicateEdge)
+    ));
+
+    let authored = [(1, 0), (0, 2), (0, 1), (1, 2), (2, 2)];
+    let retained = StepGraph::new(3, authored.to_vec());
+    assert!(retained.is_ok());
+    if let Ok(retained) = retained {
+        assert_eq!(retained.edge_count(), authored.len());
+        for (index, edge) in authored.iter().enumerate() {
+            assert_eq!(retained.edge(index), Some(*edge));
+        }
+        assert_eq!(retained.state(2), Some(StepState::NotReady));
+    }
+
+    for edge_count in [32usize, 33] {
+        let authored: Vec<_> = (0..edge_count).rev().map(|node| (0, node)).collect();
+        let retained = StepGraph::new(34, authored.clone());
+        assert!(retained.is_ok());
+        if let Ok(retained) = retained {
+            assert_eq!(retained.edge_count(), edge_count);
+            for (index, edge) in authored.iter().enumerate() {
+                assert_eq!(retained.edge(index), Some(*edge));
+            }
+        }
+
+        let mut separated = authored.clone();
+        if let (Some(first), Some(last)) = (authored.first().copied(), separated.last_mut()) {
+            *last = first;
+        }
+        assert!(matches!(
+            StepGraph::new(34, separated.clone()),
+            Err(StepGraphBuildError::DuplicateEdge)
+        ));
+
+        if let Some(edge) = separated.get_mut(1) {
+            *edge = (34, 0);
+        }
+        assert!(matches!(
+            StepGraph::new(34, separated),
+            Err(StepGraphBuildError::EdgeEndpointOutOfRange)
+        ));
+    }
+
+    let refused_edges = vec![(0, 0)];
+    let refused = automation_structures::modalities::step_graph::StepGraph::try_new_counted(
+        usize::MAX,
+        refused_edges,
+    );
+    assert!(refused.is_err());
+    if let Err((_, edges)) = refused {
+        assert_eq!(edges, [(0, 0)]);
+    }
+
+    let empty = StepGraph::new(0, vec![]);
+    assert!(empty.is_ok());
+    if let Ok(mut empty) = empty {
+        assert!(empty.is_done());
+        assert!(!empty.start(0));
+        assert!(!empty.complete(0));
+        assert!(!empty.become_ready(0));
+        assert!(empty.is_done());
+        assert_eq!(empty.states(), &[]);
+    }
+
+    let joined = StepGraph::new(4, vec![(0, 2), (1, 2)]);
+    assert!(joined.is_ok());
+    if let Ok(mut joined) = joined {
+        assert_eq!(
+            joined.states(),
+            &[
+                StepState::Ready,
+                StepState::Ready,
+                StepState::NotReady,
+                StepState::Ready,
+            ]
+        );
+        assert!(!joined.become_ready(2));
+        assert!(joined.start(0));
+        assert!(joined.complete(0));
+        assert!(!joined.become_ready(2));
+        assert!(joined.start(1));
+        assert!(joined.complete(1));
+        assert!(joined.become_ready(2));
+        assert_eq!(joined.state(3), Some(StepState::Ready));
+        assert!(!joined.is_done());
+    }
+
+    let cyclic = StepGraph::new(2, vec![(0, 1), (1, 0)]);
+    assert!(cyclic.is_ok());
+    if let Ok(mut cyclic) = cyclic {
+        assert_eq!(cyclic.states(), &[StepState::NotReady, StepState::NotReady]);
+        assert!(!cyclic.become_ready(0));
+        assert!(!cyclic.become_ready(1));
+        assert!(!cyclic.start(0));
+        assert!(!cyclic.start(1));
+        assert!(!cyclic.complete(0));
+        assert!(!cyclic.complete(1));
+        assert!(!cyclic.is_done());
+        assert_eq!(cyclic.states(), &[StepState::NotReady, StepState::NotReady]);
+    }
 
     let graph = StepGraph::new(2, vec![(0, 1)]);
     assert!(graph.is_ok());
     if let Ok(mut graph) = graph {
         assert_eq!(graph.state(0), Some(StepState::Ready));
         assert_eq!(graph.state(1), Some(StepState::NotReady));
+        assert!(!graph.is_done());
+        assert!(!graph.complete(0));
+        assert!(!graph.complete(1));
+        assert!(!graph.complete(2));
         assert!(!graph.start(1));
+        assert!(!graph.is_done());
         assert!(graph.start(0));
+        assert!(!graph.is_done());
         assert!(graph.complete(0));
+        assert!(!graph.is_done());
+        assert!(!graph.complete(0));
+        assert_eq!(graph.states(), &[StepState::Complete, StepState::NotReady]);
         assert!(graph.become_ready(1));
+        assert_eq!(graph.states(), &[StepState::Complete, StepState::Ready]);
+        assert!(!graph.is_done());
+        assert!(!graph.become_ready(1));
         assert!(graph.start(1));
+        assert!(!graph.is_done());
         assert!(graph.complete(1));
         assert!(graph.is_done());
+        assert!(!graph.complete(0));
+        assert!(!graph.complete(1));
+        assert!(!graph.complete(2));
+        assert!(!graph.start(0));
+        assert!(!graph.start(1));
+        assert!(!graph.start(2));
+        assert!(!graph.start(usize::MAX));
+        assert!(graph.is_done());
+        assert_eq!(graph.states(), &[StepState::Complete, StepState::Complete]);
     }
 }
 
 #[test]
 fn checked_stream_graph_preserves_fifo_and_backpressure() {
+    use automation_structures::{FifoStorage, StreamGraphBuildError};
+    for (chain, capacity, domain, expected) in [
+        (2, 0, 0, StreamGraphBuildError::UnsupportedChainLength),
+        (3, 0, 0, StreamGraphBuildError::ZeroCapacity),
+        (4, 1, 0, StreamGraphBuildError::EmptyRecordDomain),
+    ] {
+        assert!(matches!(
+            StreamGraph::<FifoStorage>::try_with_storage(chain, capacity, 0, domain),
+            Err(error) if error == expected
+        ));
+    }
+    let empty = StreamGraph::<FifoStorage>::try_with_storage(3, 1, 0, 1);
+    assert!(empty.is_ok());
+    if let Ok(mut empty) = empty {
+        assert_eq!(empty.capacity(), 1);
+        assert!(empty.is_done());
+        assert!(empty.has_enabled_action());
+        assert!(!empty.ingest(0));
+        assert_eq!(empty.consume(), None);
+    }
+    assert!(matches!(
+        StreamGraph::<FifoStorage>::try_with_storage(3, usize::MAX, 1, 10),
+        Err(StreamGraphBuildError::StorageUnavailable)
+    ));
+    for chain in [3, 4] {
+        for capacity in [1, 3] {
+            let retained = capacity * (chain - 1);
+            let total = retained + 64;
+            let empty_contiguous = StreamGraph::new(chain, capacity, 0, 256);
+            assert!(empty_contiguous.is_ok());
+            if let Ok(empty) = empty_contiguous {
+                assert_eq!(empty.capacity(), capacity);
+                assert!(empty.is_done());
+            }
+            let contiguous = StreamGraph::new(chain, capacity, total, 256);
+            assert!(contiguous.is_ok());
+            if let Ok(mut graph) = contiguous {
+                assert_eq!(graph.capacity(), capacity);
+                assert!(graph.ingest(0));
+                assert_eq!(graph.capacity(), capacity);
+                assert!(graph.advance_first());
+                if chain == 4 {
+                    assert!(graph.advance_second());
+                }
+                assert_eq!(graph.consume(), Some(0));
+                assert_eq!(graph.capacity(), capacity);
+            }
+            let setup = StreamGraph::<FifoStorage>::try_with_storage(chain, capacity, total, 256);
+            assert!(setup.is_ok());
+            if let Ok(mut graph) = setup {
+                assert_eq!(graph.capacity(), capacity);
+                assert!(!graph.ingest(256));
+                let mut issued = 0u64;
+                for batch in 0..chain - 1 {
+                    for _ in 0..capacity {
+                        assert!(graph.ingest(issued));
+                        issued += 1;
+                    }
+                    if batch < chain - 2 {
+                        for _ in 0..capacity {
+                            assert!(graph.advance_first());
+                        }
+                    }
+                    if chain == 4 && batch == 0 {
+                        for _ in 0..capacity {
+                            assert!(graph.advance_second());
+                        }
+                    }
+                }
+                assert_eq!(graph.first_queue().count(), capacity);
+                assert_eq!(graph.second_queue().count(), capacity);
+                assert_eq!(
+                    graph.third_queue().count(),
+                    if chain == 4 { capacity } else { 0 }
+                );
+                assert!(!graph.advance_first());
+                assert!(!graph.advance_second());
+                assert!(!graph.ingest(issued));
+                assert_eq!(graph.ingested(), retained);
+                assert_eq!(graph.emitted(), 0);
+                for expected in 0..64u64 {
+                    let observed: Vec<_> = if chain == 3 {
+                        graph.second_queue().copied().collect()
+                    } else {
+                        graph.third_queue().copied().collect()
+                    };
+                    assert_eq!(
+                        observed,
+                        (expected..expected + capacity as u64).collect::<Vec<_>>()
+                    );
+                    assert_eq!(graph.consume(), Some(expected));
+                    if chain == 4 {
+                        assert!(graph.advance_second());
+                    }
+                    assert!(graph.advance_first());
+                    assert!(graph.ingest(issued));
+                    issued += 1;
+                    assert_eq!(graph.ingested(), graph.emitted() + retained);
+                    assert_eq!(graph.capacity(), capacity);
+                    assert_eq!(graph.first_queue_len(), capacity);
+                    assert_eq!(graph.second_queue_len(), capacity);
+                    assert_eq!(
+                        graph.third_queue_len(),
+                        if chain == 4 { capacity } else { 0 }
+                    );
+                }
+                assert_eq!(graph.ingested(), total);
+                assert!(!graph.ingest(255));
+                for expected in 64..total as u64 {
+                    assert_eq!(graph.consume(), Some(expected));
+                    if chain == 4 {
+                        let _advanced = graph.advance_second();
+                    }
+                    let _advanced = graph.advance_first();
+                    assert_eq!(
+                        graph.ingested(),
+                        graph.emitted()
+                            + graph.first_queue_len()
+                            + graph.second_queue_len()
+                            + graph.third_queue_len()
+                    );
+                }
+                assert_eq!(graph.consume(), None);
+                assert!(graph.is_done());
+                assert_eq!(graph.capacity(), capacity);
+                assert!(graph.has_enabled_action());
+                assert_eq!(graph.emitted(), total);
+                assert!(!graph.ingest(255));
+                assert_eq!(graph.first_queue().count(), 0);
+                assert_eq!(graph.second_queue().count(), 0);
+                assert_eq!(graph.third_queue().count(), 0);
+                assert!(format!("{graph:?}").contains("StreamGraph"));
+            }
+        }
+    }
     let stream = StreamGraph::new(3, 1, 2, 10);
     assert!(stream.is_ok());
     if let Ok(mut stream) = stream {
@@ -3194,6 +5140,94 @@ mod summarized_audit {
     use automation_structures::primitives::audit_sink::{
         AuditSink, CheckedSignedAdd, CheckedSignedSumCount, NullableSigned, SignedSumCount,
     };
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions observe the canonical owner; fallible entry access propagates errors"
+    )]
+    fn typed_nonzero_genesis_is_preserved_by_both_retention_profiles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone, Copy)]
+        struct SeededAdd;
+
+        impl automation_structures::TypedChainOperation for SeededAdd {
+            type Item = i64;
+            type Carry = i64;
+
+            fn initial(&self) -> i64 {
+                37
+            }
+
+            fn accepts_exec(&self, previous: i64, operation: i64) -> bool {
+                previous.checked_add(operation).is_some()
+            }
+
+            fn combine_typed(&self, previous: i64, operation: i64) -> i64 {
+                previous.wrapping_add(operation)
+            }
+        }
+
+        let mut full = AuditSink::with_typed_operator(2, SeededAdd);
+        let mut summary = AuditSink::with_summary(2, SeededAdd);
+        assert_eq!(
+            (full.carry(), full.committed_count(), full.latest()),
+            (37, 0, None)
+        );
+        assert_eq!(
+            (summary.carry(), summary.committed_count(), summary.latest()),
+            (37, 0, None)
+        );
+        assert!(full.log.is_empty());
+        for (operation, accepted, carry, count, latest) in [
+            (5, true, 42, 1, Some(5)),
+            (i64::MAX, false, 42, 1, Some(5)),
+            (-2, true, 40, 2, Some(-2)),
+            (1, false, 40, 2, Some(-2)),
+        ] {
+            assert_eq!(full.record_typed(operation), accepted);
+            assert_eq!(summary.record_typed(operation), accepted);
+            assert_eq!(
+                (full.carry(), full.committed_count(), full.latest()),
+                (carry, count, latest)
+            );
+            assert_eq!(
+                (summary.carry(), summary.committed_count(), summary.latest()),
+                (carry, count, latest)
+            );
+            assert_eq!(full.log.len(), count);
+        }
+        let first = full.log.first().ok_or("missing first committed entry")?;
+        assert_eq!((first.operation, first.prev_hash, first.hash), (5, 37, 42));
+        let second = full.log.get(1).ok_or("missing second committed entry")?;
+        assert_eq!(
+            (second.operation, second.prev_hash, second.hash),
+            (-2, 42, 40)
+        );
+
+        let mut empty_full = AuditSink::with_typed_operator(0, SeededAdd);
+        let mut empty_summary = AuditSink::with_summary(0, SeededAdd);
+        assert!(!empty_full.record_typed(5));
+        assert!(!empty_summary.record_typed(5));
+        assert_eq!(
+            (
+                empty_full.carry(),
+                empty_full.committed_count(),
+                empty_full.latest()
+            ),
+            (37, 0, None)
+        );
+        assert_eq!(
+            (
+                empty_summary.carry(),
+                empty_summary.committed_count(),
+                empty_summary.latest()
+            ),
+            (37, 0, None)
+        );
+        assert!(empty_full.log.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn typed_summary_preserves_order_latest_and_refuses_overflow() {
@@ -3747,6 +5781,15 @@ fn admitted_scalar_sequence_preserves_storage_and_order() -> Result<(), Box<dyn 
 )]
 fn admitted_fork_keeps_snapshot_storage_and_barrier() -> Result<(), Box<dyn std::error::Error>> {
     use automation_structures::modalities::fork_join::ForkJoin;
+    let mut observed = ForkJoin::try_new(2, 10, 0)?;
+    *observed.wstate.get_mut(0).ok_or("missing worker 0")? = WorkerState::Complete;
+    assert!(!observed.all_complete_exec());
+    *observed.wstate.get_mut(1).ok_or("missing worker 1")? = WorkerState::Complete;
+    assert!(observed.all_complete_exec());
+    *observed.wstate.get_mut(0).ok_or("missing worker 0")? = WorkerState::Ready;
+    assert!(!observed.all_complete_exec());
+    assert_eq!(observed.wvalue, vec![0, 0]);
+    assert_eq!(observed.output_snapshot, vec![0, 0]);
     assert!(ForkJoin::try_new(usize::MAX, 10, 0).is_err());
     let mut s = ForkJoin::try_new(3, 10, 0)?;
     let pointers = (
@@ -4049,16 +6092,23 @@ fn dynamic_candidates_extend_after_visits_and_seal_original_custody()
         .map_err(|(error, _)| error)?;
     let original = Box::new(30);
     let original_pointer = original.as_ref() as *const _;
-    let (error, returned) = owner
-        .admit(Some(first), original, 3, 0)
-        .err()
-        .ok_or("pending parent admitted")?;
+    let refusal = owner.admit(Some(first), original, 3, 0);
+    assert!(matches!(&refusal, Err((Error::ParentPending, _))));
+    let (error, returned) = refusal.err().ok_or("pending parent admitted")?;
     assert_eq!(error, Error::ParentPending);
     assert_eq!(returned.as_ref() as *const _, original_pointer);
     assert_eq!(owner.pending(), 2);
-    let mut owner = owner.finish().err().ok_or("pending owner sealed")?;
+    let completion = owner.finish();
+    assert!(completion.is_err());
+    let mut owner = completion.err().ok_or("pending owner sealed")?;
     assert_eq!(owner.step()?, Some(second));
+    let prioritized = owner
+        .admit(None, Box::new(40), 9, 0)
+        .map_err(|(error, _)| error)?;
+    assert_eq!(owner.pending(), 2);
+    assert_eq!(owner.step()?, Some(prioritized));
     assert_eq!(owner.step()?, Some(first));
+    assert_eq!(owner.step()?, None);
     assert_eq!(owner.context().as_ref() as *const _, pointer);
     // The refused consuming completion returns exactly the same owner.
     let mut owner = CandidateTraversal::try_new(Box::new("frozen context"), 102, 5)
@@ -4117,6 +6167,292 @@ fn dynamic_candidates_extend_after_visits_and_seal_original_custody()
             .finish()
             .map_err(|_| "empty completion refused")?
             .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "assertions bind identity callback timing to prepared allocation commit"
+)]
+fn prepared_allocation_commit_never_reenters_identity_adapter()
+-> Result<(), Box<dyn std::error::Error>> {
+    use automation_structures::primitives::resource_registry::KeyIdentity;
+    use automation_structures::{Counter, TypedAllocation, UnrestrictedAllocation};
+    use std::{cell::Cell, rc::Rc};
+
+    struct Key {
+        id: u64,
+        calls: Rc<Cell<Counter>>,
+    }
+    impl KeyIdentity for Key {
+        type Identity = u64;
+        fn key_equal(&self, other: &Self) -> bool {
+            let mut count = self.calls.get();
+            assert!(count.try_increment());
+            self.calls.set(count);
+            self.id == other.id
+        }
+    }
+    let calls = Rc::new(Cell::new(Counter::new(0)));
+    let key = |id| Key {
+        id,
+        calls: Rc::clone(&calls),
+    };
+    let mut owner = TypedAllocation::try_new(&vec![4, 8], UnrestrictedAllocation)?;
+    owner.prepare(key(1), vec![7u8], vec![1, 2])?.commit();
+    let second = owner.prepare(key(2), vec![8u8], vec![1, 1])?;
+    let before_single = calls.get().value();
+    assert!(
+        before_single > 0,
+        "preparation must invoke the actual identity adapter"
+    );
+    second.commit();
+    assert_eq!(
+        calls.get().value(),
+        before_single,
+        "single commit must not call key equality"
+    );
+    assert_eq!(owner.len(), 2);
+    assert_eq!(owner.budget(0), Some((4, 2)));
+    assert_eq!(owner.budget(1), Some((8, 3)));
+
+    let batch = owner.prepare_batch(vec![
+        (key(3), (vec![9u8], vec![1, 1])),
+        (key(4), (vec![10u8], vec![1, 2])),
+    ])?;
+    let before_batch = calls.get().value();
+    assert!(before_batch > before_single);
+    batch.commit();
+    assert_eq!(
+        calls.get().value(),
+        before_batch,
+        "batch commit must not call key equality"
+    );
+    assert_eq!(owner.len(), 4);
+    assert_eq!(owner.budget(0), Some((4, 4)));
+    assert_eq!(owner.budget(1), Some((8, 6)));
+    for (id, payload) in [(1, 7u8), (2, 8), (3, 9), (4, 10)] {
+        assert_eq!(owner.get(&key(id)), Some(&vec![payload]));
+    }
+
+    let mut cancelled = TypedAllocation::try_new(&vec![2, 3], UnrestrictedAllocation)?;
+    cancelled.prepare(key(5), vec![11u8], vec![1, 1])?.commit();
+    let prepared = cancelled.prepare(key(6), vec![12u8], vec![1, 1])?;
+    let before_cancel = calls.get().value();
+    let returned = prepared.cancel();
+    assert_eq!(calls.get().value(), before_cancel);
+    assert_eq!((returned.key.id, returned.value), (6, vec![12u8]));
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(cancelled.budget(0), Some((2, 1)));
+    assert_eq!(cancelled.budget(1), Some((3, 1)));
+    let prepared = cancelled.prepare_batch(vec![(key(6), (vec![13u8], vec![1, 1]))])?;
+    let before_cancel_batch = calls.get().value();
+    let returned = prepared.cancel();
+    assert_eq!(calls.get().value(), before_cancel_batch);
+    assert_eq!(returned.items.len(), 1);
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(cancelled.budget(0), Some((2, 1)));
+    assert_eq!(cancelled.budget(1), Some((3, 1)));
+    Ok(())
+}
+#[test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "assertions bind asymmetric branch limits to original payload custody and independent release"
+)]
+fn branch_fanout_preserves_asymmetric_limits_original_pairs_and_independent_custody()
+-> Result<(), Box<dyn std::error::Error>> {
+    use automation_structures::{
+        FanoutBranch::{Left, Right},
+        TypedBranchFanout, TypedBranchFanoutBuildError, TypedBranchFanoutError, TypedStreamError,
+    };
+
+    assert!(matches!(
+        TypedBranchFanout::<Box<u8>>::try_new([1, 1], [1, 2], [2, 3], 3),
+        Err(TypedBranchFanoutBuildError::DuplicateScope)
+    ));
+    let mut owner = TypedBranchFanout::try_new([601, 602], [1, 2], [2, 3], 3)
+        .map_err(|reason| format!("asymmetric storage refused: {reason:?}"))?;
+    assert_eq!(
+        (owner.slot_capacity(Left), owner.slot_capacity(Right)),
+        (1, 2)
+    );
+    assert_eq!(
+        (owner.byte_capacity(Left), owner.byte_capacity(Right)),
+        (2, 3)
+    );
+    assert_eq!(
+        owner
+            .publish_pair(Box::new(10u8), Box::new(20u8), 2)
+            .map_err(|refusal| format!("first pair refused: {:?}", refusal.error))?,
+        0
+    );
+    let left = Box::new(30u8);
+    let right = Box::new(40u8);
+    let left_address = std::ptr::from_ref(left.as_ref());
+    let right_address = std::ptr::from_ref(right.as_ref());
+    let refusal = owner
+        .publish_pair(left, right, 1)
+        .err()
+        .ok_or("full left branch unexpectedly admitted the pair")?;
+    assert_eq!(
+        refusal.error,
+        TypedBranchFanoutError::Left(TypedStreamError::SlotCapacity)
+    );
+    assert_eq!(std::ptr::from_ref(refusal.left.as_ref()), left_address);
+    assert_eq!(std::ptr::from_ref(refusal.right.as_ref()), right_address);
+    assert_eq!(
+        (owner.published_count(), owner.len(Left), owner.len(Right)),
+        (1, 1, 1)
+    );
+    let first = owner
+        .receive(Left)
+        .map_err(|reason| format!("first left receipt refused: {reason:?}"))?;
+    assert_eq!(
+        (
+            first.scope,
+            first.sequence,
+            *first.value,
+            first.encoded_bytes
+        ),
+        (601, 0, 10, 2)
+    );
+    assert_eq!(
+        (owner.retained_bytes(Left), owner.retained_bytes(Right)),
+        (0, 2)
+    );
+
+    let refusal = owner
+        .publish_pair(refusal.left, refusal.right, 2)
+        .err()
+        .ok_or("right byte limit unexpectedly admitted the pair")?;
+    assert_eq!(
+        refusal.error,
+        TypedBranchFanoutError::Right(TypedStreamError::ByteCapacity)
+    );
+    assert_eq!(std::ptr::from_ref(refusal.left.as_ref()), left_address);
+    assert_eq!(std::ptr::from_ref(refusal.right.as_ref()), right_address);
+    assert_eq!(owner.published_count(), 1);
+    assert_eq!(
+        owner
+            .publish_pair(refusal.left, refusal.right, 1)
+            .map_err(|refusal| format!("second pair refused: {:?}", refusal.error))?,
+        1
+    );
+    let second = owner
+        .receive(Left)
+        .map_err(|reason| format!("second left receipt refused: {reason:?}"))?;
+    assert_eq!((second.sequence, *second.value), (1, 30));
+    assert_eq!(
+        (
+            owner.len(Left),
+            owner.len(Right),
+            owner.retained_bytes(Right)
+        ),
+        (0, 2, 3)
+    );
+    let refusal = owner
+        .publish_pair(Box::new(50), Box::new(60), 0)
+        .err()
+        .ok_or("full right branch unexpectedly admitted the pair")?;
+    assert_eq!(
+        refusal.error,
+        TypedBranchFanoutError::Right(TypedStreamError::SlotCapacity)
+    );
+    let first = owner
+        .receive(Right)
+        .map_err(|reason| format!("first right receipt refused: {reason:?}"))?;
+    assert_eq!(
+        (
+            first.scope,
+            first.sequence,
+            *first.value,
+            first.encoded_bytes
+        ),
+        (602, 0, 20, 2)
+    );
+    assert_eq!(owner.retained_bytes(Right), 1);
+    assert_eq!(
+        owner
+            .publish_pair(refusal.left, refusal.right, 2)
+            .map_err(|refusal| format!("third pair refused: {:?}", refusal.error))?,
+        2
+    );
+    let third = owner
+        .receive(Left)
+        .map_err(|reason| format!("third left receipt refused: {reason:?}"))?;
+    assert_eq!(
+        (third.sequence, *third.value, third.encoded_bytes),
+        (2, 50, 2)
+    );
+    let refusal = owner
+        .publish_pair(Box::new(70), Box::new(80), 0)
+        .err()
+        .ok_or("exhausted input limit unexpectedly admitted the pair")?;
+    assert_eq!(refusal.error, TypedBranchFanoutError::InputLimitReached);
+    assert_eq!((*refusal.left, *refusal.right), (70, 80));
+    assert_eq!(
+        (
+            owner.published_count(),
+            owner.received_count(Left),
+            owner.received_count(Right)
+        ),
+        (3, 3, 1)
+    );
+    assert!(owner.close_input());
+    assert!(!owner.close_input());
+    for (sequence, value, charge) in [(1, 40, 1), (2, 60, 2)] {
+        let item = owner
+            .receive(Right)
+            .map_err(|reason| format!("draining right receipt refused: {reason:?}"))?;
+        assert_eq!(
+            (item.sequence, *item.value, item.encoded_bytes),
+            (sequence, value, charge)
+        );
+    }
+    assert_eq!(
+        (owner.retained_bytes(Left), owner.retained_bytes(Right)),
+        (0, 0)
+    );
+    assert!(matches!(owner.receive(Left), Err(TypedStreamError::Closed)));
+    assert!(matches!(
+        owner.receive(Right),
+        Err(TypedStreamError::Closed)
+    ));
+
+    let mut zero_charge = TypedBranchFanout::try_new([603, 604], [1, 1], [0, 0], 2)
+        .map_err(|reason| format!("zero-charge storage refused: {reason:?}"))?;
+    assert_eq!(
+        zero_charge
+            .publish_pair(1u8, 2u8, 0)
+            .map_err(|refusal| format!("zero-charge pair refused: {:?}", refusal.error))?,
+        0
+    );
+    assert_eq!(
+        zero_charge
+            .receive(Left)
+            .map_err(|reason| format!("zero-charge left receipt refused: {reason:?}"))?
+            .value,
+        1
+    );
+    assert!(zero_charge.close_input());
+    let refusal = zero_charge
+        .publish_pair(3, 4, 1)
+        .err()
+        .ok_or("closed input unexpectedly admitted the pair")?;
+    assert_eq!(
+        refusal.error,
+        TypedBranchFanoutError::Left(TypedStreamError::Closed)
+    );
+    assert_eq!((refusal.left, refusal.right), (3, 4));
+    assert_eq!(
+        zero_charge
+            .receive(Right)
+            .map_err(|reason| format!("zero-charge right receipt refused: {reason:?}"))?
+            .value,
+        2
     );
     Ok(())
 }

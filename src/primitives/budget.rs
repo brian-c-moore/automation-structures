@@ -94,6 +94,17 @@ impl Budget {
         Budget { capacity, allocated: 0, reserved: 0, pending_eviction: 0 }
     }
 
+    /// Observe the total claimed by this Budget's three ledgers.
+    #[expect(clippy::arithmetic_side_effects, reason = "Verus proves each partial ledger sum is bounded by capacity")]
+    pub(crate) fn used_exec(&self) -> (used: u64)
+        requires self.safety_invariant(),
+        ensures used as int == self.used(),
+    {
+        // allocated + reserved <= used <= capacity, so each partial sum fits u64.
+        assert(self.allocated + self.reserved <= self.capacity);
+        self.allocated + self.reserved + self.pending_eviction
+    }
+
     /// Headroom = capacity - used, computed overflow-safely (used <= capacity by
     /// the invariant, so the subtraction never underflows). Exposed for callers
     /// and the try-operations.
@@ -102,9 +113,7 @@ impl Budget {
         requires self.safety_invariant(),
         ensures a as int == self.capacity as int - self.used(),
     {
-        // allocated + reserved <= used <= capacity, so each partial sum fits u64.
-        assert(self.allocated + self.reserved <= self.capacity);
-        let used: u64 = self.allocated + self.reserved + self.pending_eviction;
+        let used = self.used_exec();
         self.capacity - used
     }
 

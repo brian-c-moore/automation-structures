@@ -67,6 +67,8 @@ pub trait EdgeHandleDomain<H: Copy + ValueEq> {
 }
 
 /// Positional edge handles over a caller-declared finite universe.
+/// Positions carry no owner or incarnation identity. Equal positions in two
+/// graphs are equal handles; this domain supplies no cross-graph provenance.
 #[derive(Clone, Copy, Debug)]
 pub struct PositionalEdgeHandles {
     /// Maximum number of original positions this domain represents.
@@ -440,7 +442,9 @@ impl<H: Copy + ValueEq, D: EdgeHandleDomain<H>, P: RegistryPredicate<EdgeKey, ()
         match direction { EdgeDirection::Outgoing => self.outgoing.handles.values@,
             EdgeDirection::Incoming => self.incoming.handles.values@ }
     }
-    /// Exact representation resolution, rejecting unknown or foreign handles.
+    /// Resolve only a representation retained at its decoded position.
+    /// Cross-owner or incarnation rejection requires distinct representations
+    /// in the handle domain; equality alone supplies no provenance guarantee.
     pub closed spec fn resolve_spec(&self, handle: H) -> Option<usize> {
         match self.domain.ordinal_spec(handle) {
             Some(original) => if original < self.original_handles.values@.len()
@@ -449,7 +453,7 @@ impl<H: Copy + ValueEq, D: EdgeHandleDomain<H>, P: RegistryPredicate<EdgeKey, ()
         }
     }
 
-    /// Export exact handle identity, including a foreign representation with a valid ordinal.
+    /// Export exact retained representation equality, including a mismatch at a valid ordinal.
     pub proof fn expose_handle_resolution(&self, handle: H)
         requires self.inv(),
         ensures self.resolve_spec(handle) == match self.handle_domain_spec().ordinal_spec(handle) {
@@ -540,7 +544,7 @@ impl<H: Copy + ValueEq, D: EdgeHandleDomain<H>, P: RegistryPredicate<EdgeKey, ()
     /// Number of authored weighted records, including records excluded from spans.
     pub fn edge_count(&self) -> (count: usize) ensures count == self.edges_spec().len(),
     { self.graph.registry.entries.len() }
-    /// Typed handle for an original edge position; foreign positions return None.
+    /// Typed handle for an original edge position; out-of-range positions return None.
     #[expect(clippy::indexing_slicing, reason = "the branch checks the original position against retained handle length")]
     pub fn handle_at(&self, original: usize) -> (handle: Option<H>)
         ensures handle == if original < self.original_handles_spec().len()
@@ -591,7 +595,7 @@ impl<H: Copy + ValueEq, D: EdgeHandleDomain<H>, P: RegistryPredicate<EdgeKey, ()
     }
 
     /// Inverse rank of a selected handle in a direction's retained prefix.
-    /// Excluded and foreign handles return None; every excluded original position
+    /// Excluded or unretained representations return None; each excluded original
     /// remains represented by the complete private arrangement certificate.
     #[expect(clippy::indexing_slicing, reason = "the exact-handle guard, inverse certificate and private terminal-offset invariant bound all three accesses")]
     pub fn rank_of(&self, handle: &H, direction: EdgeDirection) -> (rank: Option<usize>)
