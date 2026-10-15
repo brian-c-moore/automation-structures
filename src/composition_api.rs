@@ -231,11 +231,10 @@ impl FederatedBudget {
 
     /// Read one sub-pool capacity.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the pool index is in bounds")]
-    #[expect(clippy::arithmetic_side_effects, reason = "the private federation invariant bounds each pool's allocated plus reserved sum by its u64 capacity")]
     pub fn pool_capacity(&self, pool: usize) -> Option<u64> {
         proof { use_type_invariant(&*self); }
         if pool < self.inner.sub_pools.len() {
-            Some(self.inner.sub_pools[pool].allocated + self.inner.sub_pools[pool].reserved)
+            Some(self.inner.sub_pools[pool].used_exec())
         } else {
             None
         }
@@ -1379,7 +1378,7 @@ impl SelectThenActuate {
     ///
     /// # Errors
     ///
-    /// Returns an error when either configured dimension is zero.
+    /// Returns an error when the candidate universe is empty; zero seats are permitted.
     pub fn new(num_seats: usize, num_candidates: usize)
         -> (result: Result<Self, SelectThenActuateBuildError>) {
         if num_candidates == 0 { return Err(SelectThenActuateBuildError::NoCandidates); }
@@ -1421,7 +1420,8 @@ impl SelectThenActuate {
     ///
     /// # Errors
     ///
-    /// Returns an error for an unknown seat or candidate, or after evaluation has begun.
+    /// Returns an error for an unknown seat or candidate, after pass closure, or after
+    /// this seat's effect was applied. An unapplied winner is withdrawn before revision.
     pub fn update_score(
         &mut self,
         seat: usize,
@@ -1503,7 +1503,7 @@ impl SelectThenActuate {
     ///
     /// # Errors
     ///
-    /// Returns an error when the pass is already complete or not all seats were actuated.
+    /// Returns an error when the pass is already complete or an allocated seat is not actuated.
     pub fn finish(&mut self) -> (result: Result<(), SelectThenActuateError>) {
         proof { use_type_invariant(&*self); }
         if self.inner.actuation.complete { return Err(SelectThenActuateError::PassComplete); }
@@ -1601,15 +1601,11 @@ impl FederatedBudget {
     }
 
     /// Iterate over `(delegated capacity, allocated capacity)` for each sub-pool.
-    #[expect(
-        clippy::arithmetic_side_effects,
-        reason = "every retained pool satisfies the private federation invariant bounding allocated plus reserved by capacity"
-    )]
     pub fn pools(&self) -> impl ExactSizeIterator<Item = (u64, u64)> + '_ {
         self.inner
             .sub_pools
             .iter()
-            .map(|pool| (pool.allocated + pool.reserved, pool.allocated))
+            .map(|pool| (pool.used_exec(), pool.allocated))
     }
 }
 

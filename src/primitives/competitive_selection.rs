@@ -22,14 +22,15 @@
 //
 // Each mode discharges its checked invariants under its TLA+ actions.
 
+/// Compatibility name for the minimum-selection composition.
+pub use crate::compositions::minimum_selection::MinimumSelection as CompetitiveSelectionMinimum;
 use crate::compositions::reduction::ReductionProjection;
-use crate::connectives::ordering_pass::{ArrangementError, IndexArrangement, PositionOrder};
 use vstd::prelude::*;
 
 verus! {
 
 /// Exact stable equal-minimum prefix of an admitted arrangement.
-pub open spec fn minimum_prefix<C: PositionOrder>(
+pub open spec fn minimum_prefix<C: crate::connectives::ordering_pass::PositionOrder>(
     positions: Seq<usize>, order: C, end: int,
 ) -> Seq<usize>
     decreases end,
@@ -45,7 +46,7 @@ pub open spec fn minimum_prefix<C: PositionOrder>(
 }
 
 /// Prefix membership is exactly equivalence with the arranged minimum.
-pub proof fn minimum_prefix_membership<C: PositionOrder>(
+pub proof fn minimum_prefix_membership<C: crate::connectives::ordering_pass::PositionOrder>(
     positions: Seq<usize>, order: C, end: int, item: usize,
 )
     requires 0 <= end <= positions.len(),
@@ -91,147 +92,6 @@ pub proof fn minimum_prefix_membership<C: PositionOrder>(
     } else {
         assert(minimum_prefix(positions, order, end) == Seq::<usize>::empty());
     }
-}
-
-/// Complete finite minimum selection, without a route-slot or tie quota.
-/// The comparator supplies immutable content and a total preorder; canonical
-/// OrderingPass, Cursor and Buffer own arrangement, visitation and result.
-pub struct CompetitiveSelectionMinimum<C: PositionOrder> {
-    order: C,
-    arrangement: IndexArrangement,
-    selected: crate::connectives::buffer::Buffer<usize>,
-}
-
-impl<C: PositionOrder> CompetitiveSelectionMinimum<C> {
-    /// Immutable source comparator identity.
-    pub closed spec fn order_spec(&self) -> C { self.order }
-    /// Complete stable source arrangement.
-    pub closed spec fn arranged_spec(&self) -> Seq<usize> { self.arrangement.positions_spec() }
-    /// The immutable arrangement's original-position inverse.
-    pub closed spec fn inverse_spec(&self) -> Seq<usize> { self.arrangement.inverse_spec() }
-    /// The actual Buffer-owned selected positions.
-    pub closed spec fn selected_spec(&self) -> Seq<usize> { self.selected.values@ }
-    /// Exact complete minimum set, with no mutable owner escape.
-    pub closed spec fn inv(&self) -> bool {
-        &&& self.arrangement.inv()
-        &&& crate::connectives::ordering_pass::inverse_permutation(
-            self.arranged_spec(), self.arrangement.inverse_spec())
-        &&& self.arranged_spec().len() == self.order.domain_len()
-        &&& crate::connectives::ordering_pass::arranged(self.arranged_spec(), &self.order)
-        &&& crate::connectives::ordering_pass::total_preorder(&self.order)
-        &&& self.selected.well_formed()
-        &&& self.selected.capacity == self.order.domain_len()
-        &&& self.selected_spec() == minimum_prefix(self.arranged_spec(), self.order,
-            self.arranged_spec().len() as int)
-    }
-
-    /// Arrange the whole domain and retain every equal minimum in stable order.
-    ///
-    /// # Errors
-    /// Returns storage refusal with the original comparator/context before
-    /// exposing a selection. No winner-count parameter is accepted.
-    #[expect(clippy::indexing_slicing, reason = "the arrangement Cursor is below the complete nonempty positions length for both reads")]
-    #[expect(clippy::arithmetic_side_effects, reason = "the arrangement Cursor advances only while strictly below the admitted count")]
-    pub fn try_new(order: C) -> (result: Result<Self, (ArrangementError, C)>)
-        ensures result matches Ok(owner) ==> owner.inv() && owner.order_spec() == order,
-            result matches Err((_, returned)) ==> returned == order,
-    {
-        let count = order.len();
-        proof { order.establish(); }
-        let arrangement = match IndexArrangement::try_new(count, &order) {
-            Ok(arrangement) => arrangement,
-            Err(reason) => return Err((reason, order)),
-        };
-        let mut selected = match crate::connectives::buffer::Buffer::try_new(count) {
-            Ok(selected) => selected,
-            Err(_) => return Err((ArrangementError::Allocation, order)),
-        };
-        let mut cursor = crate::connectives::cursor::Cursor::new(0);
-        while cursor.position < count
-            invariant cursor.position <= count, count == order.domain_len(),
-                arrangement.inv(),
-                crate::connectives::ordering_pass::inverse_permutation(
-                    arrangement.positions_spec(), arrangement.inverse_spec()),
-                arrangement.positions_spec().len() == count,
-                crate::connectives::ordering_pass::arranged(arrangement.positions_spec(), &order),
-                crate::connectives::ordering_pass::total_preorder(&order),
-                selected.well_formed(), selected.capacity == count,
-                selected.values@.len() <= cursor.position,
-                selected.values@ == minimum_prefix(arrangement.positions_spec(), order, cursor.position as int),
-            decreases count - cursor.position,
-        {
-            let positions = arrangement.positions();
-            let item = positions[cursor.position];
-            let minimum = positions[0];
-            if order.compare(item, minimum) == 0 {
-                let _pushed = selected.push(item);
-                assert(_pushed is Ok);
-            }
-            cursor.advance_to(cursor.position + 1);
-        }
-        Ok(Self { order, arrangement, selected })
-    }
-
-    /// Export complete minimum membership through the retained arrangement.
-    pub proof fn expose_arrangement(&self)
-        requires self.inv(),
-        ensures crate::connectives::ordering_pass::inverse_permutation(
-                self.arranged_spec(), self.inverse_spec()),
-            crate::connectives::ordering_pass::arranged(self.arranged_spec(), &self.order_spec()),
-            self.arranged_spec().len() == self.order_spec().domain_len(),
-            self.selected_spec() == minimum_prefix(self.arranged_spec(), self.order_spec(),
-                self.arranged_spec().len() as int),
-    {}
-
-    /// Export complete minimum membership through the retained arrangement.
-    pub proof fn expose_minima(&self)
-        requires self.inv(),
-        ensures forall|item: usize| self.selected_spec().contains(item) <==>
-            (item < self.order_spec().domain_len()
-                && forall|other: usize| other < self.order_spec().domain_len()
-                    ==> #[trigger] self.order_spec().key_le(item, other)),
-    {
-        self.arrangement.expose_certificate();
-        let positions = self.arranged_spec();
-        assert forall|item: usize| self.selected_spec().contains(item) <==>
-            (item < self.order.domain_len()
-                && forall|other: usize| other < self.order.domain_len()
-                    ==> #[trigger] self.order.key_le(item, other)) by {
-            minimum_prefix_membership(positions, self.order, positions.len() as int, item);
-            if self.selected_spec().contains(item) {
-                let rank = choose|rank: int| 0 <= rank < positions.len() && #[trigger] positions[rank] == item
-                    && self.order.key_le(item, positions[0]) && self.order.key_le(positions[0], item);
-                assert forall|other: usize| other < self.order.domain_len() implies
-                    #[trigger] self.order.key_le(item, other) by {
-                    assert(positions.contains(other));
-                    let index = choose|index: int| 0 <= index < positions.len() && positions[index] == other;
-                    if index > 0 { assert(self.order.key_le(positions[0], other)); }
-                    else { assert(positions[0] == other); }
-                }
-            }
-            if item < self.order.domain_len()
-                && forall|other: usize| other < self.order.domain_len() ==> #[trigger] self.order.key_le(item, other) {
-                assert(positions.contains(item));
-                let rank = choose|rank: int| 0 <= rank < positions.len() && positions[rank] == item;
-                if rank > 0 { assert(self.order.key_le(positions[0], item)); }
-                assert(self.order.key_le(item, positions[0]));
-                assert(self.selected_spec().contains(item));
-            }
-        }
-    }
-
-    /// Borrow every selected original position; ties preserve authored order.
-    pub fn selected(&self) -> (positions: &[usize])
-        requires self.inv(), ensures positions@ == self.selected_spec(),
-    { self.selected.values.as_slice() }
-    /// Observe the Buffer-owned selected length without a caller fold.
-    pub fn len(&self) -> (length: usize)
-        requires self.inv(), ensures length == self.selected_spec().len(),
-    { self.selected.len() }
-    /// Whether the complete admitted domain has no winner.
-    pub fn is_empty(&self) -> (empty: bool)
-        requires self.inv(), ensures empty == (self.selected_spec().len() == 0),
-    { self.selected.is_empty() }
 }
 
 // ── shared recursive sum (for Soft's Normalization) ─────────────────────
@@ -872,7 +732,7 @@ impl CompetitiveSelectionHardExclusive {
     /// TLA+ UpdateScore(s,c,v): update one score and invalidate every seat in
     /// the same commit because availability couples their optimality.
     #[expect(clippy::indexing_slicing, reason = "the required enabled seat bound and representation invariant prove the retained score-row read")]
-    #[expect(clippy::arithmetic_side_effects, reason = "score-row and invalidation cursors advance only while strictly below their fixed row and seat lengths")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the invalidation cursor advances only while strictly below the fixed seat length")]
     pub fn update_score(&mut self, s: usize, c: usize, v: u64)
         requires
             old(self).inv(),
@@ -892,48 +752,10 @@ impl CompetitiveSelectionHardExclusive {
                 final(self).allocation@[t] is None,
             final(self).inv(),
     {
-        let ghost old_row = self.scores@[s as int]@;
-        let row_len = self.scores[s].len();
-        let mut new_row: Vec<u64> = Vec::new();
-        let mut k: usize = 0;
-        while k < row_len
-            invariant
-                k <= row_len,
-                row_len == self.scores@[s as int].len(),
-                row_len == self.num_candidates,
-                c < row_len,
-                s < self.num_seats,
-                self.scores.len() == self.num_seats,
-                new_row.len() == k,
-                old_row == old(self).scores@[s as int]@,
-                old_row.len() == row_len,
-                forall|j: int| 0 <= j < k ==>
-                    new_row@[j] == (if j == c as int { v } else { old_row[j] }),
-                self.scores@ == old(self).scores@,
-                self.allocation@ == old(self).allocation@,
-                self.num_seats == old(self).num_seats,
-                self.num_candidates == old(self).num_candidates,
-                self.max_score == old(self).max_score,
-            decreases row_len - k,
         {
-            if k == c {
-                new_row.push(v);
-            } else {
-                let x = self.score_at(s, k);
-                new_row.push(x);
-            }
-            k = k + 1;
+            let row = &mut self.scores[s];
+            row.set(c, v);
         }
-        assert(new_row@ == old_row.update(c as int, v)) by {
-            assert(new_row.len() == old_row.len());
-            assert forall|j: int| 0 <= j < new_row.len() implies
-                new_row@[j] == old_row.update(c as int, v)[j] by {
-                if j == c as int {
-                } else {
-                }
-            }
-        }
-        self.scores.set(s, new_row);
         let ghost updated_scores = self.scores@;
         assert(updated_scores.len() == old(self).scores@.len());
         assert(updated_scores[s as int]@ == old(self).scores@[s as int]@.update(c as int, v));

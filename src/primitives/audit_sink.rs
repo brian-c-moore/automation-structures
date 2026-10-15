@@ -119,7 +119,7 @@ pub struct AuditSink<
     pub max_log_len: usize,
     /// Append-only audit entries.
     pub log: S,
-    /// Chain value after the latest entry, or zero for an empty log.
+    /// Chain value after the latest entry, or the operator's initial carry for an empty log.
     pub last_hash: O::Carry,
 }
 
@@ -146,6 +146,21 @@ pub trait TypedChainOperation: Copy {
     fn combine_typed(&self, previous: Self::Carry, operation: Self::Item) -> (result: Self::Carry)
         requires self.accepts(previous, operation),
         ensures result == self.combined(previous, operation);
+    /// Check and compute one domain result without retaining state or publishing a Record.
+    /// Existing operations retain their separate guard and combination by default;
+    /// an operation may supply one equivalent checked calculation.
+    #[inline]
+    fn try_combine_typed(&self, previous: Self::Carry, operation: Self::Item)
+        -> (result: Option<Self::Carry>)
+        ensures (result is Some) == self.accepts(previous, operation),
+            result matches Some(carry) ==> carry == self.combined(previous, operation),
+    {
+        if self.accepts_exec(previous, operation) {
+            Some(self.combine_typed(previous, operation))
+        } else {
+            None
+        }
+    }
 }
 
 impl<O: ChainOperation> TypedChainOperation for O {
@@ -370,8 +385,10 @@ impl<O: TypedChainOperation, S: AuditStorage<O::Item, O::Carry>> AuditSink<O, S>
             },
     {
         if self.log.record_count() >= self.max_log_len { return Err(RecordRefusal::Capacity); }
-        if !self.operator.accepts_exec(self.last_hash, operation) { return Err(RecordRefusal::Domain); }
-        Ok(self.operator.combine_typed(self.last_hash, operation))
+        match self.operator.try_combine_typed(self.last_hash, operation) {
+            Some(carry) => Ok(carry),
+            None => Err(RecordRefusal::Domain),
+        }
     }
 
     /// Commit the exact precomputed Record under its owner guard.
@@ -485,6 +502,17 @@ impl AuditSink<BoundedHash> {
             result as int == Self::hash_spec(previous, operation),
             result < 100,
     {
+        proof {
+            let p = previous as int;
+            let o = operation as int;
+            let tail = o % 100 + 1;
+            vstd::arithmetic::div_mod::lemma_mod_bound(p, 100);
+            vstd::arithmetic::div_mod::lemma_mod_bound(o, 100);
+            vstd::arithmetic::div_mod::lemma_mul_mod_noop_left(p, 3, 100);
+            vstd::arithmetic::div_mod::lemma_add_mod_noop((p % 100) * 3, tail, 100);
+            vstd::arithmetic::div_mod::lemma_add_mod_noop(p * 3, tail, 100);
+            assert(((p % 100) * 3 + tail) % 100 == (p * 3 + tail) % 100);
+        }
         ((previous % 100) * 3 + (operation % 100) + 1) % 100
     }
 

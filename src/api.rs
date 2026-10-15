@@ -4,8 +4,9 @@
 //! These public types keep their carrier invariants internal and convert every
 //! caller-controlled action guard into an executable result.
 
-use crate::connectives::cursor::Cursor as CursorCarrier;
+use crate::connectives::cursor::{Cursor as CursorCarrier, CursorPosition};
 use crate::primitives::actuation_pass::ActuationPass as ActuationPassCarrier;
+use crate::primitives::actuation_pass::{ActuationAllocations, CountedAllocations};
 use crate::primitives::audit_sink::AuditSink as AuditSinkCarrier;
 use crate::primitives::backtracking_traversal::BacktrackingTraversal as BacktrackingTraversalCarrier;
 use crate::primitives::budget::Budget as BudgetCarrier;
@@ -16,9 +17,14 @@ use crate::primitives::competitive_selection::{
     CompetitiveSelectionSoft as CompetitiveSelectionSoftCarrier,
 };
 use crate::primitives::convergence_governor_phase_aware::ConvergenceGovernorPhaseAware as ConvergenceGovernorCarrier;
+use crate::primitives::convergence_governor_phase_aware::{
+    BufferedGovernorHistory, GovernorHistory,
+};
 use crate::primitives::propagation_pass::PropagationPass as PropagationPassCarrier;
 use crate::primitives::quality_hierarchy::QualityHierarchy as QualityHierarchyCarrier;
-use crate::primitives::resource_registry::ResourceRegistry as RegistryCarrier;
+use crate::primitives::resource_registry::{
+    IndexedStorage, RegistryStorage, ResourceRegistry as RegistryCarrier,
+};
 use vstd::prelude::*;
 
 pub use crate::primitives::convergence_governor_phase_aware::{
@@ -61,41 +67,88 @@ impl Budget {
         self.inner.safety_invariant()
     }
 
+    /// Fixed capacity.
+    pub closed spec fn capacity_spec(&self) -> u64 { self.inner.capacity }
+    /// Committed allocation.
+    pub closed spec fn allocated_spec(&self) -> u64 { self.inner.allocated }
+    /// Held reservation.
+    pub closed spec fn reserved_spec(&self) -> u64 { self.inner.reserved }
+    /// Pending eviction.
+    pub closed spec fn pending_eviction_spec(&self) -> u64 { self.inner.pending_eviction }
+    /// Total allocated, reserved and pending-eviction charges.
+    pub closed spec fn used_spec(&self) -> int { self.inner.used() }
+    /// Budget safety predicate.
+    pub closed spec fn safety_invariant(&self) -> bool { self.inner.safety_invariant() }
+
+    /// Export the accounting relations and safety predicate.
+    pub proof fn expose_safety(tracked &self)
+        ensures self.safety_invariant(),
+            self.used_spec() == self.allocated_spec() as int + self.reserved_spec() as int
+                + self.pending_eviction_spec() as int,
+            crate::primitives::budget::budget_safety(self.capacity_spec() as nat,
+                self.allocated_spec() as nat, self.reserved_spec() as nat,
+                self.pending_eviction_spec() as nat),
+    {
+        use_type_invariant(self);
+    }
+
     /// Construct an empty budget with `capacity` units.
-    pub fn new(capacity: u64) -> (budget: Self) {
+    pub fn new(capacity: u64) -> (budget: Self)
+        ensures budget.capacity_spec() == capacity,
+            budget.allocated_spec() == 0, budget.reserved_spec() == 0,
+            budget.pending_eviction_spec() == 0, budget.safety_invariant(),
+    {
         let inner = BudgetCarrier::new(capacity);
         Self { inner }
     }
 
     /// Return the fixed budget ceiling.
-    pub fn capacity(&self) -> u64 {
+    pub fn capacity(&self) -> (capacity: u64)
+        ensures capacity == self.capacity_spec(),
+    {
         self.inner.capacity
     }
 
     /// Return units committed for use.
-    pub fn allocated(&self) -> u64 {
+    pub fn allocated(&self) -> (allocated: u64)
+        ensures allocated == self.allocated_spec(),
+    {
         self.inner.allocated
     }
 
     /// Return units held but not committed.
-    pub fn reserved(&self) -> u64 {
+    pub fn reserved(&self) -> (reserved: u64)
+        ensures reserved == self.reserved_spec(),
+    {
         self.inner.reserved
     }
 
     /// Return units currently being reclaimed.
-    pub fn pending_eviction(&self) -> u64 {
+    pub fn pending_eviction(&self) -> (pending: u64)
+        ensures pending == self.pending_eviction_spec(),
+    {
         self.inner.pending_eviction
     }
 
     /// Return units not claimed by any budget state.
-    pub fn available(&self) -> (available: u64) {
+    pub fn available(&self) -> (available: u64)
+        ensures available as int == self.capacity_spec() as int - self.used_spec(),
+    {
         proof { use_type_invariant(&*self); }
         self.inner.available()
     }
 
     /// Try to commit unused capacity directly.
     #[must_use]
-    pub fn try_allocate(&mut self, amount: u64) -> (accepted: bool) {
+    pub fn try_allocate(&mut self, amount: u64) -> (accepted: bool)
+        ensures final(self).safety_invariant(),
+            final(self).capacity_spec() == old(self).capacity_spec(),
+            final(self).reserved_spec() == old(self).reserved_spec(),
+            final(self).pending_eviction_spec() == old(self).pending_eviction_spec(),
+            accepted == (old(self).used_spec() + amount as int <= old(self).capacity_spec() as int),
+            accepted ==> final(self).allocated_spec() as int == old(self).allocated_spec() as int + amount as int,
+            !accepted ==> *final(self) == *old(self),
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = budget_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -106,7 +159,15 @@ impl Budget {
 
     /// Try to reserve unused capacity.
     #[must_use]
-    pub fn try_reserve(&mut self, amount: u64) -> (accepted: bool) {
+    pub fn try_reserve(&mut self, amount: u64) -> (accepted: bool)
+        ensures final(self).safety_invariant(),
+            final(self).capacity_spec() == old(self).capacity_spec(),
+            final(self).allocated_spec() == old(self).allocated_spec(),
+            final(self).pending_eviction_spec() == old(self).pending_eviction_spec(),
+            accepted == (old(self).used_spec() + amount as int <= old(self).capacity_spec() as int),
+            accepted ==> final(self).reserved_spec() as int == old(self).reserved_spec() as int + amount as int,
+            !accepted ==> *final(self) == *old(self),
+    {
         proof { use_type_invariant(&*self); }
         let mut carrier = budget_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
@@ -120,7 +181,16 @@ impl Budget {
     /// # Errors
     ///
     /// Returns [`BudgetError::AmountExceedsReservation`] when `amount` exceeds the held reservation.
-    pub fn commit_reservation(&mut self, amount: u64) -> (result: Result<(), BudgetError>) {
+    pub fn commit_reservation(&mut self, amount: u64) -> (result: Result<(), BudgetError>)
+        ensures final(self).safety_invariant(),
+            final(self).capacity_spec() == old(self).capacity_spec(),
+            final(self).pending_eviction_spec() == old(self).pending_eviction_spec(),
+            result is Ok <==> amount <= old(self).reserved_spec(),
+            result is Ok ==> final(self).allocated_spec() as int == old(self).allocated_spec() as int + amount as int,
+            result is Ok ==> final(self).reserved_spec() as int == old(self).reserved_spec() as int - amount as int,
+            match result { Err(error) => error == BudgetError::AmountExceedsReservation
+                && *final(self) == *old(self), Ok(()) => true },
+    {
         proof { use_type_invariant(&*self); }
         if amount <= self.inner.reserved {
             let mut carrier = budget_sentinel();
@@ -138,7 +208,16 @@ impl Budget {
     /// # Errors
     ///
     /// Returns [`BudgetError::AmountExceedsAllocation`] when `amount` exceeds the allocation.
-    pub fn release(&mut self, amount: u64) -> (result: Result<(), BudgetError>) {
+    pub fn release(&mut self, amount: u64) -> (result: Result<(), BudgetError>)
+        ensures final(self).safety_invariant(),
+            final(self).capacity_spec() == old(self).capacity_spec(),
+            final(self).reserved_spec() == old(self).reserved_spec(),
+            final(self).pending_eviction_spec() == old(self).pending_eviction_spec(),
+            result is Ok <==> amount <= old(self).allocated_spec(),
+            result is Ok ==> final(self).allocated_spec() as int == old(self).allocated_spec() as int - amount as int,
+            match result { Err(error) => error == BudgetError::AmountExceedsAllocation
+                && *final(self) == *old(self), Ok(()) => true },
+    {
         proof { use_type_invariant(&*self); }
         if amount <= self.inner.allocated {
             let mut carrier = budget_sentinel();
@@ -156,7 +235,16 @@ impl Budget {
     /// # Errors
     ///
     /// Returns [`BudgetError::AmountExceedsAllocation`] when `amount` exceeds the allocation.
-    pub fn mark_eviction(&mut self, amount: u64) -> (result: Result<(), BudgetError>) {
+    pub fn mark_eviction(&mut self, amount: u64) -> (result: Result<(), BudgetError>)
+        ensures final(self).safety_invariant(),
+            final(self).capacity_spec() == old(self).capacity_spec(),
+            final(self).reserved_spec() == old(self).reserved_spec(),
+            result is Ok <==> amount <= old(self).allocated_spec(),
+            result is Ok ==> final(self).allocated_spec() as int == old(self).allocated_spec() as int - amount as int,
+            result is Ok ==> final(self).pending_eviction_spec() as int == old(self).pending_eviction_spec() as int + amount as int,
+            match result { Err(error) => error == BudgetError::AmountExceedsAllocation
+                && *final(self) == *old(self), Ok(()) => true },
+    {
         proof { use_type_invariant(&*self); }
         if amount <= self.inner.allocated {
             let mut carrier = budget_sentinel();
@@ -174,7 +262,16 @@ impl Budget {
     /// # Errors
     ///
     /// Returns [`BudgetError::AmountExceedsPendingEviction`] when `amount` exceeds pending eviction.
-    pub fn complete_eviction(&mut self, amount: u64) -> (result: Result<(), BudgetError>) {
+    pub fn complete_eviction(&mut self, amount: u64) -> (result: Result<(), BudgetError>)
+        ensures final(self).safety_invariant(),
+            final(self).capacity_spec() == old(self).capacity_spec(),
+            final(self).allocated_spec() == old(self).allocated_spec(),
+            final(self).reserved_spec() == old(self).reserved_spec(),
+            result is Ok <==> amount <= old(self).pending_eviction_spec(),
+            result is Ok ==> final(self).pending_eviction_spec() as int == old(self).pending_eviction_spec() as int - amount as int,
+            match result { Err(error) => error == BudgetError::AmountExceedsPendingEviction
+                && *final(self) == *old(self), Ok(()) => true },
+    {
         proof { use_type_invariant(&*self); }
         if amount <= self.inner.pending_eviction {
             let mut carrier = budget_sentinel();
@@ -200,7 +297,7 @@ impl Budget {
 /// assert_eq!(registry.get(7), Some(42));
 /// ```
 pub struct ResourceRegistry {
-    inner: RegistryCarrier<u64, u64>,
+    inner: RegistryCarrier<u64, u64, IndexedStorage>,
 }
 
 impl ResourceRegistry {
@@ -211,7 +308,7 @@ impl ResourceRegistry {
 
     /// Construct an empty registry.
     pub fn new() -> (registry: Self) {
-        let inner = RegistryCarrier::new();
+        let inner = RegistryCarrier::new_indexed();
         Self { inner }
     }
 
@@ -226,20 +323,29 @@ impl ResourceRegistry {
     }
 
     /// Look up a registered value.
+    /// Average O(1) under the hash binding; worst case O(n).
     pub fn get(&self, key: u64) -> (value: Option<u64>) {
         proof { use_type_invariant(&*self); }
         self.inner.lookup(key)
     }
 
     /// Insert or replace a key and return its previous value.
+    /// Replacing a key preserves survivor order and costs O(n).
     pub fn insert(&mut self, key: u64, value: u64) -> (previous: Option<u64>) {
         proof { use_type_invariant(&*self); }
-        let previous = self.inner.lookup(key);
+        proof { crate::primitives::resource_registry::identity_entries_are_exact(self.inner.entries@); }
         let mut carrier = registry_sentinel();
         core::mem::swap(&mut self.inner, &mut carrier);
-        carrier.register(key, value);
+        if let Some(previous) = carrier.replace_last_exact(key, value) {
+            core::mem::swap(&mut self.inner, &mut carrier);
+            return Some(previous);
+        }
+        let removed = carrier.take_query(&key);
+        proof { crate::primitives::resource_registry::identity_entries_are_exact(carrier.entries@); }
+        carrier.register_absent_key(key, value);
+        proof { crate::primitives::resource_registry::identity_entries_are_exact(carrier.entries@); }
         core::mem::swap(&mut self.inner, &mut carrier);
-        previous
+        removed.map(|entry| entry.1)
     }
 
     /// Insert an absent key, preserving existing bindings on refusal.
@@ -274,6 +380,7 @@ impl ResourceRegistry {
     ) -> bool { self.inner.all_matching(predicate) }
 
     /// Remove a key and return its previous value.
+    /// Preserving survivor order costs O(n).
     pub fn remove(&mut self, key: u64) -> (previous: Option<u64>) {
         proof { use_type_invariant(&*self); }
         proof { crate::primitives::resource_registry::identity_entries_are_exact(self.inner.entries@); }
@@ -286,12 +393,10 @@ impl ResourceRegistry {
     }
 
     /// Read an entry by storage index for deterministic inspection.
-    #[expect(clippy::indexing_slicing, reason = "the branch proves the registry index is in bounds")]
     pub fn entry(&self, index: usize) -> Option<(u64, u64)> {
-        if index < self.inner.entries.len() {
-            Some(self.inner.entries[index])
-        } else {
-            None
+        match (self.inner.entries.key_at(index), self.inner.entries.value_at(index)) {
+            (Some(key), Some(value)) => Some((*key, *value)),
+            _ => None,
         }
     }
 }
@@ -429,18 +534,35 @@ pub enum CursorError {
 /// assert_eq!(cursor.position(), 5);
 /// # Ok::<(), automation_structures::CursorError>(())
 /// ```
-pub struct Cursor {
-    inner: CursorCarrier,
+pub struct Cursor<P: CursorPosition = usize> {
+    inner: CursorCarrier<P>,
 }
 
-impl Cursor {
+impl Cursor<usize> {
     /// Construct a cursor at `position`.
-    pub fn new(position: usize) -> (cursor: Self) {
-        Self { inner: CursorCarrier::new(position) }
+    pub fn new(position: usize) -> (cursor: Self)
+        ensures cursor.position_spec() == position as nat,
+    {
+        Self::from_position(position)
+    }
+}
+
+impl<P: CursorPosition> Cursor<P> {
+    /// Exact observation of the existing retained-position carrier.
+    pub closed spec fn position_spec(&self) -> nat { self.inner.position_spec() }
+
+    /// Construct this integer profile through the same retained-position carrier.
+    pub fn from_position(position: P) -> (cursor: Self)
+        ensures cursor.position_spec() == position.ordinal(),
+    {
+        Self { inner: CursorCarrier::from_position(position) }
     }
 
     /// Read the retained position.
-    pub fn position(&self) -> usize {
+    pub fn position(&self) -> (position: P)
+        ensures position.ordinal() == self.position_spec(),
+    {
+        proof { self.inner.expose_position_bound(); }
         self.inner.position
     }
 
@@ -449,8 +571,14 @@ impl Cursor {
     /// # Errors
     ///
     /// Returns [`CursorError::Regression`] when `position` precedes the retained position.
-    pub fn advance_to(&mut self, position: usize) -> (result: Result<(), CursorError>) {
-        if position < self.inner.position {
+    pub fn advance_to(&mut self, position: P) -> (result: Result<(), CursorError>)
+        ensures (result is Ok) == (old(self).position_spec() <= position.ordinal()),
+            result is Ok ==> final(self).position_spec() == position.ordinal(),
+            match result { Err(error) => error == CursorError::Regression
+                && *final(self) == *old(self), Ok(()) => true },
+    {
+        proof { self.inner.expose_position_bound(); }
+        if position.less_than(self.inner.position) {
             return Err(CursorError::Regression);
         }
         self.inner.advance_to(position);
@@ -733,42 +861,68 @@ pub enum ActuationError {
 /// # Ok::<(), automation_structures::ActuationError>(())
 /// ```
 pub struct ActuationPass {
-    inner: ActuationPassCarrier,
+    inner: ActuationPassCarrier<CountedAllocations>,
 }
 
 impl ActuationPass {
+    /// The actual allocation-to-effect owner, available only to specifications.
+    pub closed spec fn state_spec(&self) -> ActuationPassCarrier {
+        self.inner.as_raw()
+    }
+
     #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool {
         self.inner.invariant()
     }
 
     /// Construct a pass over the supplied allocation record.
-    pub fn new(allocation: Vec<Option<u64>>) -> (pass: Self) {
+    pub fn new(allocation: Vec<Option<u64>>) -> (pass: Self)
+        ensures
+            pass.state_spec().num_seats == allocation@.len(),
+            pass.state_spec().allocation@ == allocation@,
+            pass.state_spec().effects@.len() == allocation@.len(),
+            forall|i: int| 0 <= i < allocation@.len()
+                ==> #[trigger] pass.state_spec().effects@[i] is None,
+            !pass.state_spec().complete,
+            pass.state_spec().invariant(),
+    {
         let num_seats = allocation.len();
-        let inner = ActuationPassCarrier::new(allocation, num_seats);
+        let inner = ActuationPassCarrier::new_counted(allocation, num_seats);
         Self { inner }
     }
 
     /// Number of governed seats.
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> (count: usize)
+        ensures count == self.state_spec().num_seats,
+    {
         self.inner.num_seats
     }
 
     /// Whether the pass has no seats.
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> (empty: bool)
+        ensures empty == (self.state_spec().num_seats == 0),
+    {
         self.inner.num_seats == 0
     }
 
     /// Whether closure has committed.
-    pub fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> (complete: bool)
+        ensures complete == self.state_spec().complete,
+    {
         self.inner.complete
     }
 
     /// Read the current resource held by a seat.
-    #[expect(clippy::indexing_slicing, reason = "the branch proves the allocation index is in bounds")]
-    pub fn allocation(&self, seat: usize) -> Option<Option<u64>> {
+    pub fn allocation(&self, seat: usize) -> (value: Option<Option<u64>>)
+        ensures value == if seat < self.state_spec().num_seats {
+            Some(self.state_spec().allocation@[seat as int])
+        } else {
+            None
+        },
+    {
+        proof { use_type_invariant(&*self); }
         if seat < self.inner.allocation.len() {
-            Some(self.inner.allocation[seat])
+            Some(self.inner.allocation.value_at(seat))
         } else {
             None
         }
@@ -776,7 +930,14 @@ impl ActuationPass {
 
     /// Read the resource whose effect record has committed for a seat.
     #[expect(clippy::indexing_slicing, reason = "the branch proves the effect index is in bounds")]
-    pub fn effect(&self, seat: usize) -> Option<Option<u64>> {
+    pub fn effect(&self, seat: usize) -> (value: Option<Option<u64>>)
+        ensures value == if seat < self.state_spec().num_seats {
+            Some(self.state_spec().effects@[seat as int])
+        } else {
+            None
+        },
+    {
+        proof { use_type_invariant(&*self); }
         if seat < self.inner.effects.len() {
             Some(self.inner.effects[seat])
         } else {
@@ -789,7 +950,23 @@ impl ActuationPass {
     /// # Errors
     ///
     /// Returns [`ActuationError`] when the seat is invalid, allocated, or the pass is complete.
-    pub fn allocate(&mut self, seat: usize, resource: u64) -> (result: Result<(), ActuationError>) {
+    pub fn allocate(&mut self, seat: usize, resource: u64) -> (result: Result<(), ActuationError>)
+        ensures
+            final(self).state_spec().invariant(),
+            final(self).state_spec().num_seats == old(self).state_spec().num_seats,
+            final(self).state_spec().effects@ == old(self).state_spec().effects@,
+            final(self).state_spec().complete == old(self).state_spec().complete,
+            result == if seat >= old(self).state_spec().num_seats {
+                Err(ActuationError::SeatOutOfRange)
+            } else if old(self).state_spec().complete {
+                Err(ActuationError::PassComplete)
+            } else if old(self).state_spec().allocation@[seat as int] is Some {
+                Err(ActuationError::SeatAlreadyAllocated)
+            } else { Ok(()) },
+            result is Err ==> *final(self) == *old(self),
+            result is Ok ==> final(self).state_spec().allocation@
+                == old(self).state_spec().allocation@.update(seat as int, Some(resource)),
+    {
         proof { use_type_invariant(&*self); }
         if seat >= self.inner.num_seats {
             return Err(ActuationError::SeatOutOfRange);
@@ -812,7 +989,25 @@ impl ActuationPass {
     /// # Errors
     ///
     /// Returns [`ActuationError`] when the seat cannot be deallocated in the current state.
-    pub fn deallocate(&mut self, seat: usize) -> (result: Result<(), ActuationError>) {
+    pub fn deallocate(&mut self, seat: usize) -> (result: Result<(), ActuationError>)
+        ensures
+            final(self).state_spec().invariant(),
+            final(self).state_spec().num_seats == old(self).state_spec().num_seats,
+            final(self).state_spec().effects@ == old(self).state_spec().effects@,
+            final(self).state_spec().complete == old(self).state_spec().complete,
+            result == if seat >= old(self).state_spec().num_seats {
+                Err(ActuationError::SeatOutOfRange)
+            } else if old(self).state_spec().complete {
+                Err(ActuationError::PassComplete)
+            } else if old(self).state_spec().allocation@[seat as int] is None {
+                Err(ActuationError::SeatUnallocated)
+            } else if old(self).state_spec().effects@[seat as int] is Some {
+                Err(ActuationError::SeatAlreadyActuated)
+            } else { Ok(()) },
+            result is Err ==> *final(self) == *old(self),
+            result is Ok ==> final(self).state_spec().allocation@
+                == old(self).state_spec().allocation@.update(seat as int, None),
+    {
         proof { use_type_invariant(&*self); }
         if seat >= self.inner.num_seats {
             return Err(ActuationError::SeatOutOfRange);
@@ -838,7 +1033,25 @@ impl ActuationPass {
     /// # Errors
     ///
     /// Returns [`ActuationError`] when the seat cannot be actuated in the current state.
-    pub fn actuate(&mut self, seat: usize) -> (result: Result<(), ActuationError>) {
+    pub fn actuate(&mut self, seat: usize) -> (result: Result<(), ActuationError>)
+        ensures
+            final(self).state_spec().invariant(),
+            final(self).state_spec().num_seats == old(self).state_spec().num_seats,
+            final(self).state_spec().allocation@ == old(self).state_spec().allocation@,
+            final(self).state_spec().complete == old(self).state_spec().complete,
+            result == if seat >= old(self).state_spec().num_seats {
+                Err(ActuationError::SeatOutOfRange)
+            } else if old(self).state_spec().complete {
+                Err(ActuationError::PassComplete)
+            } else if old(self).state_spec().allocation@[seat as int] is None {
+                Err(ActuationError::SeatUnallocated)
+            } else if old(self).state_spec().effects@[seat as int] is Some {
+                Err(ActuationError::SeatAlreadyActuated)
+            } else { Ok(()) },
+            result is Err ==> *final(self) == *old(self),
+            result is Ok ==> final(self).state_spec().effects@ == old(self).state_spec().effects@
+                .update(seat as int, old(self).state_spec().allocation@[seat as int]),
+    {
         proof { use_type_invariant(&*self); }
         if seat >= self.inner.num_seats {
             return Err(ActuationError::SeatOutOfRange);
@@ -860,17 +1073,36 @@ impl ActuationPass {
     }
 
     /// Whether every allocated seat has committed an effect record.
-    pub fn ready_to_finish(&self) -> (ready: bool) {
+    ///
+    /// Reads the canonical pending Counter, taking O(1) time.
+    pub fn ready_to_finish(&self) -> (ready: bool)
+        ensures ready == self.state_spec().ready_to_finish(),
+    {
         proof { use_type_invariant(&*self); }
         self.inner.ready_to_finish_exec()
     }
 
     /// Commit closure after every allocated seat has committed an effect record.
     ///
+    /// The pending Counter check and closure commit each take O(1) time.
+    ///
     /// # Errors
     ///
     /// Returns [`ActuationError`] when the pass is complete or an allocation is not actuated.
-    pub fn finish(&mut self) -> (result: Result<(), ActuationError>) {
+    pub fn finish(&mut self) -> (result: Result<(), ActuationError>)
+        ensures
+            final(self).state_spec().invariant(),
+            final(self).state_spec().num_seats == old(self).state_spec().num_seats,
+            final(self).state_spec().allocation@ == old(self).state_spec().allocation@,
+            final(self).state_spec().effects@ == old(self).state_spec().effects@,
+            result == if old(self).state_spec().complete {
+                Err(ActuationError::PassComplete)
+            } else if !old(self).state_spec().ready_to_finish() {
+                Err(ActuationError::PassIncomplete)
+            } else { Ok(()) },
+            result is Err ==> *final(self) == *old(self),
+            result is Ok ==> final(self).state_spec().complete,
+    {
         proof { use_type_invariant(&*self); }
         if self.inner.complete {
             return Err(ActuationError::PassComplete);
@@ -1090,24 +1322,35 @@ impl QualityHierarchy {
         if child >= self.inner.num_nodes {
             return Err(QualityHierarchyError::ChildOutOfRange);
         }
-        if self.inner.can_add_child(parent, child) {
-            let mut carrier = quality_hierarchy_sentinel();
-            core::mem::swap(&mut self.inner, &mut carrier);
-            carrier.add_child(parent, child);
-            core::mem::swap(&mut self.inner, &mut carrier);
-            return Ok(());
-        }
         if parent == child {
-            Err(QualityHierarchyError::SelfEdge)
-        } else if self.inner.has_edge(parent, child) {
-            Err(QualityHierarchyError::EdgeAlreadyExists)
-        } else if self.inner.parent_of(child) != self.inner.num_nodes {
-            Err(QualityHierarchyError::ChildAlreadyParented)
-        } else if self.inner.level_of(parent) <= self.inner.level_of(child) {
-            Err(QualityHierarchyError::LevelOrderViolation)
-        } else {
-            Err(QualityHierarchyError::CostOrderViolation)
+            return Err(QualityHierarchyError::SelfEdge);
         }
+        let child_parent = self.inner.parent_of(child);
+        if child_parent != self.inner.num_nodes {
+            return if child_parent == parent {
+                Err(QualityHierarchyError::EdgeAlreadyExists)
+            } else {
+                Err(QualityHierarchyError::ChildAlreadyParented)
+            };
+        }
+        if self.inner.level_of(parent) <= self.inner.level_of(child) {
+            return Err(QualityHierarchyError::LevelOrderViolation);
+        }
+        if self.inner.cost_of(parent) > self.inner.cost_of(child) {
+            return Err(QualityHierarchyError::CostOrderViolation);
+        }
+        proof {
+            assert forall|edge: int| #![trigger self.inner.edges@[edge]]
+                0 <= edge < self.inner.edges.len() implies self.inner.edges@[edge].1 != child by {
+                assert(self.inner.parent@[self.inner.edges@[edge].1 as int] == self.inner.edges@[edge].0);
+                assert(self.inner.edges@[edge].0 < self.inner.num_nodes);
+            }
+        }
+        let mut carrier = quality_hierarchy_sentinel();
+        core::mem::swap(&mut self.inner, &mut carrier);
+        carrier.add_child(parent, child);
+        core::mem::swap(&mut self.inner, &mut carrier);
+        Ok(())
     }
 }
 
@@ -1874,6 +2117,42 @@ pub enum ConvergenceError {
     DeltaOutOfRange,
 }
 
+struct CheckedConvergenceCarrier<H: GovernorHistory, const SMALL: bool> {
+    inner: ConvergenceGovernorCarrier<H>,
+}
+impl<H: GovernorHistory, const SMALL: bool> CheckedConvergenceCarrier<H, SMALL> {
+    #[verifier::type_invariant]
+    closed spec fn well_formed(&self) -> bool {
+        self.inner.inv() && (if SMALL { self.inner.window <= 96 } else { self.inner.window > 96 })
+    }
+    fn new(inner: ConvergenceGovernorCarrier<H>) -> (profile: Self)
+        requires inner.inv(), if SMALL { inner.window <= 96 } else { inner.window > 96 },
+        ensures profile.well_formed(),
+    { Self { inner } }
+    #[inline(always)]
+    fn update(&mut self, delta: u64, mut carrier: ConvergenceGovernorCarrier<H>)
+        -> (result: Result<u64, ConvergenceError>)
+        requires carrier.inv(),
+            if SMALL { carrier.window <= 96 } else { carrier.window > 96 },
+        ensures final(self).well_formed(),
+            result matches Err(_) ==> *final(self) == *old(self),
+    {
+        proof { use_type_invariant(&*self); }
+        if delta > self.inner.max_delta {
+            return Err(ConvergenceError::DeltaOutOfRange);
+        }
+        core::mem::swap(&mut self.inner, &mut carrier);
+        let average = carrier.update(delta);
+        core::mem::swap(&mut self.inner, &mut carrier);
+        Ok(average)
+    }
+}
+
+enum ConvergenceGovernorProfile {
+    Small(CheckedConvergenceCarrier<Vec<u64>, true>),
+    Buffered(CheckedConvergenceCarrier<BufferedGovernorHistory, false>),
+}
+
 /// A moving-window convergence state machine with peak-aware phases.
 ///
 /// # Examples
@@ -1887,13 +2166,15 @@ pub enum ConvergenceError {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct ConvergenceGovernor {
-    inner: ConvergenceGovernorCarrier,
+    inner: ConvergenceGovernorProfile,
 }
 
 impl ConvergenceGovernor {
-    #[verifier::type_invariant]
     closed spec fn well_formed(&self) -> bool {
-        self.inner.inv()
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.well_formed(),
+            ConvergenceGovernorProfile::Buffered(profile) => profile.well_formed(),
+        }
     }
 
     /// Validate arithmetic bounds and construct an active governor.
@@ -1927,62 +2208,91 @@ impl ConvergenceGovernor {
                     max_delta <= 1_000_000_000,
                     u64::MAX >= 1_000_000_000 * 1_000_000_000;
         }
-        let inner = ConvergenceGovernorCarrier::new(
-            threshold,
-            awaken_threshold,
-            window,
-            max_delta,
-        );
+        let inner = if window <= 96 {
+            ConvergenceGovernorProfile::Small(CheckedConvergenceCarrier::new(
+                ConvergenceGovernorCarrier::new(threshold, awaken_threshold, window, max_delta),
+            ))
+        } else {
+            ConvergenceGovernorProfile::Buffered(CheckedConvergenceCarrier::new(
+                ConvergenceGovernorCarrier::new_buffered(threshold, awaken_threshold, window, max_delta),
+            ))
+        };
+        assert(match &inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.well_formed(),
+            ConvergenceGovernorProfile::Buffered(profile) => profile.well_formed(),
+        });
         Ok(Self { inner })
     }
 
     /// Convergence threshold used by the state transition.
     pub fn threshold(&self) -> u64 {
-        self.inner.threshold
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.threshold,
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.threshold,
+        }
     }
 
     /// Activity threshold that awakens a converged governor.
     pub fn awaken_threshold(&self) -> u64 {
-        self.inner.awaken_threshold
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.awaken_threshold,
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.awaken_threshold,
+        }
     }
 
     /// Maximum retained history length.
     pub fn window(&self) -> usize {
-        self.inner.window
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.window,
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.window,
+        }
     }
 
     /// Maximum admitted delta.
     pub fn max_delta(&self) -> u64 {
-        self.inner.max_delta
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.max_delta,
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.max_delta,
+        }
     }
 
     /// Current convergence state.
     pub fn state(&self) -> ConvergenceState {
-        self.inner.state
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.state,
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.state,
+        }
     }
 
     /// Current peak-aware gradient phase.
     pub fn phase(&self) -> ConvergencePhase {
-        self.inner.gradient_phase
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.gradient_phase,
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.gradient_phase,
+        }
     }
 
     /// Whether a threshold event has ever been observed.
     pub fn peak_observed(&self) -> bool {
-        self.inner.peak_observed
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.peak_observed,
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.peak_observed,
+        }
     }
 
     /// Number of retained deltas.
     pub fn history_len(&self) -> usize {
-        self.inner.delta_history.len()
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.delta_history.len(),
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.delta_history.len(),
+        }
     }
 
     /// Read one retained delta from oldest to newest.
-    #[expect(clippy::indexing_slicing, reason = "the branch proves the history index is in bounds")]
     pub fn history(&self, index: usize) -> Option<u64> {
-        if index < self.inner.delta_history.len() {
-            Some(self.inner.delta_history[index])
-        } else {
-            None
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => GovernorHistory::value_at(&profile.inner.delta_history, index),
+            ConvergenceGovernorProfile::Buffered(profile) => GovernorHistory::value_at(&profile.inner.delta_history, index),
         }
     }
 
@@ -1991,16 +2301,12 @@ impl ConvergenceGovernor {
     /// # Errors
     ///
     /// Returns [`ConvergenceError::DeltaOutOfRange`] when `delta` exceeds the configured maximum.
+    #[inline(always)]
     pub fn update(&mut self, delta: u64) -> (result: Result<u64, ConvergenceError>) {
-        proof { use_type_invariant(&*self); }
-        if delta > self.inner.max_delta {
-            return Err(ConvergenceError::DeltaOutOfRange);
+        match &mut self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.update(delta, ConvergenceGovernorCarrier::new(0, 0, 1, 0)),
+            ConvergenceGovernorProfile::Buffered(profile) => profile.update(delta, convergence_sentinel()),
         }
-        let mut carrier = convergence_sentinel();
-        core::mem::swap(&mut self.inner, &mut carrier);
-        let average = carrier.update(delta);
-        core::mem::swap(&mut self.inner, &mut carrier);
-        Ok(average)
     }
 }
 
@@ -2010,10 +2316,10 @@ fn budget_sentinel() -> (carrier: BudgetCarrier)
     BudgetCarrier::new(0)
 }
 
-fn registry_sentinel() -> (carrier: RegistryCarrier<u64, u64>)
+fn registry_sentinel() -> (carrier: RegistryCarrier<u64, u64, IndexedStorage>)
     ensures carrier.unique_mapping(),
 {
-    RegistryCarrier::new()
+    RegistryCarrier::new_indexed()
 }
 
 fn audit_sentinel() -> (carrier: AuditSinkCarrier)
@@ -2030,11 +2336,11 @@ fn propagation_sentinel() -> (carrier: PropagationPassCarrier)
     PropagationPassCarrier::new(0, 0, 0, edges, values)
 }
 
-fn actuation_sentinel() -> (carrier: ActuationPassCarrier)
+fn actuation_sentinel() -> (carrier: ActuationPassCarrier<CountedAllocations>)
     ensures carrier.invariant(),
 {
     let allocation: Vec<Option<u64>> = Vec::new();
-    ActuationPassCarrier::new(allocation, 0)
+    ActuationPassCarrier::new_counted(allocation, 0)
 }
 
 fn quality_hierarchy_sentinel() -> (carrier: QualityHierarchyCarrier)
@@ -2083,10 +2389,10 @@ fn ranked_selection_sentinel() -> (carrier: CompetitiveSelectionRankedCarrier)
     CompetitiveSelectionRankedCarrier::new(scores, 0, 0)
 }
 
-fn convergence_sentinel() -> (carrier: ConvergenceGovernorCarrier)
-    ensures carrier.inv(),
+fn convergence_sentinel() -> (carrier: ConvergenceGovernorCarrier<BufferedGovernorHistory>)
+    ensures carrier.inv(), carrier.window == 97,
 {
-    ConvergenceGovernorCarrier::new(0, 0, 1, 0)
+    ConvergenceGovernorCarrier::new_buffered(0, 0, 97, 0)
 }
 
 #[expect(clippy::indexing_slicing, reason = "the loop proves the value index is in bounds")]
@@ -2184,7 +2490,7 @@ impl ResourceRegistry {
     }
 
     /// Borrow registered entries in deterministic storage order.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = &(u64, u64)> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&u64, &u64)> {
         self.inner.entries.iter()
     }
 }
@@ -2227,16 +2533,28 @@ impl PropagationPass {
     }
 }
 
+verus! {
 impl ActuationPass {
     /// Borrow current seat allocations.
-    pub fn allocations(&self) -> &[Option<u64>] {
+    pub fn allocations(&self) -> (values: &[Option<u64>])
+        ensures
+            values@ == self.state_spec().allocation@,
+            self.state_spec().invariant(),
+    {
+        proof { use_type_invariant(&*self); }
         self.inner.allocation.as_slice()
     }
 
     /// Borrow committed seat effects.
-    pub fn effects(&self) -> &[Option<u64>] {
+    pub fn effects(&self) -> (values: &[Option<u64>])
+        ensures
+            values@ == self.state_spec().effects@,
+            self.state_spec().invariant(),
+    {
+        proof { use_type_invariant(&*self); }
         self.inner.effects.as_slice()
     }
+}
 }
 
 impl QualityHierarchy {
@@ -2269,7 +2587,7 @@ impl QualityHierarchy {
 
     /// Whether an in-range parent-child edge is present.
     pub fn has_edge(&self, parent: usize, child: usize) -> Option<bool> {
-        (parent < self.len() && child < self.len()).then(|| self.inner.has_edge(parent, child))
+        (parent < self.len() && child < self.len()).then(|| self.parent(child) == Some(parent))
     }
 }
 
@@ -2350,7 +2668,10 @@ impl CompetitiveSelectionRanked {
 impl ConvergenceGovernor {
     /// Borrow retained deltas from oldest to newest.
     pub fn history_values(&self) -> &[u64] {
-        self.inner.delta_history.as_slice()
+        match &self.inner {
+            ConvergenceGovernorProfile::Small(profile) => profile.inner.delta_history.as_slice(),
+            ConvergenceGovernorProfile::Buffered(profile) => profile.inner.delta_history.as_slice(),
+        }
     }
 }
 

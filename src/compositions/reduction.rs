@@ -37,9 +37,23 @@ mod row_error_data {
                 reason: crate::primitives::audit_sink::RecordRefusal,
             },
         }
+        /// Refusal while preparing a row in a reusable workspace.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[non_exhaustive]
+        pub enum ReductionWorkspaceError {
+            /// The workspace's logical capacity differs from the row width.
+            CapacityMismatch {
+                /// Required fixed schema width.
+                expected: usize,
+                /// The unchanged workspace's admitted capacity.
+                actual: usize,
+            },
+            /// The existing width or first column refusal.
+            Row(ReductionRowError),
+        }
     }
 }
-pub use row_error_data::ReductionRowError;
+pub use row_error_data::{ReductionRowError, ReductionWorkspaceError};
 
 verus! {
 
@@ -121,7 +135,7 @@ pub struct PreparedOwnedReduction<'a, V, O: OwnedReductionOperation<V>> {
 }
 
 impl<V, O: OwnedReductionOperation<V>> VersionedReduction<V, O> {
-    /// Exact Registry/AuditSink coupling, without another prefix counter.
+    /// Registry and AuditSink state consistency.
     pub closed spec fn inv(&self) -> bool {
         &&& self.versions.unique_identities()
         &&& self.reduction.inv()
@@ -192,7 +206,7 @@ impl<V, O: OwnedReductionOperation<V>> VersionedReduction<V, O> {
         if versions.try_reserve_entries(1).is_err() {
             return Err((OwnedReductionError::StorageUnavailable, initial, operator));
         }
-        versions.register_key(0usize, OwnedVersion { value: initial, input: None });
+        versions.register_absent_key(0usize, OwnedVersion { value: initial, input: None });
         Ok(Self { versions, reduction: IncrementalReduction::new(limit, VersionSequence), operator })
     }
 
@@ -209,14 +223,8 @@ impl<V, O: OwnedReductionOperation<V>> VersionedReduction<V, O> {
     {
         proof { reveal(VersionedReduction::inv); }
         if version > self.reduction.processed_len() { return None; }
-        proof {
-            crate::primitives::resource_registry::identity_entry_at(self.versions.entries@, version as int);
-        }
-        match self.versions.lookup_key_ref(&version) {
-            Some(record) => {
-                proof { self.versions.unique_identity_value(version, *record, self.versions.entries@[version as int].1); }
-                Some(&record.value)
-            },
+        match self.versions.entries.value_at(version) {
+            Some(record) => Some(&record.value),
             None => { assert(false); None },
         }
     }
@@ -315,7 +323,7 @@ impl<'a, V, O: OwnedReductionOperation<V>> PreparedOwnedReduction<'a, V, O> {
                 }
             }
         }
-        owner.versions.register_key(version, OwnedVersion { value: self.value, input: Some(self.input) });
+        owner.versions.register_absent_key(version, OwnedVersion { value: self.value, input: Some(self.input) });
         owner.reduction.audit.commit_record(version, version);
         proof {
             assert forall|i: int| 0 <= i < owner.versions.entries@.len()
@@ -339,7 +347,9 @@ impl<'a, V, O: OwnedReductionOperation<V>> PreparedOwnedReduction<'a, V, O> {
 
     /// Return the original input without either owner action.
     pub fn cancel(self) -> (input: V)
-        requires self.inv(), ensures self.after_spec() == self.before_spec(), input == self.input_spec(),
+        requires self.inv(),
+        ensures self.after_spec().inv(),
+            self.after_spec() == self.before_spec(), input == self.input_spec(),
     { self.input }
 }
 
@@ -537,9 +547,9 @@ impl<O: crate::primitives::audit_sink::TypedChainOperation> IncrementalReduction
     pub closed spec fn inv(&self) -> bool { self.audit.chain_valid() }
     /// Domain operation bound to this reduction.
     pub closed spec fn operator_spec(&self) -> O { self.audit.operator }
-    /// Admitted prefix length, without a caller-owned cursor.
+    /// Admitted prefix length.
     pub closed spec fn processed_spec(&self) -> nat { self.audit.history_spec().len() }
-    /// Current result, without a second accumulator.
+    /// Current result.
     pub closed spec fn result_spec(&self) -> O::Carry { self.audit.last_hash }
     /// Fixed lifetime admission ceiling.
     pub closed spec fn limit_spec(&self) -> usize { self.audit.max_log_len }
@@ -688,6 +698,7 @@ pub struct ReductionColumns<O: crate::primitives::audit_sink::TypedChainOperatio
     columns: ResourceRegistry<usize, IncrementalReduction<O>>,
 }
 
+
 /// An exclusively borrowed, fully prepared row of Copy item/carry data.
 /// Commit performs only the existing Record actions, without allocation or callbacks.
 /// Cancelling or dropping this preparation leaves every column unchanged.
@@ -710,9 +721,75 @@ pub struct ReductionColumns<O: crate::primitives::audit_sink::TypedChainOperatio
 /// row.commit();
 /// # Ok::<(), automation_structures::ReductionRowError>(())
 /// ```
-pub struct PreparedReductionRow<'a, O: crate::primitives::audit_sink::TypedChainOperation> {
+pub struct PreparedReductionRow<
+    'a,
+    O: crate::primitives::audit_sink::TypedChainOperation,
+    S: crate::connectives::buffer::BufferLayout<(O::Item, O::Carry)> = crate::connectives::buffer::ContiguousStorage,
+> {
     reduction: &'a mut ReductionColumns<O>,
-    pending: Buffer<(O::Item, O::Carry)>,
+    pending: Buffer<(O::Item, O::Carry), S>,
+}
+
+/// A prepared row exclusively borrowing its columns and reusable canonical Buffer.
+///
+/// Commit consumes the token and preserves the prepared workspace. Cancel or implicit
+/// drop preserves both owners at token creation. The next preparation drains that
+/// staging through Buffer actions and computes fresh admission and carries.
+///
+/// The raw reusable Buffer profile uses the existing `proof-api` feature.
+///
+/// Neither owner can be changed while the token is live:
+/// ```compile_fail
+/// use automation_structures::connectives::buffer::Buffer;
+/// use automation_structures::{CheckedSignedAdd, FifoStorage, ReductionColumns};
+/// let mut columns = ReductionColumns::try_new(&vec![CheckedSignedAdd; 2], 2)?;
+/// let mut workspace = Buffer::<(i64, i64), FifoStorage>::try_with_storage(2)?;
+/// let row = columns.prepare_row_in(&vec![7, -4], &mut workspace)?;
+/// let _intervening = columns.prepare_row(&vec![1, 1]);
+/// row.commit();
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+/// Workspace mutation cannot intervene either:
+/// ```compile_fail
+/// use automation_structures::connectives::buffer::Buffer;
+/// use automation_structures::{CheckedSignedAdd, FifoStorage, ReductionColumns};
+/// let mut columns = ReductionColumns::try_new(&vec![CheckedSignedAdd; 2], 2)?;
+/// let mut workspace = Buffer::<(i64, i64), FifoStorage>::try_with_storage(2)?;
+/// let row = columns.prepare_row_in(&vec![7, -4], &mut workspace)?;
+/// let _intervening = workspace.pop();
+/// row.commit();
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+/// The consuming token cannot publish twice:
+/// ```compile_fail
+/// use automation_structures::connectives::buffer::Buffer;
+/// use automation_structures::{CheckedSignedAdd, FifoStorage, ReductionColumns};
+/// let mut columns = ReductionColumns::try_new(&vec![CheckedSignedAdd; 2], 2)?;
+/// let mut workspace = Buffer::<(i64, i64), FifoStorage>::try_with_storage(2)?;
+/// let row = columns.prepare_row_in(&vec![7, -4], &mut workspace)?;
+/// row.commit();
+/// row.commit();
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+/// Only canonical preparation can construct the private token:
+/// ```compile_fail
+/// use automation_structures::connectives::buffer::Buffer;
+/// use automation_structures::{
+///     CheckedSignedAdd, FifoStorage, PreparedReductionRowIn, ReductionColumns,
+/// };
+/// let mut columns = ReductionColumns::try_new(&vec![CheckedSignedAdd; 2], 2)?;
+/// let mut workspace = Buffer::<(i64, i64), FifoStorage>::try_with_storage(2)?;
+/// let row = PreparedReductionRowIn { reduction: &mut columns, pending: &mut workspace };
+/// row.commit();
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct PreparedReductionRowIn<
+    'a,
+    O: crate::primitives::audit_sink::TypedChainOperation,
+    S: crate::connectives::buffer::BufferLayout<(O::Item, O::Carry)> = crate::connectives::buffer::FifoStorage,
+> {
+    reduction: &'a mut ReductionColumns<O>,
+    pending: &'a mut Buffer<(O::Item, O::Carry), S>,
 }
 
 /// Prepared data satisfies every retained column's existing capacity and domain guard.
@@ -779,7 +856,7 @@ impl<O: crate::primitives::audit_sink::TypedChainOperation> ReductionColumns<O> 
                     }
                 }
             }
-            columns.register(position, record);
+            columns.register_absent_key(position, record);
             proof {
                 crate::primitives::resource_registry::identity_entries_are_exact(columns.entries@);
                 assert forall|i: int| 0 <= i < position + 1 implies
@@ -845,8 +922,6 @@ impl<O: crate::primitives::audit_sink::TypedChainOperation> ReductionColumns<O> 
     ///
     /// # Errors
     /// Returns the exact width, storage or first column refusal; all owners remain unchanged.
-    #[expect(clippy::indexing_slicing, reason = "the width guard and schema Cursor prove every item position is in bounds")]
-    #[expect(clippy::arithmetic_side_effects, reason = "the schema Cursor advances only while strictly below the admitted row width")]
     pub fn prepare_row<'a>(&'a mut self, items: &Vec<O::Item>)
         -> (result: Result<PreparedReductionRow<'a, O>, ReductionRowError>)
         requires old(self).inv(),
@@ -877,17 +952,228 @@ impl<O: crate::primitives::audit_sink::TypedChainOperation> ReductionColumns<O> 
             },
         },
     {
+        self.prepare_row_with_storage::<crate::connectives::buffer::ContiguousStorage>(items)
+    }
+    /// Prepare a row with one sealed canonical Buffer storage profile.
+    /// Inline extents tune physical storage; arbitrary row widths remain admitted.
+    ///
+    /// # Errors
+    /// Returns the same width, storage or first column refusal; all owners remain unchanged.
+    #[inline(always)]
+    pub fn prepare_row_with_storage<'a, S: crate::connectives::buffer::BufferLayout<(O::Item, O::Carry)>>(
+        &'a mut self, items: &Vec<O::Item>,
+    ) -> (result: Result<PreparedReductionRow<'a, O, S>, ReductionRowError>)
+        requires old(self).inv(),
+        ensures match result {
+            Ok(prepared) => prepared.inv() && prepared.before_spec() == *old(self)
+                && prepared.items_spec() == items@ && *final(self) == prepared.after_spec()
+                && (forall|i: int| 0 <= i < old(self).columns_spec().len() ==>
+                    (#[trigger] old(self).columns_spec()[i]).1.processed_spec() < old(self).columns_spec()[i].1.limit_spec()
+                    && old(self).columns_spec()[i].1.operator_spec().accepts(
+                        old(self).columns_spec()[i].1.result_spec(), items@[i])),
+            Err(error) => *final(self) == *old(self) && match error {
+                ReductionRowError::WidthMismatch => items@.len() != old(self).columns_spec().len(),
+                ReductionRowError::StorageUnavailable => items@.len() == old(self).columns_spec().len(),
+                ReductionRowError::Column { column, reason } =>
+                    items@.len() == old(self).columns_spec().len() && column < items@.len()
+                    && (forall|i: int| 0 <= i < column ==>
+                        (#[trigger] old(self).columns_spec()[i]).1.processed_spec() < old(self).columns_spec()[i].1.limit_spec()
+                        && old(self).columns_spec()[i].1.operator_spec().accepts(
+                            old(self).columns_spec()[i].1.result_spec(), items@[i]))
+                    && match reason {
+                        crate::primitives::audit_sink::RecordRefusal::Capacity =>
+                            old(self).columns_spec()[column as int].1.processed_spec() >= old(self).columns_spec()[column as int].1.limit_spec(),
+                        crate::primitives::audit_sink::RecordRefusal::Domain =>
+                            old(self).columns_spec()[column as int].1.processed_spec() < old(self).columns_spec()[column as int].1.limit_spec()
+                            && !old(self).columns_spec()[column as int].1.operator_spec().accepts(
+                                old(self).columns_spec()[column as int].1.result_spec(), items@[column as int]),
+                    },
+            },
+        },
+    {
         if items.len() != self.columns.entries.len() { return Err(ReductionRowError::WidthMismatch); }
-        let ghost columns = self.columns_spec();
-        let mut pending: Buffer<(O::Item, O::Carry)> = match Buffer::try_new(items.len()) {
+        let mut pending: Buffer<(O::Item, O::Carry), S> =
+            match Buffer::try_with_storage(items.len()) {
             Ok(buffer) => buffer,
             Err(_) => return Err(ReductionRowError::StorageUnavailable),
         };
+        self.prepare_row_values::<S>(items, &mut pending)?;
+        let prepared = PreparedReductionRow { reduction: self, pending };
+        proof {
+            reveal(PreparedReductionRow::inv);
+            assert(prepared.reduction.inv());
+            assert(prepared.pending.well_formed());
+            assert(prepared.pending.values@.len() == prepared.reduction.columns_spec().len());
+            assert(prepared_columns(prepared.reduction.columns_spec(), prepared.pending.values@));
+            assert(prepared.inv());
+        }
+        Ok(prepared)
+    }
+
+    /// Prepare a row while exclusively borrowing a reusable workspace.
+    ///
+    /// Item width and workspace logical capacity are checked before any drain or
+    /// domain callback. Valid attempts discard old staging through Buffer::pop,
+    /// then use the same column preparation as the owned-token API. A column
+    /// refusal retains its exact newly prepared prefix in the workspace.
+    ///
+    /// Pre-reserved FifoStorage is the reusable heap profile: its reset is
+    /// O(previous retained length), bounded by the row width. Other sealed layouts
+    /// retain their existing physical costs; logical capacity alone is not an
+    /// allocation guarantee. The whole ReductionColumns owner is unchanged until
+    /// consuming commit; cancel and implicit drop retain the full prepared data.
+    /// Reusable workspaces use `connectives::buffer::Buffer`, exposed through the
+    /// existing `proof-api` feature.
+    ///
+    /// # Errors
+    /// Returns Row(WidthMismatch) first, CapacityMismatch second, or the exact
+    /// first column refusal. No workspace reservation occurs in this operation.
+    #[inline(always)]
+    pub fn prepare_row_in<'a, S: crate::connectives::buffer::BufferLayout<(O::Item, O::Carry)>>(
+        &'a mut self, items: &Vec<O::Item>, pending: &'a mut Buffer<(O::Item, O::Carry), S>,
+    ) -> (result: Result<PreparedReductionRowIn<'a, O, S>, ReductionWorkspaceError>)
+        requires old(self).inv(), old(pending).well_formed(),
+        ensures match result {
+            Ok(prepared) => prepared.inv() && prepared.before_spec() == *old(self)
+                && prepared.items_spec() == items@
+                && prepared.workspace_before_spec().well_formed()
+                && items@.len() == old(self).columns_spec().len()
+                && prepared.workspace_before_spec().capacity == old(pending).capacity
+                && *final(self) == prepared.after_spec()
+                && *final(pending) == prepared.workspace_after_spec()
+                && (has_resolved(prepared) ==>
+                    prepared.after_spec() == prepared.before_spec()
+                    && prepared.workspace_after_spec() == prepared.workspace_before_spec())
+                && (forall|i: int| 0 <= i < old(self).columns_spec().len() ==>
+                    (#[trigger] old(self).columns_spec()[i]).1.processed_spec() < old(self).columns_spec()[i].1.limit_spec()
+                    && old(self).columns_spec()[i].1.operator_spec().accepts(
+                        old(self).columns_spec()[i].1.result_spec(), items@[i])),
+            Err(error) => *final(self) == *old(self)
+                && final(pending).well_formed()
+                && final(pending).capacity == old(pending).capacity
+                && match error {
+                    ReductionWorkspaceError::CapacityMismatch { expected, actual } =>
+                        items@.len() == old(self).columns_spec().len()
+                        && expected == items@.len() && actual == old(pending).capacity
+                        && actual != expected && *final(pending) == *old(pending),
+                    ReductionWorkspaceError::Row(row) => match row {
+                        ReductionRowError::WidthMismatch =>
+                            items@.len() != old(self).columns_spec().len()
+                            && *final(pending) == *old(pending),
+                        ReductionRowError::StorageUnavailable => false,
+                        ReductionRowError::Column { column, reason } =>
+                            items@.len() == old(self).columns_spec().len()
+                            && old(pending).capacity == items@.len() && column < items@.len()
+                            && final(pending).values@.len() == column
+                            && (forall|i: int| 0 <= i < column ==>
+                                (#[trigger] final(pending).values@[i]).0 == items@[i]
+                                && final(pending).values@[i].1 == old(self).columns_spec()[i].1.operator_spec().combined(
+                                    old(self).columns_spec()[i].1.result_spec(), items@[i]))
+                            && (forall|i: int| 0 <= i < column ==>
+                                (#[trigger] old(self).columns_spec()[i]).1.processed_spec() < old(self).columns_spec()[i].1.limit_spec()
+                                && old(self).columns_spec()[i].1.operator_spec().accepts(
+                                    old(self).columns_spec()[i].1.result_spec(), items@[i]))
+                            && match reason {
+                                crate::primitives::audit_sink::RecordRefusal::Capacity =>
+                                    old(self).columns_spec()[column as int].1.processed_spec() >= old(self).columns_spec()[column as int].1.limit_spec(),
+                                crate::primitives::audit_sink::RecordRefusal::Domain =>
+                                    old(self).columns_spec()[column as int].1.processed_spec() < old(self).columns_spec()[column as int].1.limit_spec()
+                                    && !old(self).columns_spec()[column as int].1.operator_spec().accepts(
+                                        old(self).columns_spec()[column as int].1.result_spec(), items@[column as int]),
+                            },
+                    },
+                },
+        },
+    {
+        let width = self.columns.entries.len();
+        if items.len() != width {
+            return Err(ReductionWorkspaceError::Row(ReductionRowError::WidthMismatch));
+        }
+        let actual = pending.capacity();
+        if actual != width {
+            return Err(ReductionWorkspaceError::CapacityMismatch { expected: width, actual });
+        }
+        while pending.len() > 0
+            invariant *self == *old(self), self.inv(),
+                items@.len() == self.columns_spec().len(),
+                pending.well_formed(), pending.capacity == old(pending).capacity,
+                pending.capacity == items@.len(),
+            decreases pending.values@.len(),
+        {
+            let _discarded = pending.pop();
+        }
+        match self.prepare_row_values::<S>(items, pending) {
+            Ok(()) => {},
+            Err(error) => return Err(ReductionWorkspaceError::Row(error)),
+        }
+        let prepared = PreparedReductionRowIn { reduction: self, pending };
+        proof {
+            reveal(PreparedReductionRowIn::inv);
+            assert(prepared.reduction.inv());
+            assert(prepared.pending.well_formed());
+            assert(prepared_columns(prepared.reduction.columns_spec(), prepared.pending.values@));
+            assert(prepared.inv());
+            assert(has_resolved(prepared) ==> has_resolved(prepared.reduction));
+            assert(has_resolved(prepared) ==> has_resolved(prepared.pending));
+            assert(has_resolved(prepared) ==> prepared.after_spec() == prepared.before_spec());
+            assert(has_resolved(prepared) ==> prepared.workspace_after_spec() == prepared.workspace_before_spec());
+        }
+        Ok(prepared)
+    }
+
+    #[expect(clippy::indexing_slicing, reason = "the width guard and schema Cursor prove every item position is in bounds")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the schema Cursor advances only while strictly below the admitted row width")]
+    #[inline(always)]
+    fn prepare_row_values<S: crate::connectives::buffer::BufferLayout<(O::Item, O::Carry)>>(
+        &mut self, items: &Vec<O::Item>, pending: &mut Buffer<(O::Item, O::Carry), S>,
+    ) -> (result: Result<(), ReductionRowError>)
+        requires old(self).inv(),
+            items@.len() == old(self).columns_spec().len(),
+            old(pending).well_formed(),
+            old(pending).capacity == items@.len(),
+            old(pending).values@.len() == 0,
+        ensures *final(self) == *old(self),
+            final(pending).well_formed(),
+            final(pending).capacity == old(pending).capacity,
+            match result {
+                Ok(()) => prepared_columns(old(self).columns_spec(), final(pending).values@)
+                    && final(pending).values@.map(|_i: int, pair: (O::Item, O::Carry)| pair.0) == items@
+                    && (forall|i: int| 0 <= i < old(self).columns_spec().len() ==>
+                        (#[trigger] old(self).columns_spec()[i]).1.processed_spec() < old(self).columns_spec()[i].1.limit_spec()
+                        && old(self).columns_spec()[i].1.operator_spec().accepts(
+                            old(self).columns_spec()[i].1.result_spec(), items@[i])),
+                Err(error) => match error {
+                    ReductionRowError::WidthMismatch => false,
+                    ReductionRowError::StorageUnavailable => false,
+                    ReductionRowError::Column { column, reason } =>
+                        items@.len() == old(self).columns_spec().len() && column < items@.len()
+                        && final(pending).values@.len() == column
+                        && (forall|i: int| 0 <= i < column ==>
+                            (#[trigger] final(pending).values@[i]).0 == items@[i]
+                            && final(pending).values@[i].1 == old(self).columns_spec()[i].1.operator_spec().combined(
+                                old(self).columns_spec()[i].1.result_spec(), items@[i]))
+                        && (forall|i: int| 0 <= i < column ==>
+                            (#[trigger] old(self).columns_spec()[i]).1.processed_spec() < old(self).columns_spec()[i].1.limit_spec()
+                            && old(self).columns_spec()[i].1.operator_spec().accepts(
+                                old(self).columns_spec()[i].1.result_spec(), items@[i]))
+                        && match reason {
+                            crate::primitives::audit_sink::RecordRefusal::Capacity =>
+                                old(self).columns_spec()[column as int].1.processed_spec() >= old(self).columns_spec()[column as int].1.limit_spec(),
+                            crate::primitives::audit_sink::RecordRefusal::Domain =>
+                                old(self).columns_spec()[column as int].1.processed_spec() < old(self).columns_spec()[column as int].1.limit_spec()
+                                && !old(self).columns_spec()[column as int].1.operator_spec().accepts(
+                                    old(self).columns_spec()[column as int].1.result_spec(), items@[column as int]),
+                        },
+                },
+            },
+    {
+        let ghost columns = self.columns_spec();
         let mut cursor = Cursor::new(0);
         while cursor.position < items.len()
             invariant self.inv(), *self == *old(self), self.columns_spec() == columns,
                 items.len() == columns.len(), cursor.position <= items.len(),
                 pending.well_formed(), pending.capacity == items.len(), pending.values@.len() == cursor.position,
+                pending.capacity == old(pending).capacity,
                 forall|i: int| #![trigger pending.values@[i]] #![trigger columns[i]]
                     0 <= i < cursor.position ==> pending.values@[i].0 == items@[i]
                     && columns[i].1.processed_spec() < columns[i].1.limit_spec()
@@ -961,20 +1247,15 @@ impl<O: crate::primitives::audit_sink::TypedChainOperation> ReductionColumns<O> 
                 }
             }
         }
-        let prepared = PreparedReductionRow { reduction: self, pending };
-        proof {
-            reveal(PreparedReductionRow::inv);
-            assert(prepared.reduction.inv());
-            assert(prepared.pending.well_formed());
-            assert(prepared.pending.values@.len() == prepared.reduction.columns_spec().len());
-            assert(prepared_columns(prepared.reduction.columns_spec(), prepared.pending.values@));
-            assert(prepared.inv());
-        }
-        Ok(prepared)
+        Ok(())
     }
 }
 
-impl<'a, O: crate::primitives::audit_sink::TypedChainOperation> PreparedReductionRow<'a, O> {
+impl<
+    'a,
+    O: crate::primitives::audit_sink::TypedChainOperation,
+    S: crate::connectives::buffer::BufferLayout<(O::Item, O::Carry)>,
+> PreparedReductionRow<'a, O, S> {
     /// Every retained column's exact Record guard and result was admitted without mutation.
     pub closed spec fn inv(&self) -> bool {
         &&& self.reduction.inv() && self.pending.well_formed()
@@ -994,8 +1275,7 @@ impl<'a, O: crate::primitives::audit_sink::TypedChainOperation> PreparedReductio
         requires self.inv(), ensures self.after_spec() == self.before_spec(),
     {}
     /// Publish the complete prepared row once. No allocation or domain callback runs here.
-    #[expect(clippy::indexing_slicing, reason = "the prepared-row invariant equates pending length and column count; the schema Cursor bounds each paired read")]
-    #[expect(clippy::arithmetic_side_effects, reason = "the schema Cursor advances only while strictly below the retained column count")]
+    #[inline(always)]
     pub fn commit(self)
         requires self.inv(),
         ensures self.after_spec().inv(),
@@ -1010,25 +1290,97 @@ impl<'a, O: crate::primitives::audit_sink::TypedChainOperation> PreparedReductio
                     self.before_spec().columns_spec()[i].1.result_spec(), self.items_spec()[i]),
     {
         reveal(PreparedReductionRow::inv);
+        ReductionColumns::commit_values(self.reduction, &self.pending);
+    }
+}
+
+impl<
+    'a,
+    O: crate::primitives::audit_sink::TypedChainOperation,
+    S: crate::connectives::buffer::BufferLayout<(O::Item, O::Carry)>,
+> PreparedReductionRowIn<'a, O, S> {
+    /// The exact admitted row against the unchanged exclusively borrowed columns.
+    pub closed spec fn inv(&self) -> bool {
+        &&& self.reduction.inv() && self.pending.well_formed()
+        &&& prepared_columns(self.reduction.columns_spec(), self.pending.values@)
+    }
+    /// The complete column owner at token creation.
+    pub closed spec fn before_spec(&self) -> ReductionColumns<O> { *self.reduction }
+    /// The complete column owner after resolving this token's borrow.
+    #[verifier::prophetic]
+    pub closed spec fn after_spec(&self) -> ReductionColumns<O> { *final(self.reduction) }
+    /// The complete prepared workspace at token creation, after the preparation drain.
+    pub closed spec fn workspace_before_spec(&self) -> Buffer<(O::Item, O::Carry), S> { *self.pending }
+    /// The complete workspace after resolving this token's borrow.
+    #[verifier::prophetic]
+    pub closed spec fn workspace_after_spec(&self) -> Buffer<(O::Item, O::Carry), S> { *final(self.pending) }
+    /// The admitted Copy inputs in fixed schema order.
+    pub closed spec fn items_spec(&self) -> Seq<O::Item> {
+        self.pending.values@.map(|_i: int, pair: (O::Item, O::Carry)| pair.0)
+    }
+    /// End both exclusive borrows without a Record or workspace mutation.
+    pub fn cancel(self)
+        requires self.inv(),
+        ensures self.after_spec() == self.before_spec(),
+            self.workspace_after_spec() == self.workspace_before_spec(),
+    {}
+    /// Publish every admitted column once through the existing Record protocol.
+    #[inline(always)]
+    pub fn commit(self)
+        requires self.inv(),
+        ensures self.workspace_after_spec() == self.workspace_before_spec(),
+            self.after_spec().inv(),
+            self.after_spec().columns_spec().len() == self.before_spec().columns_spec().len(),
+            forall|i: int| #![trigger self.after_spec().columns_spec()[i]] #![trigger self.before_spec().columns_spec()[i]]
+                0 <= i < self.before_spec().columns_spec().len() ==>
+                self.after_spec().columns_spec()[i].0 == self.before_spec().columns_spec()[i].0
+                && self.after_spec().columns_spec()[i].1.operator_spec() == self.before_spec().columns_spec()[i].1.operator_spec()
+                && self.after_spec().columns_spec()[i].1.limit_spec() == self.before_spec().columns_spec()[i].1.limit_spec()
+                && self.after_spec().columns_spec()[i].1.processed_spec() == self.before_spec().columns_spec()[i].1.processed_spec() + 1
+                && self.after_spec().columns_spec()[i].1.result_spec() == self.before_spec().columns_spec()[i].1.operator_spec().combined(
+                    self.before_spec().columns_spec()[i].1.result_spec(), self.items_spec()[i]),
+    {
+        reveal(PreparedReductionRowIn::inv);
+        ReductionColumns::commit_values(self.reduction, &*self.pending);
+    }
+}
+
+impl<RowOp: crate::primitives::audit_sink::TypedChainOperation> ReductionColumns<RowOp> {
+    #[expect(clippy::arithmetic_side_effects, reason = "the schema Cursor advances only while strictly below the retained column count")]
+    #[inline(always)]
+    fn commit_values<S: crate::connectives::buffer::BufferLayout<(RowOp::Item, RowOp::Carry)>>(
+        reduction: &mut Self, pending: &Buffer<(RowOp::Item, RowOp::Carry), S>,
+    )
+        requires old(reduction).inv(), pending.well_formed(),
+            prepared_columns(old(reduction).columns_spec(), pending.values@),
+        ensures final(reduction).inv(),
+            final(reduction).columns_spec().len() == old(reduction).columns_spec().len(),
+            forall|i: int| #![trigger final(reduction).columns_spec()[i]] #![trigger old(reduction).columns_spec()[i]]
+                0 <= i < old(reduction).columns_spec().len() ==>
+                final(reduction).columns_spec()[i].0 == old(reduction).columns_spec()[i].0
+                && final(reduction).columns_spec()[i].1.operator_spec() == old(reduction).columns_spec()[i].1.operator_spec()
+                && final(reduction).columns_spec()[i].1.limit_spec() == old(reduction).columns_spec()[i].1.limit_spec()
+                && final(reduction).columns_spec()[i].1.processed_spec() == old(reduction).columns_spec()[i].1.processed_spec() + 1
+                && final(reduction).columns_spec()[i].1.result_spec() == old(reduction).columns_spec()[i].1.operator_spec().combined(
+                    old(reduction).columns_spec()[i].1.result_spec(), pending.values@[i].0),
+    {
         reveal(ReductionColumns::inv);
-        assert(self.reduction.inv());
-        assert(self.pending.well_formed());
-        let ghost before = self.reduction.columns_spec();
-        let ghost data = self.pending.values@;
-        assert(self.pending.values@.len() == before.len());
+        assert(reduction.inv());
+        assert(pending.well_formed());
+        let ghost before = reduction.columns_spec();
+        let ghost data = pending.values@;
+        assert(pending.values@.len() == before.len());
         assert forall|i: int| 0 <= i < before.len() implies before[i].1.inv()
             && before[i].1.processed_spec() < before[i].1.limit_spec()
             && before[i].1.operator_spec().accepts(before[i].1.result_spec(), data[i].0)
             && data[i].1 == before[i].1.operator_spec().combined(before[i].1.result_spec(), data[i].0) by {
-            assert(self.reduction.columns_spec()[i].1.inv());
-            assert(self.reduction.columns_spec()[i].1.processed_spec() < self.reduction.columns_spec()[i].1.limit_spec());
-            assert(self.reduction.columns_spec()[i].1.operator_spec().accepts(
-                self.reduction.columns_spec()[i].1.result_spec(), self.pending.values@[i].0));
-            assert(self.pending.values@[i].1 == self.reduction.columns_spec()[i].1.operator_spec().combined(
-                self.reduction.columns_spec()[i].1.result_spec(), self.pending.values@[i].0));
+            assert(reduction.columns_spec()[i].1.inv());
+            assert(reduction.columns_spec()[i].1.processed_spec() < reduction.columns_spec()[i].1.limit_spec());
+            assert(reduction.columns_spec()[i].1.operator_spec().accepts(
+                reduction.columns_spec()[i].1.result_spec(), pending.values@[i].0));
+            assert(pending.values@[i].1 == reduction.columns_spec()[i].1.operator_spec().combined(
+                reduction.columns_spec()[i].1.result_spec(), pending.values@[i].0));
         }
-        let reduction = self.reduction;
-        let pending = self.pending;
         let mut cursor = Cursor::new(0);
         while cursor.position < reduction.columns.entries.len()
             invariant cursor.position <= before.len(), reduction.columns.unique_identities(),
@@ -1053,7 +1405,10 @@ impl<'a, O: crate::primitives::audit_sink::TypedChainOperation> PreparedReductio
         {
             let position = cursor.position;
             let ghost prior = reduction.columns_spec();
-            let (item, carry) = pending.values[position];
+            let (item, carry) = match crate::connectives::buffer::BufferStorage::value_at(&pending.values, position) {
+                Some(pair) => *pair,
+                None => { proof { assert(false); } return; },
+            };
             assert(item == data[position as int].0 && carry == data[position as int].1);
             {
                 let column = match reduction.columns.value_mut_at(position) {
@@ -1061,16 +1416,25 @@ impl<'a, O: crate::primitives::audit_sink::TypedChainOperation> PreparedReductio
                     None => { proof { assert(false); } return; },
                 };
                 assert(*column == before[position as int].1);
-                let prepared = PreparedReductionRecord { reduction: column, item, carry };
                 proof {
-                    reveal(PreparedReductionRecord::inv);
-                    assert(prepared.reduction.inv());
-                    assert(prepared.reduction.processed_spec() < prepared.reduction.limit_spec());
-                    assert(prepared.reduction.operator_spec().accepts(prepared.reduction.result_spec(), prepared.item));
-                    assert(prepared.carry == prepared.reduction.operator_spec().combined(prepared.reduction.result_spec(), prepared.item));
-                    assert(prepared.inv());
+                    reveal(IncrementalReduction::inv);
+                    reveal(IncrementalReduction::operator_spec);
+                    reveal(IncrementalReduction::processed_spec);
+                    reveal(IncrementalReduction::result_spec);
+                    reveal(IncrementalReduction::limit_spec);
+                    assert(column.audit.chain_valid());
+                    assert(column.audit.history_spec().len() < column.audit.max_log_len);
+                    assert(column.audit.operator.accepts(column.audit.last_hash, item));
+                    assert(carry == column.audit.operator.combined(column.audit.last_hash, item));
                 }
-                let _observation = prepared.commit();
+                column.audit.commit_record(item, carry);
+                proof {
+                    assert(column.inv());
+                    assert(column.operator_spec() == before[position as int].1.operator_spec());
+                    assert(column.limit_spec() == before[position as int].1.limit_spec());
+                    assert(column.processed_spec() == before[position as int].1.processed_spec() + 1);
+                    assert(column.result_spec() == carry);
+                }
             }
             proof {
                 assert(reduction.columns_spec()[position as int].1.inv());
@@ -1407,3 +1771,17 @@ impl core::fmt::Display for ReductionRowError {
     }
 }
 impl std::error::Error for ReductionRowError {}
+impl core::fmt::Display for ReductionWorkspaceError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CapacityMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "Reduction workspace capacity {actual} differs from row width {expected}"
+                )
+            }
+            Self::Row(error) => core::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+impl std::error::Error for ReductionWorkspaceError {}

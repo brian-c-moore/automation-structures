@@ -394,7 +394,22 @@ impl<T: Copy, D: TraversalDomain<T>> BacktrackingTraversal<T, D> {
                 ==> #[trigger] final(self).visited@[i]@ == old(self).visited@[i]@,
             final(self).inv(),
     {
+        proof {
+            assert(old(self).recorded_leaf_validity());
+            assert(old(self).type_invariant());
+            assert(old(self).pairing());
+            assert(old(self).state_restoration());
+            assert(copy@.len() == self.max_depth);
+            assert forall|j: int| 0 <= j < self.max_depth as int
+                implies 1 <= #[trigger] copy@[j] <= self.branch_factor.branches() by {
+                assert(copy@[j] == old(self).path@[j]);
+                assert(1 <= old(self).path@[j] <= old(self).branch_factor.branches());
+            }
+        }
         self.visited.push(copy);
+        assert(self.type_invariant());
+        assert(self.pairing());
+        assert(self.state_restoration());
         assert(self.recorded_leaf_validity()) by {
             assert forall|e: int| 0 <= e < self.visited.len() implies {
                 &&& #[trigger] self.visited@[e].len() == self.max_depth

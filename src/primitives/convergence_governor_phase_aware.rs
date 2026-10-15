@@ -25,6 +25,8 @@
 // only the new delta, so ordinary Rust and verified callers share one
 // transition boundary.
 
+use crate::connectives::buffer::{Buffer, BufferStorage, MirroredU64Storage};
+use crate::primitives::budget::Budget;
 use vstd::prelude::*;
 
 verus! {
@@ -56,8 +58,148 @@ pub enum Phase {
     Declining,
 }
 
+mod governor_history_seal { pub trait Sealed {} }
+
+/// Sealed history binding beneath the one phase-aware Governor transition.
+pub trait GovernorHistory: governor_history_seal::Sealed + View<V = Seq<u64>> {
+    /// Representation coupling to the unchanged Governor configuration.
+    spec fn coupled(&self, window: usize, max_delta: u64) -> bool;
+    /// Number of retained deltas.
+    fn len(&self) -> (length: usize) ensures length == self@.len();
+    /// Whether the same retained history has no deltas.
+    fn is_empty(&self) -> (empty: bool)
+        ensures empty == (self@.len() == 0),
+    { self.len() == 0 }
+    /// Borrow the exact chronological retained history.
+    fn as_slice(&self) -> (values: &[u64]) ensures values@ == self@;
+    /// Read one chronological position, preserving the ordinary optional accessor.
+    fn value_at(&self, index: usize) -> (value: Option<u64>)
+        ensures value == if index < self@.len() { Some(self@[index as int]) } else { None };
+    /// Commit the exact slide and return its floor average.
+    fn step(&mut self, delta: u64, window: usize, max_delta: u64) -> (average: u64)
+        requires old(self).coupled(window, max_delta), old(self)@.len() <= window,
+            window >= 1, window as int * max_delta as int <= u64::MAX,
+            delta <= max_delta,
+            forall|i: int| 0 <= i < old(self)@.len() ==> #[trigger] old(self)@[i] <= max_delta,
+        ensures final(self).coupled(window, max_delta),
+            final(self)@ == if old(self)@.len() >= window {
+                old(self)@.drop_first().push(delta)
+            } else { old(self)@.push(delta) },
+            average as int == ConvergenceGovernorPhaseAware::sum_seq(final(self)@)
+                / final(self)@.len() as int;
+}
+impl governor_history_seal::Sealed for Vec<u64> {}
+impl GovernorHistory for Vec<u64> {
+    open spec fn coupled(&self, _window: usize, _max_delta: u64) -> bool { true }
+    fn len(&self) -> (length: usize) { self.len() }
+    fn as_slice(&self) -> (values: &[u64]) { self.as_slice() }
+    #[expect(clippy::indexing_slicing, reason = "the chronological index guard bounds the original Vec read")]
+    fn value_at(&self, index: usize) -> (value: Option<u64>) {
+        if index < self.len() { Some(self[index]) } else { None }
+    }
+    fn step(&mut self, delta: u64, window: usize, max_delta: u64) -> (average: u64) {
+        let ghost before = self@;
+        if self.len() >= window { self.remove(0); }
+        self.push(delta);
+        assert(self@ == if before.len() >= window { before.drop_first().push(delta) }
+            else { before.push(delta) });
+        assert(self@.len() as int * max_delta as int <= u64::MAX) by (nonlinear_arith)
+            requires self@.len() <= window, window as int * max_delta as int <= u64::MAX,
+                max_delta >= 0;
+        ConvergenceGovernorPhaseAware::history_average(self, max_delta)
+    }
+}
+
+/// Checked history: Buffer owns order and storage; Budget owns the exact retained sum.
+pub struct BufferedGovernorHistory {
+    history: Buffer<u64, MirroredU64Storage>,
+    sum: Budget,
+}
+impl View for BufferedGovernorHistory {
+    type V = Seq<u64>;
+    closed spec fn view(&self) -> Seq<u64> { self.history.values@ }
+}
+impl BufferedGovernorHistory {
+    #[expect(clippy::arithmetic_side_effects, reason = "the unchanged Governor product bound makes the Budget ceiling representable")]
+    fn new(window: usize, max_delta: u64) -> (history: Self)
+        requires window >= 1, window as int * max_delta as int <= u64::MAX,
+        ensures history@ == Seq::<u64>::empty(), history.coupled(window, max_delta),
+    {
+        let capacity = window as u64 * max_delta;
+        Self { history: Buffer::with_storage(window), sum: Budget::new(capacity) }
+    }
+}
+impl governor_history_seal::Sealed for BufferedGovernorHistory {}
+impl GovernorHistory for BufferedGovernorHistory {
+    closed spec fn coupled(&self, window: usize, max_delta: u64) -> bool {
+        &&& self.history.well_formed() && self.history.capacity == window
+        &&& self.sum.safety_invariant()
+        &&& self.sum.capacity as int == window as int * max_delta as int
+        &&& self.sum.reserved == 0 && self.sum.pending_eviction == 0
+        &&& self.sum.allocated as int == ConvergenceGovernorPhaseAware::sum_seq(self.history.values@)
+    }
+    fn len(&self) -> (length: usize) { self.history.len() }
+    fn as_slice(&self) -> (values: &[u64]) { self.history.as_slice() }
+    fn value_at(&self, index: usize) -> (value: Option<u64>) {
+        assert(self@ == self.history.values@);
+        match self.history.values.value_at(index) {
+            Some(value) => {
+                assert(index < self@.len());
+                assert(*value == self@[index as int]);
+                Some(*value)
+            }
+            None => {
+                assert(index >= self@.len());
+                None
+            }
+        }
+    }
+    #[expect(clippy::integer_division, reason = "the committed nonempty history defines its exact floor average")]
+    #[expect(clippy::arithmetic_side_effects, reason = "the committed nonempty history proves the division denominator is positive")]
+    fn step(&mut self, delta: u64, window: usize, _max_delta: u64) -> (average: u64) {
+        let ghost before = self@;
+        proof { self.history.expose_capacity_bound(); }
+        if self.history.len() >= window {
+            proof { ConvergenceGovernorPhaseAware::lemma_sum_drop(before); }
+            let removed = match self.history.pop() {
+                Some(value) => value,
+                None => { assert(false); 0 },
+            };
+            assert(removed == before[0]);
+            proof {
+                ConvergenceGovernorPhaseAware::lemma_sum_bound(self@, _max_delta);
+                assert(0 <= ConvergenceGovernorPhaseAware::sum_seq(self@));
+                assert(removed <= self.sum.allocated);
+            }
+            self.sum.release(removed);
+            assert(self.sum.allocated as int == ConvergenceGovernorPhaseAware::sum_seq(self@));
+        }
+        proof {
+            ConvergenceGovernorPhaseAware::lemma_sum_bound(self@, _max_delta);
+            assert(self@.len() < window);
+            assert(self.sum.used() + delta as int <= self.sum.capacity as int) by (nonlinear_arith)
+                requires self.sum.used() == ConvergenceGovernorPhaseAware::sum_seq(self@),
+                    ConvergenceGovernorPhaseAware::sum_seq(self@) <= self@.len() * _max_delta as int,
+                    self@.len() < window, delta <= _max_delta,
+                    self.sum.capacity as int == window as int * _max_delta as int;
+            ConvergenceGovernorPhaseAware::lemma_sum_push(self@, delta);
+        }
+        let _published = self.history.push(delta);
+        assert(_published is Ok);
+        let _charged = self.sum.try_allocate(delta);
+        assert(_charged);
+        assert(self@ == if before.len() >= window { before.drop_first().push(delta) }
+            else { before.push(delta) });
+        assert(self.coupled(window, _max_delta));
+        let total = self.sum.used_exec();
+        let denominator = self.history.len() as u64;
+        assert(denominator > 0);
+        total / denominator
+    }
+}
+
 /// A phase-aware convergence governor.
-pub struct ConvergenceGovernorPhaseAware {
+pub struct ConvergenceGovernorPhaseAware<H: GovernorHistory = Vec<u64>> {
     /// Delta threshold used for convergence classification.
     pub threshold: u64,
     /// Window-sum threshold that reawakens a converged governor.
@@ -71,7 +213,7 @@ pub struct ConvergenceGovernorPhaseAware {
     /// Current gradient-trajectory phase.
     pub gradient_phase: Phase,
     /// Retained recent deltas from oldest to newest.
-    pub delta_history: Vec<u64>,
+    pub delta_history: H,
     /// Whether any threshold-reaching delta has been observed.
     pub peak_observed: bool,
 }
@@ -149,16 +291,20 @@ impl ConvergenceGovernorPhaseAware {
         }
     }
 
+}
+
+impl<H: GovernorHistory> ConvergenceGovernorPhaseAware<H> {
     // ── Specifications ──────────────────────────────────────────────────
 
     /// TLA+ `TypeInvariant`'s window clause (+ the overflow / nonempty-window
     /// bounds; the enum and bool clauses are carried by the types).
     pub open spec fn type_invariant(&self) -> bool {
-        self.delta_history.len() <= self.window
+        self.delta_history@.len() <= self.window
             && self.threshold <= u64::MAX / 2
             && self.window >= 1
             && self.window as int * self.max_delta as int <= u64::MAX as int
-            && forall|i: int| 0 <= i < self.delta_history.len() ==>
+            && self.delta_history.coupled(self.window, self.max_delta)
+            && forall|i: int| 0 <= i < self.delta_history@.len() ==>
                 #[trigger] self.delta_history@[i] <= self.max_delta
     }
 
@@ -189,6 +335,47 @@ impl ConvergenceGovernorPhaseAware {
         self.type_invariant() && self.peak_implies() && self.no_cooling_from_cold()
     }
 
+}
+
+impl ConvergenceGovernorPhaseAware {
+    /// The oldest retained delta contributes exactly once to the mathematical sum.
+    proof fn lemma_sum_drop(s: Seq<u64>)
+        requires s.len() > 0,
+        ensures Self::sum_seq(s) == s[0] as int + Self::sum_seq(s.drop_first()),
+        decreases s.len(),
+    {
+        let prefix = s.take(s.len() - 1);
+        let tail = s.drop_first();
+        reveal_with_fuel(ConvergenceGovernorPhaseAware::sum_seq, 2);
+        if s.len() == 1 {
+            assert(prefix =~= Seq::<u64>::empty());
+            assert(tail =~= Seq::<u64>::empty());
+            assert(s[s.len() - 1] == s[0]);
+        } else {
+            assert(prefix.len() == s.len() - 1);
+            assert(prefix[0] == s[0]);
+            Self::lemma_sum_drop(prefix);
+            assert(tail.len() == s.len() - 1);
+            assert(prefix.drop_first() =~= tail.take(tail.len() - 1));
+            assert(tail[tail.len() - 1] == s[s.len() - 1]);
+            assert(Self::sum_seq(s) == Self::sum_seq(prefix) + s[s.len() - 1] as int);
+            assert(Self::sum_seq(tail) == Self::sum_seq(tail.take(tail.len() - 1))
+                + tail[tail.len() - 1] as int);
+        }
+    }
+    proof fn lemma_sum_bound(s: Seq<u64>, maximum: u64)
+        requires forall|i: int| 0 <= i < s.len() ==> #[trigger] s[i] <= maximum,
+        ensures 0 <= Self::sum_seq(s) <= s.len() * maximum as int,
+        decreases s.len(),
+    {
+        if s.len() > 0 {
+            Self::lemma_sum_bound(s.take(s.len() - 1), maximum);
+            assert(Self::sum_seq(s.take(s.len() - 1)) + s[s.len() - 1] as int
+                <= s.len() * maximum as int) by (nonlinear_arith)
+                requires Self::sum_seq(s.take(s.len() - 1)) <= (s.len() - 1) * maximum as int,
+                    s[s.len() - 1] <= maximum;
+        }
+    }
     /// TLA+ `SumSeq`: the sum of a delta window.
     pub open spec fn sum_seq(s: Seq<u64>) -> int
         decreases s.len(),
@@ -207,6 +394,9 @@ impl ConvergenceGovernorPhaseAware {
         assert(s.push(delta).take(s.len() as int) =~= s);
     }
 
+}
+
+impl<H: GovernorHistory> ConvergenceGovernorPhaseAware<H> {
     /// TLA+ `Update`'s `new_history`: drop the oldest when the window is full,
     /// then append the new delta. A function of the PRE-state and `delta` only.
     pub open spec fn slide_window(&self, delta: u64) -> Seq<u64> {
@@ -220,9 +410,12 @@ impl ConvergenceGovernorPhaseAware {
     /// TLA+ `Update`'s `avg`. The slid window is never empty (`type_invariant`
     /// carries `window >= 1`), so the division is well defined.
     pub open spec fn window_avg(&self, delta: u64) -> int {
-        Self::sum_seq(self.slide_window(delta)) / self.slide_window(delta).len() as int
+        ConvergenceGovernorPhaseAware::sum_seq(self.slide_window(delta)) / self.slide_window(delta).len() as int
     }
 
+}
+
+impl ConvergenceGovernorPhaseAware {
     // ── Init (TLA+ Init) ────────────────────────────────────────────────
 
     /// Start ACTIVE / COLD / no peak. Realises the TLA+ `Init`.
@@ -291,6 +484,23 @@ impl ConvergenceGovernorPhaseAware {
         }
     }
 
+    /// Construct the same empty Init with canonical FIFO and sum owners.
+    pub(crate) fn new_buffered(threshold: u64, awaken_threshold: u64, window: usize, max_delta: u64)
+        -> (g: ConvergenceGovernorPhaseAware<BufferedGovernorHistory>)
+        requires threshold <= u64::MAX / 2, window >= 1,
+            window as int * max_delta as int <= u64::MAX,
+        ensures g.threshold == threshold, g.awaken_threshold == awaken_threshold,
+            g.window == window, g.max_delta == max_delta,
+            g.state == GovState::Active, g.gradient_phase == Phase::Cold,
+            g.delta_history@ == Seq::<u64>::empty(), !g.peak_observed, g.inv(),
+    {
+        let delta_history = BufferedGovernorHistory::new(window, max_delta);
+        ConvergenceGovernorPhaseAware { threshold, awaken_threshold, window, max_delta,
+            state: GovState::Active, gradient_phase: Phase::Cold, delta_history, peak_observed: false }
+    }
+}
+
+impl<H: GovernorHistory> ConvergenceGovernorPhaseAware<H> {
     // ── Update (TLA+ Update) ────────────────────────────────────────────
 
     /// One governor step: classify the phase, update the peak latch, slide the
@@ -307,9 +517,9 @@ impl ConvergenceGovernorPhaseAware {
             final(self).window == old(self).window,
             final(self).max_delta == old(self).max_delta,
             final(self).gradient_phase
-                == Self::classify_phase_spec(delta, old(self).peak_observed, old(self).threshold),
+                == ConvergenceGovernorPhaseAware::classify_phase_spec(delta, old(self).peak_observed, old(self).threshold),
             final(self).peak_observed == (old(self).peak_observed || delta >= old(self).threshold),
-            final(self).state == Self::next_state_spec(
+            final(self).state == ConvergenceGovernorPhaseAware::next_state_spec(
                 old(self).state, avg,
                 old(self).peak_observed || delta >= old(self).threshold,
                 old(self).threshold, old(self).awaken_threshold),
@@ -326,25 +536,11 @@ impl ConvergenceGovernorPhaseAware {
     {
         let old_peak = self.peak_observed;
         let old_state = self.state;
-        let new_phase = Self::classify_phase(delta, old_peak, self.threshold);
+        let new_phase = ConvergenceGovernorPhaseAware::classify_phase(delta, old_peak, self.threshold);
         let new_peak = old_peak || (delta >= self.threshold);
-        let ghost pre_hist = self.delta_history@;
-        if self.delta_history.len() >= self.window {
-            self.delta_history.remove(0);
-            assert(self.delta_history@ =~= pre_hist.drop_first());
-        }
-        self.delta_history.push(delta);
+        let avg = self.delta_history.step(delta, self.window, self.max_delta);
         assert(self.delta_history@ =~= old(self).slide_window(delta));
-        proof {
-            assert(self.delta_history.len() <= self.window);
-            assert(self.delta_history.len() as int * self.max_delta as int
-                <= self.window as int * self.max_delta as int) by (nonlinear_arith)
-                requires
-                    self.delta_history.len() <= self.window,
-                    self.max_delta >= 0;
-        }
-        let avg = Self::history_average(&self.delta_history, self.max_delta);
-        let new_state = Self::next_state(
+        let new_state = ConvergenceGovernorPhaseAware::next_state(
             old_state,
             avg,
             new_peak,
@@ -357,6 +553,9 @@ impl ConvergenceGovernorPhaseAware {
         avg
     }
 
+}
+
+impl ConvergenceGovernorPhaseAware {
     #[expect(clippy::indexing_slicing, reason = "the history loop guards each index against the immutable retained window length")]
     #[expect(clippy::arithmetic_side_effects, reason = "the history-length times max-delta precondition bounds every partial sum, and the loop bounds each cursor successor")]
     #[expect(clippy::integer_division, reason = "the nonempty-window precondition supplies a positive denominator and the contract specifies the floor integer average")]

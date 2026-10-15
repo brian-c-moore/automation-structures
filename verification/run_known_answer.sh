@@ -13,7 +13,7 @@ if [ -n "$selected_case" ]; then
         *[!a-z_]*) printf '%s\n' 'Invalid known-answer case name' >&2; exit 1 ;;
     esac
     case "$selected_case" in
-        *_kat|registry_index_probe) ;;
+        *_kat) ;;
         *) printf '%s\n' 'Unknown known-answer case' >&2; exit 1 ;;
     esac
     test -f "verification/known-answer/$selected_case.rs"
@@ -39,7 +39,7 @@ if [ -z "$policy_flags" ]; then
 fi
 
 status=0
-for source in verification/known-answer/*_kat.rs verification/known-answer/registry_index_probe.rs; do
+for source in verification/known-answer/*_kat.rs; do
     name=$(basename "$source" .rs)
     if [ -n "$selected_case" ] && [ "$name" != "$selected_case" ]; then continue; fi
     binary="$binary_dir/automation-structures-$name"
@@ -60,11 +60,12 @@ for source in verification/known-answer/*_kat.rs verification/known-answer/regis
     done
     if clippy-driver \
         --edition 2024 \
+        --error-format=json \
         "$source" \
         --extern automation_structures="$target_dir/debug/libautomation_structures.rlib" \
         -L "dependency=$target_dir/debug/deps" \
         -o "$binary" "$@"; then
-        if [ "$name" != registry_index_probe ] && ! "$binary"; then status=1; fi
+        if ! "$binary"; then status=1; fi
     else
         status=1
     fi

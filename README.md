@@ -17,8 +17,6 @@ contracts of the parts and the required agreement between them.
 
 [Automation Structures Research](https://github.com/brian-c-moore/automation-structures-research)
 explains why these abstractions were selected and records their contracts and formal evidence.
-`alk-core` is being built as an automation kernel composed from this library. It uses the same
-parts for its execution machinery and the components developers assemble into flows.
 
 Your application runs external work. It supplies inputs and calls the transition methods; the
 execution types track state without starting threads, while the tables below specify each type's
@@ -90,7 +88,6 @@ assert!(pass.is_complete());
 | Maintain ordered parent-child quality and cost constraints | `QualityHierarchy` | Single parent plus level and cost ordering |
 | Traverse choices with exact undo | `BacktrackingTraversal` | Descent records the inverse used by ascent; recorded visits are valid full-depth leaves, but need not cover every leaf |
 | Select one winner, exclusive winners, weighted shares, or a ranked subset | `CompetitiveSelectionHard`, `CompetitiveSelectionHardExclusive`, `CompetitiveSelectionSoft`, `CompetitiveSelectionRanked` | Each type enforces its documented allocation and tie rules |
-| Retain every equal minimum in a finite immutable domain | `CompetitiveSelectionMinimum<C>` | Uses the domain's total preorder and canonical arrangement; retains all ties in authored order, without a winner quota; reservation refusal returns the original comparator |
 | Track convergence and resume after changes | `ConvergenceGovernor` | Uses a bounded delta history and explicit phases; window length and maximum delta are each limited to one billion |
 
 ### Small state helpers
@@ -114,6 +111,7 @@ research catalog.
 
 | Need | Type | Behavior and limits |
 | --- | --- | --- |
+| Retain every equal minimum in a finite immutable domain | `compositions::minimum_selection::MinimumSelection<C>` (also `CompetitiveSelectionMinimum<C>`) | OrderingPass retains the full arrangement; Hard selects one winner; Cursor and Buffer retain every tie in authored order. Read-only owner observations remain available; constructor work is O(n log n) comparisons plus O(n), and storage refusal returns the original context |
 | Admit nodes while charging their costs | `AllocationSnapshot` | `ResourceRegistry + Budget`; consuming seal and capture return immutable membership and cost observations |
 | Admit owned payloads with optional resource dimensions | `TypedAllocation<K,V,P>` | Unique Registry plus scoped Budgets; budgeted dimension zero charges one membership unit and other charges use domain units, including zero cost; `unbudgeted` has no quota and requires empty charges; entry or whole-batch preparation checks every guard before allocation-free commit; refusal returns all original input and seal fixes membership/costs |
 | Delegate master capacity to sub-pools | `FederatedBudget` | One master `Budget` plus one `Budget` per pool |
@@ -145,7 +143,8 @@ research catalog.
 | Share one original typed value between two FIFO branches | `TypedFanout<T>` | The existing fanout owns both branches; Registry retains one payload and reference Counter; the declared encoded-byte charge remains until both governed branches consume it; borrowed observations and scoped tokens refuse stale consumption; domain aliases and total physical memory require their own binding |
 
 The runnable [catalog example](https://github.com/brian-c-moore/automation-structures/blob/main/examples/catalog.rs)
-constructs and exercises every checked root type:
+constructs and exercises selected checked primitives, compositions, connective forms,
+and execution modalities:
 
 ```text
 cargo run --example catalog
@@ -187,8 +186,7 @@ accounting. Reading available capacity does not reserve it; use an admission met
 charging work to it.
 
 Match error enums non-exhaustively. Each public error enum implements `Debug`, `Display`,
-`std::error::Error`, equality, and copy semantics, with the non-exhaustive restriction so that a
-later release can add an error variant without breaking downstream matches.
+`std::error::Error`, equality, and copy semantics.
 
 ## Features
 
@@ -197,16 +195,46 @@ later release can add an error variant without breaking downstream matches.
 | default | Checked runtime types and relations at the crate root |
 | `proof-api` | Verus carriers, specifications, and proof relations under `primitives`, `connectives`, `compositions`, `modalities`, and `integration` |
 
-Verified downstream crates can enable the proof API directly:
+Enable the proof API:
 
 ```toml
 [dependencies]
-automation-structures = { version = "0.3.1", features = ["proof-api"] }
+automation-structures = { version = "0.4.0", features = ["proof-api"] }
 ```
 
 Use crate-root types in application code. Enabling `proof-api` keeps the checked API available
 and exposes lower-level proof types whose preconditions are checked by Verus but may not be
 enforced at runtime by an ordinary Rust build. docs.rs builds all features.
+
+## Benchmarks
+
+Run the Criterion benchmarks from the crate directory, one target at a time:
+
+```text
+cargo bench --locked --all-features --bench primitives
+cargo bench --locked --all-features --bench compositions
+cargo bench --locked --all-features --bench execution
+```
+
+Use a Criterion filter to run a focused group, for example
+`cargo bench --locked --all-features --bench compositions -- signal`.
+Each case uses ten samples, one second of warmup and two seconds of measurement;
+Criterion may extend measurement when an iteration takes longer.
+Results are written to the Cargo target directory under `criterion/`.
+
+`primitives` covers admission, lookup, selection, actuation, propagation,
+convergence, audit and backtracking costs. `compositions` covers typed allocation
+(linear/indexed storage, charge dimensions, batch admission and refusal), typed
+sum/count reductions, positional and token Signal operations, adjacency, traversal,
+ordering and bounded compositions. `execution` covers complete sequential,
+fork/join, DAG and streaming traces, asymmetric fanout, Buffer layouts and
+Accumulator movement.
+
+Fixture creation is excluded with Criterion batching when measuring one action
+at a fixed retained-state size. Construction and destruction remain timed in
+complete lifecycle workloads. Fresh fixtures prevent growing histories or exhausted
+identities from changing the measured workload. Timed actions include outcome
+assertions and result handling.
 
 ## Verification and limits
 
