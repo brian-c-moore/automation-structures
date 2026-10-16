@@ -189,6 +189,18 @@ impl<T: Copy> Accumulator<T> {
         self.pending.len()
     }
 
+    /// Total number of values across both segments when representable by `usize`.
+    pub(crate) fn checked_total_len(&self) -> Option<usize> {
+        self.accumulated_len().checked_add(self.pending_len())
+    }
+
+    /// Whether both the accumulated prefix and pending suffix are empty.
+    pub(crate) fn total_is_empty(&self) -> (empty: bool)
+        ensures empty == (self.accumulated@.len() == 0 && self.pending@.len() == 0),
+    {
+        self.accumulated_len() == 0 && self.pending_len() == 0
+    }
+
     /// Whether no values remain pending.
     pub fn is_complete(&self) -> (complete: bool)
         ensures complete == (self.pending@.len() == 0),

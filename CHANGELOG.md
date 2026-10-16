@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Extend TypedAllocation with indexed storage, incremental batch preparation, borrowed queries, restricted mutable access and ordered consuming transfer.
+- Add positional SummarySignal operations and TypedBranchFanout with independent branch limits.
+- Support usize/u64 Cursor and FIFO positions; reduce repeated Registry and fanout searches while preserving custody and refusal behavior.
+- Use indexed storage for checked ResourceRegistry lookup: average O(1), worst-case O(n). Ordered removal and replacement remain O(n).
+- Change ResourceRegistry::iter items from &(u64, u64) to (&u64, &u64) to borrow indexed entries without copying. Use map(|(&key, &value)| (key, value)) when owned pairs are needed.
+- Export additional Budget, Signal and stream contracts for downstream proofs; extend native and external-consumer checks.
+- Ship documented Cargo benchmarks for primitives, compositions and execution.
+
 ## 0.3.1
 
 - Install Clippy and rustfmt in the known-answer and package CI jobs so standalone fixtures and packaged consumers can run their required lint and formatting checks.

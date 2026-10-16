@@ -92,14 +92,15 @@ pub use composition_api::{
     SignalBuildError, SignalError, TraversalBuildError, TraversalEngine, TraversalError,
 };
 pub use compositions::allocation_snapshot::{
-    AllocationDomain, PreparedTypedAdmission, PreparedTypedBatch, RefusedTypedAdmission,
-    RefusedTypedBatch, SealedTypedAllocation, TypedAllocation, TypedAllocationError,
-    UnrestrictedAllocation,
+    AllocationDomain, PreparedTypedAdmission, PreparedTypedBatch, PreparedTypedBatchBuilder,
+    RefusedTypedAdmission, RefusedTypedBatch, SealedTypedAllocation, TypedAllocation,
+    TypedAllocationError, UnrestrictedAllocation,
 };
 pub use compositions::reduction::{
     IncrementalReduction, MaximumU64, OwnedReductionError, OwnedReductionOperation,
-    PreparedOwnedReduction, PreparedReductionRecord, PreparedReductionRow, ReductionColumns,
-    ReductionProjection, ReductionRowError, VersionedReduction,
+    PreparedOwnedReduction, PreparedReductionRecord, PreparedReductionRow, PreparedReductionRowIn,
+    ReductionColumns, ReductionProjection, ReductionRowError, ReductionWorkspaceError,
+    VersionedReduction,
 };
 pub use compositions::relationship_graph::{
     AdjacencyBuildError, AllEdges, EdgeDirection, EdgeHandleDomain, MaterializationResult,
@@ -115,7 +116,10 @@ pub use compositions::traversal_engine::{
 pub use connective_api::{
     Accumulator, Buffer, Counter, Marker, projection_consistent, strictly_before,
 };
-pub use connectives::buffer::{BufferSizeError, BufferSizeProjection};
+pub use connectives::buffer::{
+    BufferLayout, BufferSizeError, BufferSizeProjection, ContiguousStorage, FifoStorage,
+};
+pub use connectives::cursor::CursorPosition;
 pub use connectives::ordering_pass::{
     ArrangementError, IndexArrangement, PositionOrder, SignedRowOrder,
 };
@@ -125,10 +129,32 @@ pub use execution_api::{
 };
 pub use modalities::stream_graph::{
     ReceivedStreamValue, TypedPublishRefusal, TypedStream, TypedStreamError,
+    TypedStreamPublicationPolicy,
 };
 pub use modalities::stream_graph_fanout::{
-    FanoutBranch, FanoutObservation, FanoutObservationToken, TypedFanout, TypedFanoutError,
+    FanoutBranch, FanoutObservation, FanoutObservationToken, TypedBranchFanout,
+    TypedBranchFanoutBuildError, TypedBranchFanoutError, TypedBranchPublishRefusal, TypedFanout,
+    TypedFanoutError,
 };
+
+impl_public_error!(TypedBranchFanoutBuildError, {
+    TypedBranchFanoutBuildError::DuplicateScope => "Fanout branch scopes must be distinct",
+    TypedBranchFanoutBuildError::LeftZeroCapacity => "Left fanout branch capacity must be positive",
+    TypedBranchFanoutBuildError::RightZeroCapacity => "Right fanout branch capacity must be positive",
+    TypedBranchFanoutBuildError::LeftStorageUnavailable => "Left fanout backing reservation failed",
+    TypedBranchFanoutBuildError::RightStorageUnavailable => "Right fanout backing reservation failed",
+});
+
+impl core::fmt::Display for TypedBranchFanoutError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InputLimitReached => formatter.write_str("Fanout source input limit reached"),
+            Self::Left(error) => write!(formatter, "Left fanout branch: {error}"),
+            Self::Right(error) => write!(formatter, "Right fanout branch: {error}"),
+        }
+    }
+}
+impl std::error::Error for TypedBranchFanoutError {}
 
 impl_public_error!(TypedFanoutError, {
     TypedFanoutError::ZeroCapacity => "Fanout branch capacity must be positive",
@@ -147,7 +173,8 @@ pub use primitives::audit_sink::{
 };
 pub use primitives::competitive_selection::CompetitiveSelectionMinimum;
 pub use primitives::resource_registry::{
-    ByteKey, KeyIdentity, RegistryInsertError, RegistryKey, RegistryPredicate, RegistryQuery,
+    ByteKey, IndexedStorage, KeyIdentity, LinearStorage, RegistryInsertError, RegistryKey,
+    RegistryPredicate, RegistryQuery,
 };
 pub use value_eq::ValueEq;
 
@@ -155,6 +182,7 @@ impl_public_error!(TypedStreamError, {
     TypedStreamError::StorageUnavailable => "Stream backing reservation failed",
     TypedStreamError::SlotCapacity => "Stream retained-slot Budget is exhausted",
     TypedStreamError::ByteCapacity => "Stream retained encoded-byte Budget is exhausted",
+    TypedStreamError::ItemTooLarge => "Stream item exceeds the total encoded-byte ceiling",
     TypedStreamError::SequenceExhausted => "Stream FIFO identity is exhausted",
     TypedStreamError::Closed => "Stream producer is closed",
     TypedStreamError::Empty => "Open stream has no available value",

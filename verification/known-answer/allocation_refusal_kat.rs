@@ -1,5 +1,4 @@
-// Standalone test harness: unsafe is confined to forwarding System's allocator contract.
-// No allocator hook, unsafe block or fault switch is part of the library implementation.
+// Allocation-refusal known-answer checks.
 use automation_structures::{CheckedSignedAdd, ReductionColumns, ReductionRowError};
 use automation_structures::{
     compositions::federated_budget::FederatedBudget,
@@ -90,6 +89,7 @@ impl automation_structures::OwnedReductionOperation<OwnedCount> for AddOwnedCoun
     }
 }
 
+#[track_caller]
 fn fail_at<R>(index: isize, operation: impl FnOnce() -> R) -> R {
     TRIPPED.store(false, Ordering::SeqCst);
     FAIL_AFTER.store(index, Ordering::SeqCst);
@@ -308,61 +308,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     no_allocations(|| prepared.commit());
     assert_eq!(allocation.len(), 2);
     // AdditiveChain is zero-sized: the operator Vec allocates no backing memory.
-    // The five actual sites are column owners, pending identities, two prepared
-    // rows, and final member storage.
-    for site in 0..5 {
-        let mut allocation = automation_structures::TypedAllocation::try_new(
-            &vec![2, 8],
+    // Inline rows leave three sites: column owners, pending identities and members.
+    // Wider rows retain two prepared-row reservations, making five actual sites.
+    for (capacities, first_charges, second_charges, sites) in [
+        (vec![2, 8], vec![1, 2], vec![1, 6], 3),
+        (
+            vec![2, 8, 10, 12, 14],
+            vec![1, 2, 3, 4, 5],
+            vec![1, 6, 7, 8, 9],
+            5,
+        ),
+    ] {
+        for site in 0..sites {
+            let mut allocation = automation_structures::TypedAllocation::try_new(
+                &capacities,
+                automation_structures::UnrestrictedAllocation,
+            )?;
+            let items = vec![
+                (7u64, (vec![3u8], first_charges.clone())),
+                (8, (vec![1u8], second_charges.clone())),
+            ];
+            let address = items.as_ptr();
+            let buffers = items
+                .iter()
+                .map(|(_, (payload, charges))| (payload.as_ptr(), charges.as_ptr()))
+                .collect::<Vec<_>>();
+            let refused = fail_at(site, || allocation.prepare_batch(items))
+                .err()
+                .ok_or("batch allocation failure admitted")?;
+            assert_eq!(
+                refused.reason,
+                Some(automation_structures::TypedAllocationError::StorageUnavailable)
+            );
+            assert_eq!(refused.items.as_ptr(), address);
+            assert_eq!(refused.items.len(), buffers.len());
+            for ((_, (payload, charges)), (payload_address, charges_address)) in
+                refused.items.iter().zip(buffers)
+            {
+                assert_eq!(payload.as_ptr(), payload_address);
+                assert_eq!(charges.as_ptr(), charges_address);
+            }
+            assert_eq!(allocation.len(), 0);
+            assert_eq!(allocation.dimension_count(), capacities.len());
+            for (dimension, capacity) in capacities.iter().copied().enumerate() {
+                assert_eq!(allocation.budget(dimension), Some((capacity, 0)));
+            }
+        }
+        let mut batch_allocation = automation_structures::TypedAllocation::try_new(
+            &capacities,
             automation_structures::UnrestrictedAllocation,
         )?;
-        let items = vec![
-            (7u64, (vec![3u8], vec![1, 2])),
-            (8, (vec![1u8], vec![1, 6])),
-        ];
-        let address = items.as_ptr();
-        let first = items
-            .first()
-            .ok_or("missing first batch item")?
-            .1
-            .0
-            .as_ptr();
-        let refused = fail_at(site, || allocation.prepare_batch(items))
-            .err()
-            .ok_or("batch allocation failure admitted")?;
-        assert_eq!(
-            refused.reason,
-            Some(automation_structures::TypedAllocationError::StorageUnavailable)
-        );
-        assert_eq!(refused.items.as_ptr(), address);
-        assert_eq!(
-            refused
-                .items
-                .first()
-                .ok_or("missing returned first item")?
-                .1
-                .0
-                .as_ptr(),
-            first
-        );
-        assert_eq!(allocation.len(), 0);
-        assert_eq!(allocation.budget(1), Some((8, 0)));
+        let prepared = batch_allocation.prepare_batch(vec![
+            (7u64, (vec![3u8], first_charges)),
+            (8, (vec![1u8], second_charges)),
+        ])?;
+        no_allocations(|| prepared.commit());
+        assert_eq!(batch_allocation.len(), 2);
+        for (dimension, capacity) in capacities.iter().copied().enumerate() {
+            assert_eq!(
+                batch_allocation.budget(dimension),
+                Some((capacity, capacity))
+            );
+        }
+        let empty = Vec::<(u64, (Vec<u8>, Vec<u64>))>::new();
+        no_allocations(|| -> Result<(), Box<dyn std::error::Error>> {
+            batch_allocation.prepare_batch(empty)?.commit();
+            Ok(())
+        })?;
     }
-    let mut batch_allocation = automation_structures::TypedAllocation::try_new(
-        &vec![2, 8],
-        automation_structures::UnrestrictedAllocation,
-    )?;
-    let prepared = batch_allocation.prepare_batch(vec![
-        (7u64, (vec![3u8], vec![1, 2])),
-        (8, (vec![1u8], vec![1, 6])),
-    ])?;
-    no_allocations(|| prepared.commit());
-    assert_eq!(batch_allocation.len(), 2);
-    assert_eq!(batch_allocation.budget(1), Some((8, 8)));
-    let empty = Vec::<(u64, (Vec<u8>, Vec<u64>))>::new();
-    no_allocations(|| -> Result<(), Box<dyn std::error::Error>> {
-        batch_allocation.prepare_batch(empty)?.commit();
-        Ok(())
-    })?;
     let mut bytes = automation_structures::TypedAllocation::try_new(
         &vec![1, 2],
         automation_structures::UnrestrictedAllocation,
@@ -481,11 +494,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fail_at(0, || columns.prepare_row(&items)),
         Err(ReductionRowError::StorageUnavailable)
     ));
+    let fallback_operators = vec![CheckedSignedAdd; 5];
+    let mut fallback = ReductionColumns::try_new(&fallback_operators, 2)?;
+    let fallback_items = vec![7, -4, 8, 2, -3];
+    assert!(matches!(
+        fail_at(0, || fallback.prepare_row(&fallback_items)),
+        Err(ReductionRowError::StorageUnavailable)
+    ));
+    assert!(matches!(
+        fail_at(0, || {
+            fallback.prepare_row_with_storage::<automation_structures::connectives::buffer::InlineStorage<4>>(&fallback_items)
+        }),
+        Err(ReductionRowError::StorageUnavailable)
+    ));
+    assert_eq!(fallback.column_count(), 5);
+    assert_eq!(fallback.processed_len(), 0);
+    for column in 0..5 {
+        assert_eq!(fallback.column_processed(column), Some(0));
+        assert_eq!(fallback.column_result(column), Some(0));
+    }
+    let fallback_row = fallback.prepare_row(&fallback_items)?;
+    no_allocations(|| fallback_row.commit());
+    for (column, item) in fallback_items.iter().copied().enumerate() {
+        assert_eq!(fallback.column_processed(column), Some(1));
+        assert_eq!(fallback.column_result(column), Some(item));
+    }
+    let fallback_row = fallback
+        .prepare_row_with_storage::<automation_structures::connectives::buffer::InlineStorage<4>>(
+            &fallback_items,
+        )?;
+    no_allocations(|| fallback_row.commit());
+    for (column, item) in fallback_items.iter().copied().enumerate() {
+        assert_eq!(fallback.column_processed(column), Some(2));
+        assert_eq!(fallback.column_result(column), item.checked_add(item));
+    }
+    let row = no_allocations(|| {
+        columns.prepare_row_with_storage::<automation_structures::connectives::buffer::InlineStorage<4>>(&items)
+    })?;
+    no_allocations(|| row.cancel());
     for column in 0..3 {
         assert_eq!(columns.column_processed(column), Some(0));
         assert_eq!(columns.column_result(column), Some(0));
     }
-    let row = columns.prepare_row(&items)?;
+    let row = no_allocations(|| {
+        columns.prepare_row_with_storage::<automation_structures::connectives::buffer::InlineStorage<4>>(&items)
+    })?;
+    no_allocations(|| drop(row));
+    for column in 0..3 {
+        assert_eq!(columns.column_processed(column), Some(0));
+        assert_eq!(columns.column_result(column), Some(0));
+    }
+    let row = no_allocations(|| {
+        columns.prepare_row_with_storage::<automation_structures::connectives::buffer::InlineStorage<4>>(&items)
+    })?;
     no_allocations(|| row.commit());
     for (column, item) in items.iter().copied().enumerate() {
         assert_eq!(columns.column_processed(column), Some(1));
@@ -497,7 +558,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         automation_structures::NullableSigned::Value(1),
     ];
     let original = minima.as_ptr();
-    for site in 0..3 {
+    for site in 0..4 {
         let (reason, returned) = fail_at(site, || {
             automation_structures::CompetitiveSelectionMinimum::try_new(
                 automation_structures::SignedRowOrder {

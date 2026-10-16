@@ -118,9 +118,17 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
     pub closed spec fn issued_spec(&self) -> nat { self.issued.value_spec() }
     /// AuditSink-owned lifetime change ceiling.
     pub closed spec fn change_limit_spec(&self) -> nat { self.audit.max_log_len as nat }
+    /// Fixed live-listener ceiling owned by the canonical Budget.
+    pub closed spec fn listener_limit_spec(&self) -> u64 { self.listener_budget.capacity }
     /// Exact retained registration under this owner's declared root scope.
     pub closed spec fn registered_spec(&self, token: SignalListener) -> bool {
         token.scope == self.scope && self.listeners.contains_key_identity(token.generation)
+    }
+    /// Exact token binding at one current Registry position. Removal can shift positions;
+    /// callers must retain or re-establish this binding rather than trust a stale index.
+    pub open spec fn registered_at_spec(&self, token: SignalListener, index: usize) -> bool {
+        token.scope_spec() == self.scope_spec() && index < self.listeners_spec().len()
+            && self.listeners_spec()[index as int].0 == token.generation_spec()
     }
     /// Exact pending relation from the same listener Registry and AuditSink head.
     pub closed spec fn pending_spec(&self, token: SignalListener) -> bool {
@@ -160,6 +168,16 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         ensures self.scope_spec() == before.scope_spec(), self.value_spec() == before.value_spec(),
             self.history_spec() == before.history_spec(), self.listeners_spec() == before.listeners_spec(),
             self.issued_spec() == before.issued_spec(),
+            self.change_limit_spec() == before.change_limit_spec(),
+            self.listener_limit_spec() == before.listener_limit_spec(),
+    {}
+
+    /// Export the Budget and AuditSink bounds.
+    pub proof fn expose_limits(&self)
+        requires self.inv(),
+        ensures self.listeners_spec().len() <= self.listener_limit_spec() as nat,
+            self.history_spec().len() <= self.change_limit_spec(),
+            self.issued_spec() <= u64::MAX as nat,
     {}
 
     /// Export listener state as a projection of the actual retained entries/head.
@@ -178,6 +196,9 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
                     && self.listeners_spec()[i].1.position == self.history_spec().len()),
             self.caught_up_spec(token) ==> self.registered_spec(token) && !self.pending_spec(token),
             self.pending_spec(token) ==> self.registered_spec(token) && !self.caught_up_spec(token),
+            self.registered_spec(token) ==> self.pending_spec(token) || self.caught_up_spec(token),
+            self.registered_spec(token) ==> 0 < token.generation_spec() as nat
+                && token.generation_spec() as nat <= self.issued_spec(),
     {
         crate::primitives::resource_registry::identity_entries_are_exact(self.listeners.entries@);
         reveal(SignalListener::scope_spec);
@@ -187,6 +208,9 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
             if self.registered_spec(token) {
                 let i = choose|i: int| 0 <= i < entries.len() && entries[i].0 == token.generation;
                 assert(0 <= i < self.listeners_spec().len() && self.listeners_spec()[i].0 == token.generation_spec());
+                self.expose_listener(token.generation, entries[i].1);
+                assert(entries[i].1.position < self.history_spec().len()
+                    || entries[i].1.position == self.history_spec().len());
             }
             if exists|i: int| 0 <= i < entries.len() && #[trigger] entries[i].0 == token.generation_spec() {
                 let i = choose|i: int| 0 <= i < entries.len() && entries[i].0 == token.generation_spec();
@@ -217,6 +241,22 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         }
     }
 
+    /// Export the listener's positional Cursor state.
+    pub proof fn expose_positional_listener_state(&self, token: SignalListener, index: usize)
+        requires self.inv(), self.registered_at_spec(token, index),
+        ensures self.registered_spec(token),
+            self.listeners_spec()[index as int].1.position <= self.history_spec().len(),
+            self.pending_spec(token) ==
+                (self.listeners_spec()[index as int].1.position < self.history_spec().len()),
+            self.caught_up_spec(token) ==
+                (self.listeners_spec()[index as int].1.position == self.history_spec().len()),
+    {
+        crate::primitives::resource_registry::identity_entries_are_exact(self.listeners.entries@);
+        crate::primitives::resource_registry::identity_entry_at(self.listeners.entries@, index as int);
+        let cursor = self.listeners.entries@[index as int].1;
+        self.expose_listener(token.generation, cursor);
+    }
+
     proof fn expose_listener(&self, generation: u64, cursor: Cursor)
         requires self.inv(), self.listeners.maps_key(generation, cursor),
         ensures 0 < generation <= self.issued_spec(), cursor.position <= self.history_spec().len(),
@@ -243,6 +283,7 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         ensures owner.inv(), owner.scope_spec() == scope, owner.value_spec() == initial,
             owner.history_spec().len() == 0, owner.listeners_spec().len() == 0, owner.issued_spec() == 0,
             owner.change_limit_spec() == change_ceiling,
+            owner.listener_limit_spec() == listener_ceiling,
     {
         Self { scope, audit: AuditSink::with_summary(change_ceiling, LastSignalValue { initial }),
             listeners: crate::primitives::resource_registry::ResourceRegistry::new(),
@@ -250,7 +291,7 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
             issued: crate::connectives::counter::Counter::new(0) }
     }
 
-    /// Observe the retained latest value without another value owner.
+    /// Read the latest value.
     pub fn value(&self) -> (value: T)
         requires self.inv(), ensures value == self.value_spec(),
     { self.audit.carry() }
@@ -263,6 +304,21 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         requires self.inv(), ensures count as int == self.listeners_spec().len(),
     { self.listener_budget.allocated }
 
+    /// Query this owner's exact changed-value admission without publication.
+    /// An identical value is an enabled stutter even at the change ceiling.
+    /// Changed values use the retained AuditSink's existing Record preparation.
+    pub fn can_set_value(&self, value: T) -> (admitted: bool)
+        requires self.inv(),
+        ensures admitted == (value == self.value_spec()
+            || self.history_spec().len() < self.change_limit_spec()),
+    {
+        if value.value_eq(&self.audit.carry()) { return true; }
+        match self.audit.prepare_record(value) {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+
     /// Publish one changed value through the shared Record action.
     ///
     /// # Errors
@@ -271,12 +327,17 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         requires old(self).inv(),
         ensures final(self).inv(), final(self).scope_spec() == old(self).scope_spec(),
             final(self).change_limit_spec() == old(self).change_limit_spec(),
+            final(self).listener_limit_spec() == old(self).listener_limit_spec(),
             final(self).listeners_spec() == old(self).listeners_spec(),
             forall|token: SignalListener| #[trigger] final(self).registered_spec(token) == old(self).registered_spec(token),
             final(self).issued_spec() == old(self).issued_spec(),
             result == Ok(false) ==> final(self).same_state(*old(self)),
             result == Ok(true) ==> final(self).value_spec() == value
-                && final(self).history_spec().len() == old(self).history_spec().len() + 1,
+                && final(self).history_spec().len() == old(self).history_spec().len() + 1
+                && final(self).history_spec() == old(self).history_spec().push(
+                    crate::primitives::audit_sink::AuditEntry {
+                        operation: value, prev_hash: old(self).value_spec(), hash: value
+                    }),
             result is Err ==> final(self).same_state(*old(self)) && result == Err(SignalProfileError::ChangeCapacity),
             (result == Ok(false)) == (value == old(self).value_spec()),
             (result == Ok(true)) == (value != old(self).value_spec()
@@ -295,6 +356,7 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         requires old(self).inv(),
         ensures final(self).inv(), final(self).scope_spec() == old(self).scope_spec(),
             final(self).change_limit_spec() == old(self).change_limit_spec(),
+            final(self).listener_limit_spec() == old(self).listener_limit_spec(),
             final(self).history_spec() == old(self).history_spec(), final(self).value_spec() == old(self).value_spec(),
             result matches Ok(token) ==> token.scope_spec() == final(self).scope_spec()
                 && final(self).registered_spec(token)
@@ -302,6 +364,17 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
                 && final(self).issued_spec() == old(self).issued_spec() + 1
                 && final(self).listeners_spec() == old(self).listeners_spec().push((token.generation_spec(), Cursor { position: 0 })),
             result is Err ==> final(self).same_state(*old(self)),
+            result is Err ==> result == Err(SignalProfileError::ListenerCapacity)
+                || result == Err(SignalProfileError::GenerationExhausted)
+                || result == Err(SignalProfileError::StorageUnavailable),
+            (result == Err(SignalProfileError::ListenerCapacity)) ==
+                (old(self).listeners_spec().len() >= old(self).listener_limit_spec() as nat),
+            (result == Err(SignalProfileError::GenerationExhausted)) ==
+                (old(self).listeners_spec().len() < old(self).listener_limit_spec() as nat
+                    && old(self).issued_spec() == u64::MAX as nat),
+            result == Err(SignalProfileError::StorageUnavailable) ==>
+                old(self).listeners_spec().len() < old(self).listener_limit_spec() as nat
+                    && old(self).issued_spec() < u64::MAX as nat,
     {
         if !self.listener_budget.admits_additional(1, 0) { return Err(SignalProfileError::ListenerCapacity); }
         if !self.issued.can_increment() { return Err(SignalProfileError::GenerationExhausted); }
@@ -310,7 +383,7 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         let _advanced = self.issued.try_increment(); assert(_advanced);
         let generation = self.issued.value();
         assert(!self.listeners.contains_key_identity(generation));
-        self.listeners.register_key(generation, Cursor::new(0));
+        self.listeners.register_absent_key(generation, Cursor::new(0));
         Ok(SignalListener { scope: self.scope, generation })
     }
 
@@ -337,6 +410,131 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         }
     }
 
+    /// Observe a listener at its checked current position in constant time.
+    ///
+    /// # Errors
+    /// Refuses a foreign scope, out-of-bounds position or mismatched generation.
+    /// Removal may shift a surviving listener, so positions are checked on every call.
+    pub fn pending_at(&self, token: SignalListener, index: usize)
+        -> (result: Result<bool, SignalProfileError>)
+        requires self.inv(),
+        ensures result matches Ok(pending) ==> self.registered_at_spec(token, index)
+                && self.registered_spec(token) && pending == self.pending_spec(token),
+            (result is Err) == !self.registered_at_spec(token, index),
+            (result == Err(SignalProfileError::ForeignScope)) == (token.scope_spec() != self.scope_spec()),
+            (result == Err(SignalProfileError::UnknownListener)) ==
+                (token.scope_spec() == self.scope_spec() && !self.registered_at_spec(token, index)),
+    {
+        if token.scope != self.scope { return Err(SignalProfileError::ForeignScope); }
+        let generation = match crate::primitives::resource_registry::RegistryStorage::key_at(
+            &self.listeners.entries, index) {
+            Some(generation) => *generation,
+            None => return Err(SignalProfileError::UnknownListener),
+        };
+        if generation != token.generation { return Err(SignalProfileError::UnknownListener); }
+        let cursor = match crate::primitives::resource_registry::RegistryStorage::value_at(
+            &self.listeners.entries, index) {
+            Some(cursor) => cursor,
+            None => { assert(false); return Err(SignalProfileError::UnknownListener); },
+        };
+        proof {
+            crate::primitives::resource_registry::identity_entries_are_exact(self.listeners.entries@);
+            crate::primitives::resource_registry::identity_entry_at(self.listeners.entries@, index as int);
+            self.expose_listener(token.generation, *cursor);
+        }
+        Ok(cursor.position < self.audit.committed_count())
+    }
+
+    /// Catch up one listener at its checked current Registry position in constant time.
+    /// The token and position identify the same retained Cursor as `notify`.
+    ///
+    /// # Errors
+    /// Refuses a foreign scope, out-of-bounds position or mismatched generation unchanged.
+    pub fn notify_at(&mut self, token: SignalListener, index: usize)
+        -> (result: Result<SignalObservation<T>, SignalProfileError>)
+        requires old(self).inv(),
+        ensures final(self).inv(), final(self).history_spec() == old(self).history_spec(),
+            final(self).scope_spec() == old(self).scope_spec(),
+            final(self).change_limit_spec() == old(self).change_limit_spec(),
+            final(self).listener_limit_spec() == old(self).listener_limit_spec(),
+            final(self).value_spec() == old(self).value_spec(), final(self).issued_spec() == old(self).issued_spec(),
+            forall|other: SignalListener| #[trigger] final(self).registered_spec(other) == old(self).registered_spec(other),
+            (result is Err) == !old(self).registered_at_spec(token, index),
+            result is Err ==> final(self).same_state(*old(self)) && *final(self) == *old(self),
+            (result == Err(SignalProfileError::ForeignScope)) == (token.scope_spec() != old(self).scope_spec()),
+            (result == Err(SignalProfileError::UnknownListener)) ==
+                (token.scope_spec() == old(self).scope_spec() && !old(self).registered_at_spec(token, index)),
+            result matches Ok(observed) ==> old(self).registered_at_spec(token, index)
+                && final(self).registered_at_spec(token, index)
+                && observed.value == old(self).value_spec()
+                && observed.head == old(self).history_spec().len()
+                && observed.changed == old(self).pending_spec(token)
+                && final(self).caught_up_spec(token)
+                && final(self).listeners_spec() == old(self).listeners_spec().update(
+                    index as int, (token.generation_spec(), Cursor {
+                        position: old(self).history_spec().len() as usize
+                    })),
+    {
+        if token.scope != self.scope { return Err(SignalProfileError::ForeignScope); }
+        let generation = match crate::primitives::resource_registry::RegistryStorage::key_at(
+            &self.listeners.entries, index) {
+            Some(generation) => *generation,
+            None => return Err(SignalProfileError::UnknownListener),
+        };
+        if generation != token.generation { return Err(SignalProfileError::UnknownListener); }
+        let ghost before = *self;
+        proof {
+            crate::primitives::resource_registry::identity_entries_are_exact(self.listeners.entries@);
+            crate::primitives::resource_registry::identity_entry_at(self.listeners.entries@, index as int);
+        }
+        let head = self.audit.committed_count();
+        let value = self.audit.carry();
+        let changed = {
+            let cursor = match self.listeners.value_mut_at(index) {
+                Some(cursor) => cursor,
+                None => { assert(false); return Err(SignalProfileError::UnknownListener); },
+            };
+            proof { before.expose_listener(token.generation, *cursor); }
+            let changed = cursor.position < head;
+            assert(changed == before.pending_spec(token));
+            cursor.advance_to(head);
+            changed
+        };
+        proof {
+            assert(self.listeners.entries@ == before.listeners.entries@.update(
+                index as int, (token.generation, Cursor { position: head })));
+            assert forall|i: int| 0 <= i < self.listeners.entries@.len() implies {
+                let entry = #[trigger] self.listeners.entries@[i];
+                &&& 0 < entry.0 <= self.issued.value_spec()
+                &&& entry.1.position <= self.history_spec().len()
+            } by {
+                if i != index { assert(self.listeners.entries@[i] == before.listeners.entries@[i]); }
+            }
+            crate::primitives::resource_registry::identity_entries_are_exact(self.listeners.entries@);
+            assert(self.inv());
+            assert(self.registered_at_spec(token, index));
+            self.expose_positional_listener_state(token, index);
+            assert(self.caught_up_spec(token));
+            assert forall|other: SignalListener| #[trigger] self.registered_spec(other) == before.registered_spec(other) by {
+                if other.scope == self.scope {
+                    if self.registered_spec(other) {
+                        let i = choose|i: int| 0 <= i < self.listeners.entries@.len()
+                            && self.listeners.entries@[i].0 == other.generation;
+                        assert(before.listeners.entries@[i].0 == other.generation);
+                        assert(before.listeners.contains_key_identity(other.generation));
+                    }
+                    if before.registered_spec(other) {
+                        let i = choose|i: int| 0 <= i < before.listeners.entries@.len()
+                            && before.listeners.entries@[i].0 == other.generation;
+                        assert(self.listeners.entries@[i].0 == other.generation);
+                        assert(self.listeners.contains_key_identity(other.generation));
+                    }
+                }
+            }
+        }
+        Ok(SignalObservation { value, head, changed })
+    }
+
     /// Catch one retained Cursor up to the same AuditSink head, coalescing changes.
     ///
     /// # Errors
@@ -345,14 +543,25 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         requires old(self).inv(),
         ensures final(self).inv(), final(self).history_spec() == old(self).history_spec(),
             final(self).scope_spec() == old(self).scope_spec(),
+            final(self).change_limit_spec() == old(self).change_limit_spec(),
+            final(self).listener_limit_spec() == old(self).listener_limit_spec(),
             final(self).value_spec() == old(self).value_spec(), final(self).issued_spec() == old(self).issued_spec(),
             forall|other: SignalListener| #[trigger] final(self).registered_spec(other) == old(self).registered_spec(other),
             (result is Err) == !old(self).registered_spec(token),
             result is Err ==> final(self).same_state(*old(self)),
+            (result == Err(SignalProfileError::ForeignScope)) == (token.scope_spec() != old(self).scope_spec()),
+            (result == Err(SignalProfileError::UnknownListener)) ==
+                (token.scope_spec() == old(self).scope_spec() && !old(self).registered_spec(token)),
             result matches Ok(observed) ==> observed.value == old(self).value_spec()
                 && observed.head == old(self).history_spec().len()
                 && observed.changed == old(self).pending_spec(token)
-                && final(self).caught_up_spec(token),
+                && final(self).caught_up_spec(token)
+                && (exists|i: int| 0 <= i < old(self).listeners_spec().len()
+                    && old(self).listeners_spec()[i].0 == token.generation_spec()
+                    && final(self).listeners_spec() == old(self).listeners_spec().update(
+                        i, (token.generation_spec(), Cursor {
+                            position: old(self).history_spec().len() as usize
+                        }))),
     {
         if token.scope != self.scope { return Err(SignalProfileError::ForeignScope); }
         let ghost before = *self;
@@ -388,6 +597,17 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
                 }
                 let caught = choose|caught: int| 0 <= caught < self.listeners.entries@.len()
                     && self.listeners.entries@[caught] == (token.generation, Cursor { position: head });
+                assert(before.listeners.entries@[caught].0 == token.generation);
+                assert(self.listeners.entries@ =~= before.listeners.entries@.update(
+                    caught, (token.generation, Cursor { position: head })));
+                assert(0 <= caught < before.listeners_spec().len());
+                assert(before.listeners_spec()[caught].0 == token.generation_spec());
+                assert(self.listeners_spec() == before.listeners_spec().update(caught,
+                    (token.generation_spec(), Cursor { position: before.history_spec().len() as usize })));
+                assert(exists|i: int| 0 <= i < before.listeners_spec().len()
+                    && before.listeners_spec()[i].0 == token.generation_spec()
+                    && self.listeners_spec() == before.listeners_spec().update(i,
+                        (token.generation_spec(), Cursor { position: before.history_spec().len() as usize })));
                 assert(self.caught_up_spec(token));
             }
             assert forall|other: SignalListener| #[trigger] self.registered_spec(other) == before.registered_spec(other) by {
@@ -418,11 +638,18 @@ impl<T: Copy + crate::value_eq::ValueEq> SummarySignal<T> {
         requires old(self).inv(),
         ensures final(self).inv(), final(self).history_spec() == old(self).history_spec(),
             final(self).scope_spec() == old(self).scope_spec(),
+            final(self).change_limit_spec() == old(self).change_limit_spec(),
+            final(self).listener_limit_spec() == old(self).listener_limit_spec(),
             final(self).value_spec() == old(self).value_spec(), final(self).issued_spec() == old(self).issued_spec(),
             (result is Err) == !old(self).registered_spec(token),
             result is Err ==> final(self).same_state(*old(self)),
+            (result == Err(SignalProfileError::ForeignScope)) == (token.scope_spec() != old(self).scope_spec()),
+            (result == Err(SignalProfileError::UnknownListener)) ==
+                (token.scope_spec() == old(self).scope_spec() && !old(self).registered_spec(token)),
             result is Ok ==> final(self).listeners_spec().len() + 1 == old(self).listeners_spec().len()
-                && !final(self).registered_spec(token),
+                && !final(self).registered_spec(token)
+                && final(self).listeners_spec() == crate::primitives::resource_registry::without_identity_sequence(
+                    old(self).listeners_spec(), token.generation_spec()),
     {
         if token.scope != self.scope { return Err(SignalProfileError::ForeignScope); }
         let ghost before = *self;
@@ -778,4 +1005,48 @@ impl Signal {
     }
 }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SignalProfileError, SummarySignal};
+    use crate::connectives::counter::Counter;
+
+    #[test]
+    fn summary_signal_generation_exhaustion_preserves_valid_owner_and_guard_order() {
+        let mut signal = SummarySignal::new(73, 0u64, 1, 1);
+        // A valid empty Registry and Budget place no upper constraint below
+        // the Counter's own representation ceiling. Seed that valid prestate
+        // in this owner-local test instead of executing u64::MAX increments.
+        signal.issued = Counter::new(u64::MAX);
+        let before = (
+            signal.value(),
+            signal.change_count(),
+            signal.listener_count(),
+            signal.issued.value(),
+            signal.listeners.entries.len(),
+            signal.listeners.entries.capacity(),
+        );
+        assert_eq!(
+            signal.register(),
+            Err(SignalProfileError::GenerationExhausted)
+        );
+        assert_eq!(
+            (
+                signal.value(),
+                signal.change_count(),
+                signal.listener_count(),
+                signal.issued.value(),
+                signal.listeners.entries.len(),
+                signal.listeners.entries.capacity(),
+            ),
+            before
+        );
+        let mut zero = SummarySignal::new(74, 0u64, 0, 1);
+        zero.issued = Counter::new(u64::MAX);
+        assert_eq!(zero.register(), Err(SignalProfileError::ListenerCapacity));
+        assert_eq!(zero.listener_count(), 0);
+        assert_eq!(zero.issued.value(), u64::MAX);
+        assert_eq!(zero.change_count(), 0);
+    }
 }

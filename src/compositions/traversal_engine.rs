@@ -282,7 +282,7 @@ pub struct DiscoveredHierarchy { profile: RootedTraversal }
 impl DiscoveredHierarchy {
     /// Exact consumed profile, without an exposed mutator.
     pub closed spec fn profile_spec(&self) -> RootedTraversal { self.profile }
-    /// Completion requires both actual canonical owners to be exhausted.
+    /// Completion requires both owners to be exhausted.
     pub closed spec fn inv(&self) -> bool {
         self.profile.inv() && self.profile.frontier_spec().len() == 0
             && self.profile.considered_spec() == self.profile.hierarchy_spec().num_nodes
@@ -360,6 +360,8 @@ pub struct CandidateTraversal<C, T> {
     hierarchy: QualityHierarchy,
     work: TraversalEngine,
     closed: Marker,
+    arrangement: Option<IndexArrangement>,
+    order_cursor: Cursor,
 }
 
 impl<C, T> CandidateTraversal<C, T> {
@@ -385,6 +387,20 @@ impl<C, T> CandidateTraversal<C, T> {
     pub closed spec fn frontier_spec(&self) -> Seq<usize> { self.work.queue.values@ }
     /// Dense original custody, parent discovery and exact work accounting.
     pub closed spec fn inv(&self) -> bool {
+        &&& match self.arrangement {
+            None => self.order_cursor.position == 0,
+            Some(arrangement) => {
+                &&& arrangement.inv()
+                &&& arrangement.positions_spec().len() <= self.candidates_spec().len()
+                &&& self.order_cursor.position <= arrangement.positions_spec().len()
+                &&& (arrangement.positions_spec().len() == self.candidates_spec().len() ==>
+                    crate::connectives::ordering_pass::arranged(arrangement.positions_spec(),
+                        &HierarchyLevelOrder { hierarchy: &self.hierarchy }))
+                &&& (arrangement.positions_spec().len() == self.candidates_spec().len() ==>
+                    (forall|rank: int| 0 <= rank < self.order_cursor.position ==>
+                        #[trigger] self.visited_spec(arrangement.positions_spec()[rank])))
+            }
+        }
         &&& self.candidates.unique_identities()
         &&& self.candidates_spec().len() <= self.hierarchy.num_nodes
         &&& forall|i: int| 0 <= i < self.candidates_spec().len() ==> #[trigger] self.candidates_spec()[i].0 == i
@@ -458,7 +474,10 @@ impl<C, T> CandidateTraversal<C, T> {
             }
             marked_count_changed(initial_markers, work.visited@, 0, work.visited@.len() as int);
         }
-        Ok(Self { context, scope, candidates, hierarchy, work, closed: Marker::new(false) })
+        Ok(Self {
+            context, scope, candidates, hierarchy, work, closed: Marker::new(false),
+            arrangement: None, order_cursor: Cursor::new(0),
+        })
     }
 
     /// Retain a root or an extension of an already discovered parent.
@@ -510,7 +529,7 @@ impl<C, T> CandidateTraversal<C, T> {
             crate::primitives::resource_registry::without_identity_to_absent(
                 self.candidates.entries@, index, self.candidates.entries@.len() as int);
         }
-        self.candidates.register_key(index, value);
+        self.candidates.register_absent_key(index, value);
         proof {
             assert forall|i: usize| i < self.candidates_spec().len()
                 && #[trigger] self.hierarchy.parent@[i as int] < self.hierarchy.num_nodes implies
@@ -544,15 +563,38 @@ impl<C, T> CandidateTraversal<C, T> {
             result matches Ok(None) ==> *final(self) == *old(self) && final(self).pending_spec() == 0,
     {
         let count = self.candidates.entries.len();
-        let order = HierarchyLevelOrder { hierarchy: &self.hierarchy };
-        let arrangement = match IndexArrangement::try_new(count, &order) {
-            Ok(arrangement) => arrangement,
-            Err(_) => return Err(CandidateTraversalError::StorageUnavailable),
+        let cache_current = match &self.arrangement {
+            Some(arrangement) => arrangement.len() == count,
+            None => false,
         };
+        let prepared = if cache_current {
+            None
+        } else {
+            let order = HierarchyLevelOrder { hierarchy: &self.hierarchy };
+            match IndexArrangement::try_new(count, &order) {
+                Ok(arrangement) => Some(arrangement),
+                Err(_) => return Err(CandidateTraversalError::StorageUnavailable),
+            }
+        };
+        let arrangement = match &prepared {
+            Some(arrangement) => arrangement,
+            None => match &self.arrangement {
+                Some(arrangement) => arrangement,
+                None => {
+                    proof { assert(false); }
+                    return Err(CandidateTraversalError::StorageUnavailable);
+                },
+            },
+        };
+        proof { arrangement.expose_certificate(); }
         let positions = arrangement.positions();
-        let mut cursor = Cursor::new(0);
+        let ghost chosen_order = *arrangement;
+        let mut cursor = Cursor::new(if cache_current { self.order_cursor.position } else { 0 });
         while cursor.position < count
             invariant self.inv(), count == self.candidates_spec().len(), arrangement.inv(),
+                *arrangement == chosen_order,
+                prepared is Some ==> prepared.unwrap() == chosen_order,
+                prepared is None ==> self.arrangement == Some(chosen_order),
                 *self == *old(self),
                 arrangement.positions_spec().len() == count,
                 crate::connectives::ordering_pass::permutation(arrangement.positions_spec(), count as nat),
@@ -591,6 +633,30 @@ impl<C, T> CandidateTraversal<C, T> {
                         assert(self.work.visited_contains_spec(i as usize) == before_markers[i].marked);
                     }
                     marked_count_changed(before_markers, self.work.visited@, (index + 1) as int, self.work.visited@.len() as int);
+                }
+                let ghost selected_rank = cursor.position;
+                let ghost selected_positions = positions@;
+                cursor.advance_to(cursor.position + 1);
+                proof {
+                    assert forall|rank: int| 0 <= rank < cursor.position implies
+                        #[trigger] self.visited_spec(selected_positions[rank]) by {
+                        if rank < selected_rank {
+                            assert(before_markers[(selected_positions[rank] + 1) as int].marked);
+                        } else {
+                            assert(rank == selected_rank);
+                            assert(selected_positions[rank] == index);
+                        }
+                    }
+                }
+                if let Some(arrangement) = prepared {
+                    self.arrangement = Some(arrangement);
+                }
+                self.order_cursor = cursor;
+                proof {
+                    assert(self.arrangement == Some(chosen_order));
+                    assert(chosen_order.positions_spec() == selected_positions);
+                    assert(self.arrangement is Some);
+                    assert(self.arrangement.unwrap().positions_spec() == selected_positions);
                 }
                 return Ok(Some(CandidateId { scope: self.scope, index }));
             }
@@ -647,7 +713,7 @@ impl<C, T> CandidateTraversal<C, T> {
         requires self.inv(), ensures pending == self.pending_spec(),
     {
         proof { self.expose_pending(); }
-        self.candidates.entries.len() + 1 - self.work.visited_count()
+        self.candidates.entries.len() + 1 - self.work.accepted.len()
     }
     /// Borrow a retained original value; foreign scope and unknown identities return None.
     pub fn get(&self, id: CandidateId) -> (value: Option<&T>)
@@ -657,15 +723,9 @@ impl<C, T> CandidateTraversal<C, T> {
             && id.index_spec() < self.candidates_spec().len()
             && *value == self.candidates_spec()[id.index_spec() as int].1,
     {
+        use crate::primitives::resource_registry::RegistryStorage;
         if id.scope != self.scope || id.index >= self.candidates.entries.len() { return None; }
-        proof { crate::primitives::resource_registry::identity_entry_at(self.candidates.entries@, id.index as int); }
-        match self.candidates.lookup_key_ref(&id.index) {
-            Some(value) => {
-                proof { self.candidates.unique_identity_value(id.index, *value, self.candidates.entries@[id.index as int].1); }
-                Some(value)
-            },
-            None => { assert(false); None },
-        }
+        self.candidates.entries.value_at(id.index)
     }
     /// Close new extension admission while retaining all drainable work.
     pub fn close(&mut self)
@@ -673,7 +733,23 @@ impl<C, T> CandidateTraversal<C, T> {
         ensures final(self).inv(), final(self).closed_spec(),
             final(self).candidates_spec() == old(self).candidates_spec(),
             final(self).context_spec() == old(self).context_spec(), final(self).pending_spec() == old(self).pending_spec(),
-    { let _ = self.closed.set(); }
+    {
+        let ghost before = *self;
+        let _ = self.closed.set();
+        proof {
+            assert(self.arrangement == before.arrangement);
+            assert(self.order_cursor == before.order_cursor);
+            assert(self.work == before.work);
+            if let Some(arrangement) = &self.arrangement {
+                if arrangement.positions_spec().len() == self.candidates_spec().len() {
+                    assert forall|rank: int| 0 <= rank < self.order_cursor.position implies
+                        #[trigger] self.visited_spec(arrangement.positions_spec()[rank]) by {
+                        assert(before.visited_spec(arrangement.positions_spec()[rank]));
+                    }
+                }
+            }
+        }
+    }
 
     /// Seal only a closed, completely discovered candidate set.
     ///
@@ -702,14 +778,42 @@ impl<C, T> CandidateTraversal<C, T> {
             let ghost before = owner;
             if owner.work.queue_contains(cursor.position + 1) { owner.work.skip(cursor.position + 1); }
             proof {
+                assert(before.inv());
+                assert(owner.closed_spec());
+                assert(owner.hierarchy == before.hierarchy);
+                assert(owner.candidates_spec() == before.candidates_spec());
+                assert(owner.work.visited@ == before.work.visited@);
+                assert(owner.work.accepted == before.work.accepted);
                 assert forall|i: usize| i < owner.hierarchy.num_nodes implies {
                     &&& #[trigger] owner.work.visited_contains_spec((i + 1) as usize) == owner.work.accepted_contains_spec((i + 1) as usize)
                     &&& (i >= owner.candidates_spec().len() ==> !owner.work.visited_contains_spec((i + 1) as usize))
                     &&& (i < owner.candidates_spec().len() || !owner.closed_spec()) ==>
                         owner.work.queue_contains_spec((i + 1) as usize) == !owner.work.visited_contains_spec((i + 1) as usize)
                 } by {
-                    assert(before.work.queue_contains_spec((i + 1) as usize) == !before.work.visited_contains_spec((i + 1) as usize)
-                        || i >= count);
+                    assert(owner.work.visited_contains_spec((i + 1) as usize) == before.work.visited_contains_spec((i + 1) as usize));
+                    assert(owner.work.accepted_contains_spec((i + 1) as usize) == before.work.accepted_contains_spec((i + 1) as usize));
+                    assert(before.work.visited_contains_spec((i + 1) as usize) == before.work.accepted_contains_spec((i + 1) as usize));
+                    if i < count {
+                        assert(i < cursor.position);
+                        assert((i + 1) as usize != (cursor.position + 1) as usize);
+                        assert(before.work.queue_contains_spec((i + 1) as usize) == !before.work.visited_contains_spec((i + 1) as usize));
+                        assert(owner.work.queue_contains_spec((i + 1) as usize) == before.work.queue_contains_spec((i + 1) as usize));
+                    } else {
+                        assert(!before.work.visited_contains_spec((i + 1) as usize));
+                    }
+                }
+                assert(owner.arrangement == before.arrangement);
+                assert(owner.order_cursor == before.order_cursor);
+                assert(owner.hierarchy == before.hierarchy);
+                assert(owner.candidates_spec() == before.candidates_spec());
+                assert(owner.work.visited@ == before.work.visited@);
+                if let Some(arrangement) = &owner.arrangement {
+                    if arrangement.positions_spec().len() == owner.candidates_spec().len() {
+                        assert forall|rank: int| 0 <= rank < owner.order_cursor.position implies
+                            #[trigger] owner.visited_spec(arrangement.positions_spec()[rank]) by {
+                            assert(before.visited_spec(arrangement.positions_spec()[rank]));
+                        }
+                    }
                 }
                 assert(owner.inv());
             }

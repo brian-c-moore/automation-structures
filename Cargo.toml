@@ -1,6 +1,6 @@
 [package]
 name = "automation-structures"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Brian Moore"]
@@ -15,6 +15,7 @@ publish = ["crates-io"]
 include = [
     "/src/**",
     "/examples/**",
+    "/benches/**",
     "/tests/**",
     "/verification/**",
     "/Cargo.toml",
@@ -31,9 +32,6 @@ include = [
     "/.crate-quality.toml",
 ]
 
-# The research repository's pinned verifier checks this same Rust source.
-# Cargo supplies the ordinary downstream-consumer boundary.
-
 [lib]
 name = "automation_structures"
 path = "src/lib.rs"
@@ -47,6 +45,22 @@ proof-api = []
 [dependencies]
 vstd = "=0.0.0-2026-05-24-0157"
 indexmap = "=2.14.2"
+
+[dev-dependencies]
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "primitives"
+harness = false
+
+[[bench]]
+name = "compositions"
+harness = false
+required-features = ["proof-api"]
+
+[[bench]]
+name = "execution"
+harness = false
 
 [package.metadata.verus]
 verify = true

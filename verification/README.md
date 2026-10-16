@@ -6,9 +6,8 @@ checks that the published proof modules and relations can be used by another cra
 the extracted publication archive.
 
 Run `run_known_answer.sh` for concrete examples. It checks formatting and applies the manifest's
-Rust and Clippy policy to the 24 standalone entrypoints in `verification/known-answer/`, then runs
-the 23 known-answer programs. The registry cost probe is compiled and linted; its measurement run
-is separate. The runner also checks the catalog witness that exercises the carriers together.
+Rust and Clippy policy to the 23 standalone entrypoints in `verification/known-answer/`, then runs
+all 23 known-answer programs. The runner also checks the catalog witness that exercises the carriers together.
 For a focused development check, set `KNOWN_ANSWER_CASE=allocation_refusal_kat` (or another
 listed entrypoint) when calling the same runner. Package qualification always runs the full set.
 
@@ -37,5 +36,5 @@ PATH=/path/to/verus-directory:$PATH sh verification/run_packaged_verus_consumer.
 The downstream proof fixture includes typed audit summaries, indexed registry storage,
 fallible preparation and nondefault execution parameters. The known-answer programs cover
 allocation refusal and unchanged state after rejected actions. `run_dependency_boundary.sh`
-checks the extracted dependency boundary. These checks establish their recorded contracts;
-an expected negative case must fail for its declared diagnostic, not for an unrelated build error.
+checks the extracted dependency boundary. An expected negative case must fail for its declared
+diagnostic, not for an unrelated build error.
